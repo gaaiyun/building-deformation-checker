@@ -124,6 +124,7 @@ def check_table_statistics(
 
     cum_vals, rate_vals = _get_table_own_data(table)
     table_point_ids = _get_table_point_ids(table)
+    is_deep = bool(table.deep_points)
 
     # ── 锚索拉力 ─────────────────────────────────────────
     if table.category in (MonitoringCategory.ANCHOR_FORCE, MonitoringCategory.STRUT_FORCE):
@@ -167,10 +168,12 @@ def check_table_statistics(
 
         # ── 正方向最大统计 ────────────────────────────────
         if stats.positive_max_value is not None:
-            cross_ref = _check_cross_table_ref(
-                stats.positive_max_id, "正方向最大统计",
-                table_point_ids, table_label, issues,
-            )
+            cross_ref = False
+            if not is_deep:
+                cross_ref = _check_cross_table_ref(
+                    stats.positive_max_id, "正方向最大统计",
+                    table_point_ids, table_label, issues,
+                )
             if not cross_ref:
                 if not pos_vals:
                     issues.append(CheckIssue(
@@ -197,10 +200,12 @@ def check_table_statistics(
 
         # ── 负方向最大统计 ────────────────────────────────
         if stats.negative_max_value is not None:
-            cross_ref = _check_cross_table_ref(
-                stats.negative_max_id, "负方向最大统计",
-                table_point_ids, table_label, issues,
-            )
+            cross_ref = False
+            if not is_deep:
+                cross_ref = _check_cross_table_ref(
+                    stats.negative_max_id, "负方向最大统计",
+                    table_point_ids, table_label, issues,
+                )
             if not cross_ref:
                 if not neg_vals:
                     issues.append(CheckIssue(
@@ -227,10 +232,12 @@ def check_table_statistics(
 
     # ── 最大速率统计 ──────────────────────────────────────
     if rate_vals and stats.max_rate_value is not None:
-        cross_ref = _check_cross_table_ref(
-            stats.max_rate_id, "最大速率统计",
-            table_point_ids, table_label, issues,
-        )
+        cross_ref = False
+        if not is_deep:
+            cross_ref = _check_cross_table_ref(
+                stats.max_rate_id, "最大速率统计",
+                table_point_ids, table_label, issues,
+            )
         if not cross_ref:
             actual_rate_id, actual_rate_val = max(rate_vals, key=lambda x: abs(x[1]))
             if not _close(abs(actual_rate_val), abs(stats.max_rate_value), RATE_TOLERANCE):

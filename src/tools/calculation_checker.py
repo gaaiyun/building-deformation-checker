@@ -6,13 +6,8 @@
   累计变化 = 本次测值 - 初始测值
   变化速率 = 本次变化 / 时间间隔（天）
 
-逐条验证每个测点的计算结果。
-
-注意：
-- 高程类数据（竖向位移/沉降）单位为 m，差值 * 1000 = mm
-- 当报告只给出本次和初始值时，由于浮点精度限制（高程通常5位小数，
-  0.00001m = 0.01mm），累计值验证允许更大容差
-- 水位监测的"初始"可能不是建设初期值，累计可能包含历史叠加
+Uses TableVerificationConfig for adaptive tolerance/severity per table,
+instead of hardcoded category branches.
 """
 
 from __future__ import annotations
@@ -21,12 +16,13 @@ import logging
 from collections import Counter
 from typing import Optional
 
-from src.config import FLOAT_TOLERANCE, RATE_TOLERANCE
+from src.config import RATE_TOLERANCE
 from src.models.data_models import (
     CheckIssue,
     MonitoringCategory,
     MonitoringReport,
     MonitoringTable,
+    TableVerificationConfig,
 )
 
 logger = logging.getLogger(__name__)
@@ -56,7 +52,6 @@ def _infer_interval_days(table: MonitoringTable) -> Optional[float]:
             interval = pt.current_change / pt.change_rate
             if 0.5 < abs(interval) < 365:
                 intervals.append(round(abs(interval)))
-
     if not intervals:
         return None
     return Counter(intervals).most_common(1)[0][0]
@@ -68,36 +63,34 @@ def check_cumulative_change(
 ) -> None:
     """
     验证累计变化量 = 本次测值 - 初始测值。
-
-    高程类（m→mm 转换）容差更大，因为高程小数位有限导致精度损失。
-    水位类数据的"初始"含义可能不同于建设初期，仅做宽松检查。
+    Uses table.verification_config for tolerance and severity.
     """
-    is_elevation = table.category in (
-        MonitoringCategory.VERTICAL_DISP,
-        MonitoringCategory.SETTLEMENT,
-    )
-    is_water = table.category == MonitoringCategory.WATER_LEVEL
+    cfg = table.verification_config
+
+    if not cfg.initial_value_reliable:
+        pass
 
     for pt in table.points:
         if pt.initial_value is None or pt.current_value is None or pt.cumulative_change is None:
             continue
 
-        if is_elevation:
-            expected = (pt.current_value - pt.initial_value) * 1000.0
-            # 高程5位小数 → 0.01mm 精度，69次累积误差可达几mm
-            tol = max(FLOAT_TOLERANCE * 5, abs(pt.cumulative_change) * 0.05)
-        elif is_water:
-            expected = pt.current_value - pt.initial_value
-            # 水位数据"初始"含义可能不同，仅做大幅偏差检查
-            tol = max(FLOAT_TOLERANCE * 50, abs(pt.cumulative_change) * 0.2)
+        if cfg.unit_conversion != 1.0:
+            expected = (pt.current_value - pt.initial_value) * cfg.unit_conversion
         else:
             expected = pt.current_value - pt.initial_value
-            tol = FLOAT_TOLERANCE
+
+        tol = cfg.cumulative_tolerance
+        if abs(pt.cumulative_change) > 10:
+            tol = max(tol, abs(pt.cumulative_change) * 0.05)
 
         if not _close_enough(expected, pt.cumulative_change, tol):
-            severity = "error"
-            if is_elevation or is_water:
-                severity = "warning"
+            severity = cfg.severity_for_cumulative
+
+            hint = ""
+            if cfg.unit == "m":
+                hint = "（高程精度限制，可能需人工确认）"
+            elif not cfg.initial_value_reliable:
+                hint = "（初始基准可能不同，需人工确认）"
 
             issues.append(CheckIssue(
                 severity=severity,
@@ -109,10 +102,9 @@ def check_cumulative_change(
                 message=(
                     f"累计变化量与初始/本次测值推算不符: "
                     f"({_fmt(pt.current_value, 5)} - {_fmt(pt.initial_value, 5)})"
-                    f"{' × 1000' if is_elevation else ''}"
+                    f"{' × 1000' if cfg.unit_conversion != 1.0 else ''}"
                     f" = {_fmt(expected, 2)}, 报告值 = {_fmt(pt.cumulative_change, 2)}"
-                    f"{'（高程精度限制，可能需人工确认）' if is_elevation else ''}"
-                    f"{'（水位初始基准可能不同，需人工确认）' if is_water else ''}"
+                    f"{hint}"
                 ),
             ))
 
@@ -123,9 +115,12 @@ def check_change_rate(
     interval_days: Optional[float] = None,
 ) -> None:
     """验证 变化速率 = 本次变化量 / 间隔天数"""
+    cfg = table.verification_config
+
+    if interval_days is None:
+        interval_days = cfg.interval_days
     if interval_days is None:
         interval_days = _infer_interval_days(table)
-
     if interval_days is None:
         logger.warning("表 [%s] 无法推断监测间隔天数，跳过速率验证", table.monitoring_item)
         issues.append(CheckIssue(
@@ -140,6 +135,7 @@ def check_change_rate(
         return
 
     logger.info("表 [%s] 推断监测间隔 = %.0f 天", table.monitoring_item, interval_days)
+    rate_tol = cfg.rate_tolerance
 
     for pt in table.points:
         if pt.current_change is None or pt.change_rate is None:
@@ -149,7 +145,7 @@ def check_change_rate(
 
         expected_rate = pt.current_change / interval_days
 
-        if not _close_enough(expected_rate, pt.change_rate, RATE_TOLERANCE):
+        if not _close_enough(expected_rate, pt.change_rate, rate_tol):
             pt_interval = abs(pt.current_change / pt.change_rate) if abs(pt.change_rate) > 1e-6 else 0
             pt_interval_r = round(pt_interval)
             interval_is_clean = abs(pt_interval - pt_interval_r) < 0.3
@@ -183,10 +179,14 @@ def check_deep_displacement_rate(
     issues: list[CheckIssue],
     interval_days: Optional[float] = None,
 ) -> None:
-    """深层水平位移速率: |本次累计 - 上次累计| / 间隔天数"""
+    """深层水平位移速率验证"""
     if not table.deep_points:
         return
 
+    cfg = table.verification_config
+
+    if interval_days is None:
+        interval_days = cfg.interval_days
     if interval_days is None:
         rates_data: list[float] = []
         for dp in table.deep_points:
@@ -201,7 +201,6 @@ def check_deep_displacement_rate(
                     inferred = diff / dp.change_rate
                     if 0.5 < abs(inferred) < 365:
                         rates_data.append(round(abs(inferred)))
-
         if rates_data:
             interval_days = Counter(rates_data).most_common(1)[0][0]
 
@@ -228,7 +227,7 @@ def check_deep_displacement_rate(
         diff = dp.current_cumulative - dp.previous_cumulative
         expected_rate = diff / interval_days
 
-        if not _close_enough(abs(expected_rate), abs(dp.change_rate), RATE_TOLERANCE):
+        if not _close_enough(abs(expected_rate), abs(dp.change_rate), cfg.rate_tolerance):
             issues.append(CheckIssue(
                 severity="error",
                 table_name=table_label,
@@ -240,8 +239,7 @@ def check_deep_displacement_rate(
                     f"深层位移速率不符: "
                     f"({_fmt(dp.current_cumulative, 2)} - {_fmt(dp.previous_cumulative, 2)}) "
                     f"/ {interval_days:.0f} = {_fmt(expected_rate, 3)}, "
-                    f"报告值 = {_fmt(dp.change_rate, 3)} "
-                    f"(绝对值比较: |{_fmt(expected_rate, 3)}|={_fmt(abs(expected_rate), 3)} vs |{_fmt(dp.change_rate, 3)}|={_fmt(abs(dp.change_rate), 3)})"
+                    f"报告值 = {_fmt(dp.change_rate, 3)}"
                 ),
             ))
 
@@ -251,15 +249,14 @@ def check_anchor_force(
     issues: list[CheckIssue],
 ) -> None:
     """锚索拉力: 累计变化量 = 本次内力 - 初始内力"""
-    if table.category not in (MonitoringCategory.ANCHOR_FORCE, MonitoringCategory.STRUT_FORCE):
-        return
+    cfg = table.verification_config
 
     for pt in table.points:
         if pt.initial_value is None or pt.current_value is None or pt.cumulative_change is None:
             continue
 
         expected = pt.current_value - pt.initial_value
-        if not _close_enough(expected, pt.cumulative_change, FLOAT_TOLERANCE):
+        if not _close_enough(expected, pt.cumulative_change, cfg.cumulative_tolerance):
             issues.append(CheckIssue(
                 severity="error",
                 table_name=table.monitoring_item,

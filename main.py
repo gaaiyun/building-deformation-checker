@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from datetime import datetime
 from pathlib import Path
 
 logging.basicConfig(
@@ -32,7 +31,8 @@ def main():
     parser.add_argument("pdf_path", help="待检查的 PDF 文件路径")
     parser.add_argument("--ocr", action="store_true", help="使用 PaddleOCR（适用于扫描件）")
     parser.add_argument("--no-ai-review", action="store_true", help="跳过 AI 最终审核")
-    parser.add_argument("--output", "-o", default=None, help="输出报告路径（默认 output/<文件名>_检查报告.md）")
+    parser.add_argument("--no-self-verify", action="store_true", help="跳过自验证")
+    parser.add_argument("--output", "-o", default=None, help="输出报告路径")
 
     args = parser.parse_args()
 
@@ -42,11 +42,7 @@ def main():
         sys.exit(1)
 
     pdf_name = Path(pdf_path).stem
-
-    if args.output:
-        output_path = args.output
-    else:
-        output_path = f"output/{pdf_name}_检查报告.md"
+    output_path = args.output or f"output/{pdf_name}_检查报告.md"
 
     # ── Step 1: PDF 提取 ─────────────────────────────────
     logger.info("=" * 60)
@@ -64,7 +60,7 @@ def main():
 
     # ── Step 2: LLM 结构化解析 ────────────────────────────
     logger.info("=" * 60)
-    logger.info("Step 2: LLM 结构化解析")
+    logger.info("Step 2: LLM 结构化解析 + 动态配置")
     logger.info("=" * 60)
 
     from src.tools.llm_parser import parse_report_with_llm
@@ -81,7 +77,15 @@ def main():
         label = t.monitoring_item
         if t.borehole_id:
             label += f" ({t.borehole_id})"
-        logger.info("    * %s — %d 个测点", label, pts)
+        cfg = t.verification_config
+        logger.info(
+            "    * %s — %d 个测点 [unit=%s, tol=%.2f, severity=%s]",
+            label, pts, cfg.unit, cfg.cumulative_tolerance, cfg.severity_for_cumulative,
+        )
+
+    # ── Step 2b: LLM Config Enrichment ────────────────────
+    from src.tools.table_analyzer import enrich_configs_with_llm
+    enrich_configs_with_llm(report)
 
     # ── Step 3: 计算验证 ──────────────────────────────────
     logger.info("=" * 60)
@@ -103,9 +107,9 @@ def main():
     stats_issues = run_statistics_checks(report)
     logger.info("统计验证完成: %d 个问题", len(stats_issues))
 
-    # ── Step 5: 逻辑检查 ──────────────────────────────────
+    # ── Step 5: 逻辑检查 (with LLM semantic matching) ────
     logger.info("=" * 60)
-    logger.info("Step 5: 逻辑检查")
+    logger.info("Step 5: 逻辑检查 (语义匹配)")
     logger.info("=" * 60)
 
     from src.tools.logic_checker import run_logic_checks
@@ -113,11 +117,27 @@ def main():
     logic_issues = run_logic_checks(report)
     logger.info("逻辑检查完成: %d 个问题", len(logic_issues))
 
-    # ── Step 6: AI 最终审核（可选）──────────────────────────
+    # ── Step 6: 自验证 ────────────────────────────────────
+    all_issues = calc_issues + stats_issues + logic_issues
+    if not args.no_self_verify:
+        errors = [i for i in all_issues if i.severity == "error"]
+        if errors:
+            logger.info("=" * 60)
+            logger.info("Step 6: AI 自验证 (%d 个错误)", len(errors))
+            logger.info("=" * 60)
+
+            from src.tools.self_verifier import verify_errors_with_llm
+
+            all_issues = verify_errors_with_llm(report, all_issues)
+            calc_issues = [i for i in all_issues if i in calc_issues]
+            stats_issues = [i for i in all_issues if i in stats_issues]
+            logic_issues = [i for i in all_issues if i in logic_issues]
+
+    # ── Step 7: AI 最终审核（可选）──────────────────────────
     ai_review = ""
     if not args.no_ai_review:
         logger.info("=" * 60)
-        logger.info("Step 6: AI 最终审核")
+        logger.info("Step 7: AI 最终审核")
         logger.info("=" * 60)
 
         from src.tools.report_generator import generate_report_md
@@ -127,9 +147,9 @@ def main():
         ai_review = verify_report_with_llm(preliminary_md, raw_text)
         logger.info("AI 审核完成")
 
-    # ── Step 7: 生成检查报告 ──────────────────────────────
+    # ── Step 8: 生成检查报告 ──────────────────────────────
     logger.info("=" * 60)
-    logger.info("Step 7: 生成检查报告")
+    logger.info("Step 8: 生成检查报告")
     logger.info("=" * 60)
 
     from src.tools.report_generator import generate_report_md, save_report

@@ -32,31 +32,47 @@ class MonitoringCategory(Enum):
 class ThresholdConfig:
     """报警/控制值配置"""
     item_name: str
-    warning_value: Optional[float] = None   # 报警值
-    control_value: Optional[float] = None   # 控制值
-    rate_limit: Optional[float] = None      # 变化速率限值
+    warning_value: Optional[float] = None
+    control_value: Optional[float] = None
+    rate_limit: Optional[float] = None
+
+
+@dataclass
+class TableVerificationConfig:
+    """
+    Per-table verification parameters, determined dynamically by LLM analysis.
+    Replaces hardcoded category branches in checkers.
+    """
+    unit: str = "mm"
+    unit_conversion: float = 1.0
+    cumulative_tolerance: float = 0.15
+    rate_tolerance: float = 0.05
+    interval_days: Optional[float] = None
+    direction_convention: str = ""
+    initial_value_reliable: bool = True
+    severity_for_cumulative: str = "error"
 
 
 @dataclass
 class MeasurementPoint:
     """单个测点的一行数据"""
     point_id: str
-    initial_value: Optional[float] = None       # 初始测值
-    previous_value: Optional[float] = None      # 上次测值
-    current_value: Optional[float] = None       # 本次测值
-    current_change: Optional[float] = None      # 本次变化量（报告中给出的）
-    cumulative_change: Optional[float] = None   # 累计变化量（报告中给出的）
-    change_rate: Optional[float] = None         # 变化速率（报告中给出的）
-    safety_status: str = ""                     # 安全状态（报告中给出的）
+    initial_value: Optional[float] = None
+    previous_value: Optional[float] = None
+    current_value: Optional[float] = None
+    current_change: Optional[float] = None
+    cumulative_change: Optional[float] = None
+    change_rate: Optional[float] = None
+    safety_status: str = ""
 
 
 @dataclass
 class DeepDisplacementPoint:
     """深层水平位移（按深度的测点）"""
     depth: float
-    previous_cumulative: Optional[float] = None  # 上次累计量
-    current_cumulative: Optional[float] = None   # 本次累计量
-    change_rate: Optional[float] = None          # 变化速率
+    previous_cumulative: Optional[float] = None
+    current_cumulative: Optional[float] = None
+    change_rate: Optional[float] = None
 
 
 @dataclass
@@ -68,7 +84,6 @@ class StatisticsSummary:
     negative_max_value: Optional[float] = None
     max_rate_id: str = ""
     max_rate_value: Optional[float] = None
-    # 锚索拉力等特殊统计
     max_force_id: str = ""
     max_force_value: Optional[float] = None
     min_force_id: str = ""
@@ -78,19 +93,22 @@ class StatisticsSummary:
 @dataclass
 class MonitoringTable:
     """一张监测数据成果表"""
-    monitoring_item: str = ""                   # 监测项名称
+    monitoring_item: str = ""
     category: MonitoringCategory = MonitoringCategory.OTHER
-    monitor_date: str = ""                      # 监测日期
-    monitor_count: str = ""                     # 监测次数
-    point_count: int = 0                        # 监测点数量
-    equipment_type: str = ""                    # 设备类型
-    equipment_model: str = ""                   # 设备型号
-    borehole_id: str = ""                       # 测孔编号（深层位移用）
-    borehole_depth: Optional[float] = None      # 测孔深度
+    monitor_date: str = ""
+    monitor_count: str = ""
+    point_count: int = 0
+    equipment_type: str = ""
+    equipment_model: str = ""
+    borehole_id: str = ""
+    borehole_depth: Optional[float] = None
 
     points: list[MeasurementPoint] = field(default_factory=list)
     deep_points: list[DeepDisplacementPoint] = field(default_factory=list)
     statistics: StatisticsSummary = field(default_factory=StatisticsSummary)
+    verification_config: TableVerificationConfig = field(
+        default_factory=TableVerificationConfig
+    )
 
 
 @dataclass
@@ -121,17 +139,20 @@ class MonitoringReport:
     conclusion: str = ""
     raw_text: str = ""
 
+    threshold_map: dict = field(default_factory=dict)
+    summary_map: dict = field(default_factory=dict)
+
 
 @dataclass
 class CheckIssue:
     """检查发现的问题"""
-    severity: str           # "error" | "warning" | "info"
-    table_name: str         # 所在表名
-    point_id: str           # 测点编号
-    field_name: str         # 字段名
-    expected_value: str     # 期望值
-    actual_value: str       # 实际值
-    message: str            # 描述
+    severity: str
+    table_name: str
+    point_id: str
+    field_name: str
+    expected_value: str
+    actual_value: str
+    message: str
 
     def __str__(self):
         icon = {"error": "[错误]", "warning": "[警告]", "info": "[提示]"}.get(

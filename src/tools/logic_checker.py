@@ -5,10 +5,14 @@
 1. 安全状态判定：根据报警值/控制值判定累计变化量和变化速率是否超标
 2. 汇总表与分表一致性：简报中的统计结果 vs 各分表的统计结果
 3. 数据完整性：测点数量、编号一致性等
+
+Uses LLM semantic matching for threshold/table/summary correspondence
+instead of hardcoded keyword dictionaries.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from typing import Optional
@@ -39,64 +43,138 @@ def _fmt(v: Optional[float], p: int = 2) -> str:
     return f"{v:.{p}f}" if v is not None else "N/A"
 
 
-def _find_threshold(thresholds, item_name):
-    keywords_map = {
-        "水平位移": ["水平位移", "顶部水平", "坡顶水平", "桩顶水平"],
-        "竖向位移": ["竖向位移", "顶部竖向", "沉降观测", "坡顶沉降"],
-        "地面沉降": ["地面沉降", "道路沉降", "周边地面"],
-        "管线": ["管线"],
-        "水位": ["水位", "地下水"],
-        "深层": ["深层", "测斜"],
-        "锚索": ["锚索", "拉力", "轴力"],
-    }
-    for th in thresholds:
-        if th.item_name in item_name or item_name in th.item_name:
-            return th
-    for _group, keywords in keywords_map.items():
-        item_matches = any(k in item_name for k in keywords)
-        if item_matches:
-            for th in thresholds:
-                if any(k in th.item_name for k in keywords):
-                    return th
-    return None
+# ── LLM Semantic Matching ────────────────────────────────────
+
+def _build_semantic_maps(report: MonitoringReport) -> None:
+    """
+    Use LLM to build semantic mappings between:
+    - threshold names <-> table monitoring item names
+    - summary item names <-> table monitoring item names
+    Results are cached on the report object.
+    """
+    if report.threshold_map and report.summary_map:
+        return
+
+    threshold_names = [th.item_name for th in report.thresholds]
+    table_names = list(set(t.monitoring_item for t in report.tables))
+    summary_names = [si.monitoring_item for si in report.summary_items]
+
+    if not threshold_names and not summary_names:
+        return
+
+    prompt = (
+        "以下是一份建筑变形监测报告中提取的三组名称，请建立它们之间的对应关系。\n\n"
+        f"阈值配置项: {json.dumps(threshold_names, ensure_ascii=False)}\n"
+        f"数据表监测项: {json.dumps(table_names, ensure_ascii=False)}\n"
+        f"简报汇总项: {json.dumps(summary_names, ensure_ascii=False)}\n\n"
+        "返回JSON:\n"
+        '{"threshold_to_tables": {"阈值名": ["对应数据表名", ...]}, '
+        '"summary_to_tables": {"汇总项名": ["对应数据表名", ...]}}\n'
+        "如果某个阈值/汇总项找不到对应的数据表，映射为空列表。"
+        "注意不同公司对同一监测项的称呼可能不同，需要语义匹配。"
+        '例如"坡顶水平位移及沉降"对应"支护结构顶部水平位移"和"支护结构顶部竖向位移"。'
+        '"深层水平位移"/"支护桩测斜"/"测斜"是同一类。'
+    )
+
+    from openai import OpenAI
+    from src.config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
+
+    try:
+        client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+        resp = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[
+                {"role": "system", "content": "你是建筑变形监测领域专家，擅长识别不同表述的同义关系。返回纯JSON。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.1,
+            max_tokens=4000,
+            timeout=60,
+        )
+        raw = resp.choices[0].message.content or ""
+        raw = re.sub(r'<think(?:ing)?>.*?</think(?:ing)?>', '', raw, flags=re.DOTALL).strip()
+        m = re.search(r'\{.*\}', raw, re.DOTALL)
+        if m:
+            data = json.loads(m.group())
+            report.threshold_map = data.get("threshold_to_tables", {})
+            report.summary_map = data.get("summary_to_tables", {})
+            logger.info(
+                "LLM语义匹配完成: %d阈值映射, %d汇总映射",
+                len(report.threshold_map), len(report.summary_map),
+            )
+            return
+    except Exception as e:
+        logger.warning("LLM语义匹配失败，回退到关键词匹配: %s", e)
+
+    _build_fallback_maps(report, threshold_names, table_names, summary_names)
 
 
-def _tables_match(table_item: str, summary_item: str) -> bool:
-    # "深层"/"测斜" must be checked BEFORE "水平位移" since "深层水平位移" contains "水平位移"
-    is_deep_t = any(k in table_item for k in ["深层", "测斜"])
-    is_deep_s = any(k in summary_item for k in ["深层", "测斜"])
-    if is_deep_t != is_deep_s:
-        return False
-    if is_deep_t and is_deep_s:
-        return True
-
+def _build_fallback_maps(report, threshold_names, table_names, summary_names):
+    """Keyword-based fallback when LLM is unavailable."""
     keywords_groups = [
+        ["深层", "测斜"],
         ["水平位移", "顶部水平", "坡顶水平", "基坑顶位移"],
         ["竖向位移", "顶部竖向", "坡顶沉降", "基坑顶沉降"],
         ["地面沉降", "道路沉降", "周边地面", "周边道路"],
         ["管线"],
         ["水位", "地下水"],
-        ["深层", "测斜"],
         ["锚索", "拉力", "轴力"],
     ]
-    for group in keywords_groups:
-        t_match = any(k in table_item for k in group)
-        s_match = any(k in summary_item for k in group)
-        if t_match and s_match:
-            return True
-    return table_item in summary_item or summary_item in table_item
+
+    def _match_group(name):
+        for i, group in enumerate(keywords_groups):
+            if any(k in name for k in group):
+                return i
+        return -1
+
+    report.threshold_map = {}
+    for th_name in threshold_names:
+        th_group = _match_group(th_name)
+        matched = [tn for tn in table_names if _match_group(tn) == th_group and th_group >= 0]
+        if not matched:
+            matched = [tn for tn in table_names if th_name in tn or tn in th_name]
+        report.threshold_map[th_name] = matched
+
+    report.summary_map = {}
+    for s_name in summary_names:
+        s_group = _match_group(s_name)
+        matched = [tn for tn in table_names if _match_group(tn) == s_group and s_group >= 0]
+        if not matched:
+            matched = [tn for tn in table_names if s_name in tn or tn in s_name]
+        report.summary_map[s_name] = matched
 
 
-def check_safety_status(report, issues):
+def _find_threshold_semantic(report: MonitoringReport, table_name: str) -> Optional[ThresholdConfig]:
+    """Find matching threshold using semantic map."""
+    for th in report.thresholds:
+        mapped_tables = report.threshold_map.get(th.item_name, [])
+        if table_name in mapped_tables:
+            return th
+        if th.item_name in table_name or table_name in th.item_name:
+            return th
+    return None
+
+
+def _find_matched_tables(report: MonitoringReport, summary_item_name: str) -> list[MonitoringTable]:
+    """Find matching tables for a summary item using semantic map."""
+    mapped_names = report.summary_map.get(summary_item_name, [])
+    matched = []
+    for t in report.tables:
+        if t.monitoring_item in mapped_names:
+            matched.append(t)
+    if not matched:
+        for t in report.tables:
+            if summary_item_name in t.monitoring_item or t.monitoring_item in summary_item_name:
+                matched.append(t)
+    return matched
+
+
+# ── Check Functions ──────────────────────────────────────────
+
+def check_safety_status(report: MonitoringReport, issues: list[CheckIssue]) -> None:
     for table in report.tables:
-        threshold = _find_threshold(report.thresholds, table.monitoring_item)
+        threshold = _find_threshold_semantic(report, table.monitoring_item)
         if threshold is None:
-            issues.append(CheckIssue(
-                severity="info", table_name=table.monitoring_item,
-                point_id="ALL", field_name="安全状态",
-                expected_value="N/A", actual_value="N/A",
-                message="未找到对应的报警/控制值阈值配置，无法验证安全状态",
-            ))
             continue
 
         for pt in table.points:
@@ -136,17 +214,12 @@ def check_safety_status(report, issues):
                 ))
 
 
-def check_summary_consistency(report, issues):
+def check_summary_consistency(report: MonitoringReport, issues: list[CheckIssue]) -> None:
     if not report.summary_items:
-        issues.append(CheckIssue(
-            severity="info", table_name="简报汇总", point_id="ALL",
-            field_name="汇总表", expected_value="N/A", actual_value="N/A",
-            message="报告中未提取到简报汇总表，跳过一致性检查",
-        ))
         return
 
     for si in report.summary_items:
-        matched = [t for t in report.tables if _tables_match(t.monitoring_item, si.monitoring_item)]
+        matched = _find_matched_tables(report, si.monitoring_item)
         if not matched:
             issues.append(CheckIssue(
                 severity="warning", table_name="简报汇总", point_id="N/A",
@@ -162,7 +235,6 @@ def check_summary_consistency(report, issues):
         )
 
         if is_anchor:
-            # anchor/strut: summary uses max/min force value, not directional extremes
             all_forces = []
             for t in matched:
                 for pt in t.points:
@@ -178,9 +250,9 @@ def check_summary_consistency(report, issues):
                     issues.append(CheckIssue(
                         severity="warning", table_name="简报汇总",
                         point_id=si.monitoring_item, field_name="锚索力值",
-                        expected_value=f"max={act_max_id}/{_fmt(act_max,1)}, min={act_min_id}/{_fmt(act_min,1)}",
+                        expected_value=f"max={act_max_id}/{_fmt(act_max, 1)}, min={act_min_id}/{_fmt(act_min, 1)}",
                         actual_value=f"{si.positive_max_id}={si.positive_max}",
-                        message=f"锚索汇总值与分表不一致，请人工确认",
+                        message="锚索汇总值与分表不一致，请人工确认",
                     ))
             continue
 
@@ -208,7 +280,7 @@ def check_summary_consistency(report, issues):
                 point_id=si.monitoring_item, field_name="正方向最大",
                 expected_value=f"{actual_pos_id}={_fmt(actual_pos)}",
                 actual_value=f"{si.positive_max_id}={si.positive_max}",
-                message=f"汇总表正方向最大与分表不一致",
+                message="汇总表正方向最大与分表不一致",
             ))
 
         if summary_neg is not None and abs(actual_neg - summary_neg) > tol:
@@ -217,11 +289,11 @@ def check_summary_consistency(report, issues):
                 point_id=si.monitoring_item, field_name="负方向最大",
                 expected_value=f"{actual_neg_id}={_fmt(actual_neg)}",
                 actual_value=f"{si.negative_max_id}={si.negative_max}",
-                message=f"汇总表负方向最大与分表不一致",
+                message="汇总表负方向最大与分表不一致",
             ))
 
 
-def check_point_count(report, issues):
+def check_point_count(report: MonitoringReport, issues: list[CheckIssue]) -> None:
     for table in report.tables:
         if table.point_count <= 0:
             continue
@@ -240,6 +312,10 @@ def check_point_count(report, issues):
 
 def run_logic_checks(report: MonitoringReport) -> list[CheckIssue]:
     issues: list[CheckIssue] = []
+
+    logger.info("=== 语义匹配 ===")
+    _build_semantic_maps(report)
+
     logger.info("=== 安全状态判定检查 ===")
     check_safety_status(report, issues)
     logger.info("=== 汇总表一致性检查 ===")
