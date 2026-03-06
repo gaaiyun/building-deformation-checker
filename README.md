@@ -16,6 +16,7 @@
   - [1. PDF 数据提取 (pdf_extractor.py)](#1-pdf-数据提取-pdf_extractorpy)
   - [2. LLM 结构化解析 (llm_parser.py)](#2-llm-结构化解析-llm_parserpy)
   - [3. 动态验证配置 (table_analyzer.py)](#3-动态验证配置-table_analyzerpy)
+  - [3.5 表格分析计划 (ReAct)](#35-表格分析计划-table_analyzerpy--generate_analysis_plan)
   - [4. 计算验证 (calculation_checker.py)](#4-计算验证-calculation_checkerpy)
   - [5. 统计验证 (statistics_checker.py)](#5-统计验证-statistics_checkerpy)
   - [6. 逻辑检查 (logic_checker.py)](#6-逻辑检查-logic_checkerpy)
@@ -70,6 +71,14 @@
 └────────────────────────┬───────────────────────────────┘
                          ▼
 ┌────────────────────────────────────────────────────────┐
+│  Step 2.5: 表格分析计划 (ReAct)                           │
+│  - Thought: 检测字段、识别数据类型                         │
+│  - Observation: 数据样本、单位/基准分析                    │
+│  - Action: 制定验证规则、容差、严重级别                    │
+│  - 透明展示 AI 理解过程，供用户审查                        │
+└────────────────────────┬───────────────────────────────┘
+                         ▼
+┌────────────────────────────────────────────────────────┐
 │  Step 3-5: 规则引擎验证                                   │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐              │
 │  │ 计算验证  │  │ 统计验证  │  │ 逻辑检查  │              │
@@ -99,6 +108,7 @@
 | 1 | PDF 提取 | pdfplumber / PaddleOCR | 5-30s | 智能选择提取方式 |
 | 2 | LLM 结构化解析 | DashScope qwen3.5-plus | 60-180s | 将文本转为标准化 JSON |
 | 2b | 动态配置增强 | LLM (可选) | 0-60s | 对异常表格请求 LLM 确认配置 |
+| 2.5 | 表格分析计划 | Python (ReAct) | <1s | 逐表分析字段/单位/验证策略，透明展示 |
 | 3 | 计算验证 | 规则引擎 | <1s | 验证累计变化量、变化速率 |
 | 4 | 统计验证 | 规则引擎 | <1s | 验证最大/最小值统计 |
 | 5 | 逻辑检查 | LLM + 规则 | 30-60s | 语义匹配 + 安全状态 + 汇总一致性 |
@@ -161,8 +171,8 @@ streamlit run app.py
 
 界面功能：
 - **侧边栏**：选择 PDF 提取方式（智能切换/仅pdfplumber/强制PaddleOCR）、AI 自验证开关、AI 最终审核开关
-- **进度显示**：`st.status` 分步骤实时显示进度，`st.progress` 进度条
-- **结果展示**：指标卡片（数据表数、错误数、警告数、提示数、耗时）+ 6 个选项卡（检查报告/计算验证/统计验证/逻辑检查/AI审核/运行日志）
+- **进度显示**：`st.status` 8 步实时显示进度，`st.progress` 进度条
+- **结果展示**：指标卡片（数据表数、错误数、警告数、提示数、耗时）+ 7 个选项卡（检查报告/分析计划/计算验证/统计验证/逻辑检查/AI审核/运行日志）
 - **导出功能**：Markdown / Word (docx) / HTML（可打印为PDF）三种格式
 - **运行日志**：实时捕获所有模块的日志输出，通过自定义 `StreamlitLogHandler` 实现
 
@@ -193,8 +203,9 @@ python main.py "报告.pdf" -o output/my_report.md
 建筑变形监测Agent/
 ├── app.py                           # Streamlit Web UI (483行)
 │                                    #   - StreamlitLogHandler 日志捕获
-│                                    #   - 7步进度展示
+│                                    #   - 8步进度展示(含ReAct分析计划)
 │                                    #   - 多格式导出 (MD/DOCX/HTML)
+│                                    #   - _render_analysis_plan ReAct展示
 │                                    #   - _render_issues 按表分组展示
 │                                    #   - _generate_docx Word导出
 │                                    #   - _generate_html 可打印HTML
@@ -229,7 +240,7 @@ python main.py "报告.pdf" -o output/my_report.md
 │   └── tools/
 │       ├── pdf_extractor.py         # PDF 提取 (197行)
 │       ├── llm_parser.py            # LLM 结构化解析 (343行)
-│       ├── table_analyzer.py        # 动态验证配置生成 (221行)
+│       ├── table_analyzer.py        # 动态验证配置 + ReAct分析计划
 │       ├── calculation_checker.py   # 计算验证 (291行)
 │       ├── statistics_checker.py    # 统计验证 (260行)
 │       ├── logic_checker.py         # 逻辑检查 (326行)
@@ -408,6 +419,49 @@ LLM 输出可能包含：
 
 - 只在发现异常时才调用 LLM，减少 API 调用次数
 - 失败不影响主流程（`non-fatal`）
+
+---
+
+### 3.5 表格分析计划 (table_analyzer.py — `generate_analysis_plan`)
+
+#### 核心理念
+
+在验证之前，先让系统"说出"它对每张表的理解，采用 **ReAct 模式**（Thought → Observation → Action）透明展示推理过程。
+
+这一步不调用 LLM，纯 Python 分析，基于已构建的 `TableVerificationConfig` 和表格数据特征。
+
+#### 输出结构
+
+对每张表生成一个分析计划 dict，包含：
+
+| 字段 | 说明 | 示例 |
+|------|------|------|
+| `table_name` | 监测项 + 孔位 | "深层水平位移观测 (C1)" |
+| `fields_detected` | 哪些数据列有值 | `{"initial_value": true, "change_rate": true}` |
+| `data_sample` | 前2个测点的原始数据 | "S1: 初始=-2.70184, 本次=-2.70242, 累计=31.21" |
+| `unit` / `conversion_note` | 单位及转换说明 | "m → mm (×1000转换)" |
+| `initial_reliable` / `reliability_reason` | 初始值可靠性分析 | "高程数据: 初始高程可能非项目首测基准" |
+| `interval_days` / `interval_source` | 监测间隔及来源 | "9天 (从数据反推)" |
+| `verification_methods` | 将执行的验证规则列表 | 累计变化量验证、变化速率验证、统计验证 |
+| `special_notes` | 特殊处理说明 | "高程数据累计变化不一致仅标warning" |
+
+#### 路由逻辑
+
+根据表格类型决定适用的验证规则：
+
+```
+if 锚索/支撑 → 锚索累计变化验证 + 统计验证
+elif 深层位移 → 深层位移速率验证(abs比较) + 统计验证(豁免跨表引用)
+else → 累计变化量验证 + 变化速率验证 + 统计验证
+```
+
+#### Streamlit 展示
+
+在"分析计划"选项卡中，每张表以 `st.expander` 展示：
+- **Thought** — 字段识别矩阵（✅/❌）
+- **Observation** — 数据样本 + 单位与基准分析
+- **Action** — 将执行的验证规则（含公式、容差、级别）
+- **特殊说明** — 需要注意的异常处理（如有）
 
 ---
 

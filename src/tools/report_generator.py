@@ -22,6 +22,7 @@ def generate_report_md(
     stats_issues: list[CheckIssue],
     logic_issues: list[CheckIssue],
     ai_review: str = "",
+    analysis_plan: list[dict] | None = None,
 ) -> str:
     """生成 Markdown 格式的检查报告"""
     all_issues = calc_issues + stats_issues + logic_issues
@@ -72,6 +73,42 @@ def generate_report_md(
                 name += f" ({t.borehole_id})"
             pts = len(t.points) if t.points else len(t.deep_points)
             lines.append(f"| {i} | {name} | {t.category.value} | {pts} | {t.monitor_date} |")
+        lines.append("")
+
+    # ── AI 理解与验证策略 ──────────────────────────────
+    if analysis_plan:
+        lines.append("## AI 理解与验证策略\n")
+        for plan in analysis_plan:
+            header = f"### {plan['table_name']} ({plan['category']} | {plan['point_count']}个测点)\n"
+            lines.append(header)
+
+            unit_desc = f"**{plan['unit']}**"
+            if plan["unit_conversion"] != 1.0:
+                unit_desc += f" → mm (×{plan['unit_conversion']:.0f})"
+            else:
+                unit_desc += f" ({plan['conversion_note']})"
+            lines.append(f"- **单位**: {unit_desc}")
+
+            reliable_icon = "✅" if plan["initial_reliable"] else "⚠"
+            lines.append(f"- **初始值**: {reliable_icon} {plan['reliability_reason']}")
+
+            if plan["interval_days"]:
+                lines.append(f"- **监测间隔**: {plan['interval_days']:.0f}天 ({plan['interval_source']})")
+            else:
+                lines.append(f"- **监测间隔**: {plan['interval_source']}")
+
+            lines.append("- **验证规则**:")
+            for method in plan["verification_methods"]:
+                icon = "⚠" if method["severity"] == "warning" else "✅"
+                lines.append(
+                    f"  - {icon} {method['name']} = `{method['formula']}`, "
+                    f"容差={method['tolerance']}, {method['severity']}"
+                )
+
+            if plan["special_notes"]:
+                lines.append(f"- **特殊说明**: {'; '.join(plan['special_notes'])}")
+
+            lines.append("")
         lines.append("")
 
     # ── 详细检查结果 ──────────────────────────────────

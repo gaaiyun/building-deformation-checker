@@ -87,6 +87,22 @@ def main():
     from src.tools.table_analyzer import enrich_configs_with_llm
     enrich_configs_with_llm(report)
 
+    # ── Step 2.5: 表格分析计划 ─────────────────────────────
+    logger.info("=" * 60)
+    logger.info("Step 2.5: 表格分析计划 (ReAct)")
+    logger.info("=" * 60)
+
+    from src.tools.table_analyzer import generate_analysis_plan
+    analysis_plan = generate_analysis_plan(report)
+    for plan in analysis_plan:
+        methods_str = ", ".join(m["name"] for m in plan["verification_methods"])
+        notes_str = (" ⚠️ " + "; ".join(plan["special_notes"])) if plan["special_notes"] else ""
+        logger.info(
+            "  [%s] unit=%s, tol=%.2f, severity=%s → %s%s",
+            plan["table_name"], plan["unit"], plan["tolerance"],
+            plan["severity"], methods_str, notes_str,
+        )
+
     # ── Step 3: 计算验证 ──────────────────────────────────
     logger.info("=" * 60)
     logger.info("Step 3: 计算验证")
@@ -143,7 +159,7 @@ def main():
         from src.tools.report_generator import generate_report_md
         from src.tools.llm_parser import verify_report_with_llm
 
-        preliminary_md = generate_report_md(report, calc_issues, stats_issues, logic_issues)
+        preliminary_md = generate_report_md(report, calc_issues, stats_issues, logic_issues, analysis_plan=analysis_plan)
         ai_review = verify_report_with_llm(preliminary_md, raw_text)
         logger.info("AI 审核完成")
 
@@ -154,7 +170,7 @@ def main():
 
     from src.tools.report_generator import generate_report_md, save_report
 
-    final_md = generate_report_md(report, calc_issues, stats_issues, logic_issues, ai_review)
+    final_md = generate_report_md(report, calc_issues, stats_issues, logic_issues, ai_review, analysis_plan)
     save_report(final_md, output_path)
 
     # ── 汇总输出 ──────────────────────────────────────────

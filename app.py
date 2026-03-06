@@ -75,6 +75,85 @@ def _render_issues(title: str, issues: list) -> None:
                     st.info(issue.message)
 
 
+def _render_analysis_plan(analysis_plan: list[dict]) -> None:
+    """ReAct 风格渲染每张表的分析计划：Thought → Observation → Action"""
+    if not analysis_plan:
+        st.info("未生成分析计划")
+        return
+
+    FIELD_LABELS = {
+        "initial_value": "初始值",
+        "previous_value": "上次值",
+        "current_value": "本次值",
+        "current_change": "本次变化",
+        "cumulative_change": "累计变化",
+        "change_rate": "速率",
+        "safety_status": "安全状态",
+        "depth": "深度",
+        "previous_cumulative": "上次累计",
+        "current_cumulative": "本次累计",
+    }
+
+    for plan in analysis_plan:
+        has_notes = bool(plan["special_notes"])
+        title_badge = " ⚠️" if has_notes else ""
+        expander_title = (
+            f"Table {plan['table_index']}: {plan['table_name']} "
+            f"({plan['category']} | {plan['point_count']}个测点){title_badge}"
+        )
+
+        with st.expander(expander_title, expanded=has_notes):
+            # ── Thought: 字段识别 ──────────────────────
+            st.markdown("**📋 Thought — 字段识别**")
+            fields = plan["fields_detected"]
+            if fields:
+                cols = st.columns(len(fields))
+                for i, (field_key, detected) in enumerate(fields.items()):
+                    label = FIELD_LABELS.get(field_key, field_key)
+                    icon = "✅" if detected else "❌"
+                    cols[i].markdown(f"<div style='text-align:center'><b>{label}</b><br/>{icon}</div>", unsafe_allow_html=True)
+            st.markdown("")
+
+            # ── Observation: 数据样本 ──────────────────
+            st.markdown("**🔍 Observation — 数据样本**")
+            for sample in plan["data_sample"]:
+                st.code(sample, language=None)
+
+            # ── Observation: 单位与基准分析 ─────────────
+            st.markdown("**🧠 Observation — 单位与基准分析**")
+            unit_text = f"单位: **{plan['unit']}**"
+            if plan["unit_conversion"] != 1.0:
+                unit_text += f" → mm (×{plan['unit_conversion']:.0f}转换)"
+            else:
+                unit_text += f" ({plan['conversion_note']})"
+            st.markdown(unit_text)
+
+            reliable_icon = "✅" if plan["initial_reliable"] else "⚠️"
+            st.markdown(f"初始值: {reliable_icon} {plan['reliability_reason']}")
+
+            if plan["interval_days"]:
+                st.markdown(f"监测间隔: **{plan['interval_days']:.0f}天** ({plan['interval_source']})")
+            else:
+                st.markdown(f"监测间隔: ⏳ {plan['interval_source']}")
+            st.markdown("")
+
+            # ── Action: 验证规则 ────────────────────────
+            st.markdown("**🎯 Action — 将执行的验证规则**")
+            for method in plan["verification_methods"]:
+                icon = "⚠️" if method["severity"] == "warning" else "✅"
+                st.markdown(
+                    f"{icon} **{method['name']}** = `{method['formula']}`, "
+                    f"容差={method['tolerance']}, 级别={method['severity']}"
+                )
+
+            # ── 特殊说明 ────────────────────────────────
+            if plan["special_notes"]:
+                st.markdown("")
+                st.markdown("**📝 特殊说明**")
+                for note in plan["special_notes"]:
+                    st.warning(f"• {note}", icon="📝")
+
+
 def _generate_docx(md_content: str, report, errors: list, warnings: list) -> bytes:
     """生成 Word 文档"""
     from docx import Document
@@ -245,7 +324,7 @@ if uploaded is not None:
         try:
             # ━━ Step 1: PDF 提取 ━━━━━━━━━━━━━━━━━━━━━
             with status_container:
-                st.write("📄 **Step 1/7** — 提取 PDF 内容...")
+                st.write("📄 **Step 1/8** — 提取 PDF 内容...")
             progress_bar.progress(5)
 
             from src.tools.pdf_extractor import extract_pdf
@@ -256,7 +335,7 @@ if uploaded is not None:
 
             # ━━ Step 2: LLM 结构化解析 ━━━━━━━━━━━━━━━
             with status_container:
-                st.write("🤖 **Step 2/7** — AI 结构化解析（可能需要1-3分钟）...")
+                st.write("🤖 **Step 2/8** — AI 结构化解析（可能需要1-3分钟）...")
             progress_bar.progress(10)
 
             from src.tools.llm_parser import parse_report_with_llm
@@ -269,11 +348,22 @@ if uploaded is not None:
             with status_container:
                 st.write(f"  ✅ 解析完成: **{report.project_name}** — {len(report.tables)} 张表, "
                          f"{len(report.thresholds)} 项阈值, {len(report.summary_items)} 项汇总")
-            progress_bar.progress(40)
+            progress_bar.progress(35)
 
-            # ━━ Step 3: 计算验证 ━━━━━━━━━━━━━━━━━━━━━
+            # ━━ Step 2.5: 表格分析计划 ━━━━━━━━━━━━━━━━
             with status_container:
-                st.write("🔢 **Step 3/7** — 计算验证...")
+                st.write("🧠 **Step 3/8** — 分析表格结构与验证策略...")
+
+            from src.tools.table_analyzer import generate_analysis_plan
+            analysis_plan = generate_analysis_plan(report)
+
+            with status_container:
+                st.write(f"  ✅ 分析完成: {len(analysis_plan)} 张表的验证策略已制定")
+            progress_bar.progress(42)
+
+            # ━━ Step 4: 计算验证 ━━━━━━━━━━━━━━━━━━━━━
+            with status_container:
+                st.write("🔢 **Step 4/8** — 计算验证...")
             progress_bar.progress(45)
 
             from src.tools.calculation_checker import run_calculation_checks
@@ -282,9 +372,9 @@ if uploaded is not None:
             with status_container:
                 st.write(f"  ✅ 计算验证: {len(calc_issues)} 个问题")
 
-            # ━━ Step 4: 统计验证 ━━━━━━━━━━━━━━━━━━━━━
+            # ━━ Step 5: 统计验证 ━━━━━━━━━━━━━━━━━━━━━
             with status_container:
-                st.write("📈 **Step 4/7** — 统计验证...")
+                st.write("📈 **Step 5/8** — 统计验证...")
             progress_bar.progress(55)
 
             from src.tools.statistics_checker import run_statistics_checks
@@ -293,9 +383,9 @@ if uploaded is not None:
             with status_container:
                 st.write(f"  ✅ 统计验证: {len(stats_issues)} 个问题")
 
-            # ━━ Step 5: 逻辑检查 ━━━━━━━━━━━━━━━━━━━━━
+            # ━━ Step 6: 逻辑检查 ━━━━━━━━━━━━━━━━━━━━━
             with status_container:
-                st.write("🔍 **Step 5/7** — 逻辑检查（AI语义匹配）...")
+                st.write("🔍 **Step 6/8** — 逻辑检查（AI语义匹配）...")
             progress_bar.progress(60)
 
             from src.tools.logic_checker import run_logic_checks
@@ -304,13 +394,13 @@ if uploaded is not None:
             with status_container:
                 st.write(f"  ✅ 逻辑检查: {len(logic_issues)} 个问题")
 
-            # ━━ Step 6: AI 自验证 ━━━━━━━━━━━━━━━━━━━━
+            # ━━ Step 7: AI 自验证 ━━━━━━━━━━━━━━━━━━━━
             all_issues = calc_issues + stats_issues + logic_issues
             if do_self_verify:
                 errors_to_verify = [i for i in all_issues if i.severity == "error"]
                 if errors_to_verify:
                     with status_container:
-                        st.write(f"🔄 **Step 6/7** — AI 自验证（{len(errors_to_verify)} 个错误）...")
+                        st.write(f"🔄 **Step 7/8** — AI 自验证（{len(errors_to_verify)} 个错误）...")
                     progress_bar.progress(70)
 
                     from src.tools.self_verifier import verify_errors_with_llm
@@ -319,11 +409,11 @@ if uploaded is not None:
                     with status_container:
                         st.write("  ✅ 自验证完成")
 
-            # ━━ Step 7: AI 最终审核 ━━━━━━━━━━━━━━━━━━
+            # ━━ Step 8: AI 最终审核 ━━━━━━━━━━━━━━━━━━
             ai_review = ""
             if do_ai_review:
                 with status_container:
-                    st.write("🧑‍💼 **Step 7/7** — AI 专家最终审核...")
+                    st.write("🧑‍💼 **Step 8/8** — AI 专家最终审核...")
                 progress_bar.progress(80)
 
                 from src.tools.report_generator import generate_report_md
@@ -337,7 +427,7 @@ if uploaded is not None:
             # ━━ 生成报告 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             progress_bar.progress(90)
             from src.tools.report_generator import generate_report_md, save_report
-            final_md = generate_report_md(report, calc_issues, stats_issues, logic_issues, ai_review)
+            final_md = generate_report_md(report, calc_issues, stats_issues, logic_issues, ai_review, analysis_plan)
             output_path = f"output/{pdf_name}_检查报告.md"
             save_report(final_md, output_path)
 
@@ -365,13 +455,16 @@ if uploaded is not None:
             c5.metric("⏱️ 耗时", f"{elapsed:.0f}s")
 
             # ── 选项卡 ───────────────────────────────
-            tab_report, tab_calc, tab_stats, tab_logic, tab_ai, tab_log = st.tabs([
-                "📊 检查报告", "🔢 计算验证", "📈 统计验证",
+            tab_report, tab_plan, tab_calc, tab_stats, tab_logic, tab_ai, tab_log = st.tabs([
+                "📊 检查报告", "🧠 分析计划", "🔢 计算验证", "📈 统计验证",
                 "🔍 逻辑检查", "🤖 AI审核", "📋 运行日志",
             ])
 
             with tab_report:
                 st.markdown(final_md)
+
+            with tab_plan:
+                _render_analysis_plan(analysis_plan)
 
             with tab_calc:
                 _render_issues("计算验证", calc_issues)
@@ -446,11 +539,12 @@ else:
         st.markdown("""
 1. **PDF 提取** — 自动识别文字版或扫描件，智能选择最佳提取方式
 2. **AI 结构化解析** — 用大语言模型理解不同公司的表格格式，提取为标准数据
-3. **计算验证** — 逐条验证累计变化量、变化速率（动态容差适配不同数据类型）
-4. **统计验证** — 验证最大值/最小值统计，检测方向性错误和跨表引用
-5. **逻辑检查** — AI语义匹配阈值与分表，检查安全状态判定
-6. **AI 自验证** — 对检出的错误进行二次确认，大幅减少误报
-7. **生成报告** — 多格式导出（Markdown / Word / HTML）
+3. **表格分析计划** — ReAct风格分析每张表的字段、单位、验证策略（透明展示AI理解过程）
+4. **计算验证** — 逐条验证累计变化量、变化速率（动态容差适配不同数据类型）
+5. **统计验证** — 验证最大值/最小值统计，检测方向性错误和跨表引用
+6. **逻辑检查** — AI语义匹配阈值与分表，检查安全状态判定
+7. **AI 自验证** — 对检出的错误进行二次确认，大幅减少误报
+8. **生成报告** — 多格式导出（Markdown / Word / HTML）
         """)
 
     with col_right:

@@ -129,6 +129,234 @@ def _detect_elevation_from_data(table: MonitoringTable, cfg: TableVerificationCo
                 break
 
 
+def generate_analysis_plan(report: MonitoringReport) -> list[dict]:
+    """
+    ReAct 风格分析计划：逐表检查字段、数据特征、验证策略。
+    纯 Python 分析（无 LLM 调用），基于已构建的 TableVerificationConfig。
+
+    返回每张表一个 dict，包含:
+      table_name, category, point_count, is_deep,
+      fields_detected, data_sample, unit_analysis, initial_value_analysis,
+      verification_methods, special_notes, interval_info
+    """
+    from collections import Counter
+
+    plans: list[dict] = []
+
+    for idx, table in enumerate(report.tables):
+        cfg = table.verification_config
+        is_deep = bool(table.deep_points)
+
+        # ── a) 表标识 ────────────────────────────────────
+        name = table.monitoring_item
+        if table.borehole_id:
+            name += f" ({table.borehole_id})"
+        point_count = len(table.deep_points) if is_deep else len(table.points)
+
+        # ── b) 字段检测矩阵 ──────────────────────────────
+        fields: dict[str, bool] = {}
+        if is_deep and table.deep_points:
+            dp = table.deep_points[0]
+            fields = {
+                "depth": dp.depth is not None,
+                "previous_cumulative": dp.previous_cumulative is not None,
+                "current_cumulative": dp.current_cumulative is not None,
+                "change_rate": dp.change_rate is not None,
+            }
+        elif table.points:
+            pt = table.points[0]
+            fields = {
+                "initial_value": pt.initial_value is not None,
+                "previous_value": pt.previous_value is not None,
+                "current_value": pt.current_value is not None,
+                "current_change": pt.current_change is not None,
+                "cumulative_change": pt.cumulative_change is not None,
+                "change_rate": pt.change_rate is not None,
+                "safety_status": bool(pt.safety_status),
+            }
+
+        # ── c) 数据样本（前2个测点）────────────────────────
+        samples: list[str] = []
+        if is_deep:
+            for dp in table.deep_points[:2]:
+                parts = [f"深度{dp.depth}m"]
+                if dp.previous_cumulative is not None:
+                    parts.append(f"上次累计={dp.previous_cumulative:.2f}")
+                if dp.current_cumulative is not None:
+                    parts.append(f"本次累计={dp.current_cumulative:.2f}")
+                if dp.change_rate is not None:
+                    parts.append(f"速率={dp.change_rate:.3f}")
+                samples.append(", ".join(parts))
+        else:
+            for pt in table.points[:2]:
+                parts = [pt.point_id]
+                if pt.initial_value is not None:
+                    parts.append(f"初始={pt.initial_value:.5g}")
+                if pt.previous_value is not None:
+                    parts.append(f"上次={pt.previous_value:.5g}")
+                if pt.current_value is not None:
+                    parts.append(f"本次={pt.current_value:.5g}")
+                if pt.current_change is not None:
+                    parts.append(f"本次变化={pt.current_change:.2f}")
+                if pt.cumulative_change is not None:
+                    parts.append(f"累计={pt.cumulative_change:.2f}")
+                if pt.change_rate is not None:
+                    parts.append(f"速率={pt.change_rate:.4f}")
+                samples.append(", ".join(parts))
+
+        # ── d) 单位分析 ──────────────────────────────────
+        if cfg.unit == "m" and cfg.unit_conversion == 1000.0:
+            conversion_note = "高程数据(m), 需×1000转换为mm"
+        elif cfg.unit == "kN":
+            conversion_note = "力学数据(kN), 无需转换"
+        else:
+            conversion_note = "无需转换"
+
+        # ── e) 初始值可靠性分析 ───────────────────────────
+        cat = table.category
+        if cat in (MonitoringCategory.ANCHOR_FORCE, MonitoringCategory.STRUT_FORCE):
+            reliability_reason = "锚索/支撑: 初始内力可靠，累计变化=本次内力-初始内力"
+        elif cfg.unit == "m" or cat in (MonitoringCategory.VERTICAL_DISP, MonitoringCategory.SETTLEMENT):
+            if not cfg.initial_value_reliable:
+                reliability_reason = (
+                    "高程数据: 表中初始高程可能非项目首测基准，"
+                    "精度仅5位小数(0.01mm)，经多期累积误差可达数mm"
+                )
+            else:
+                reliability_reason = "初始值可靠，可直接计算累计变化"
+        elif cat == MonitoringCategory.WATER_LEVEL:
+            reliability_reason = (
+                "水位数据: 初始基准可能因施工阶段改变，"
+                "(本次-初始)可能与报告累计变化完全不同"
+            )
+        elif not cfg.initial_value_reliable:
+            reliability_reason = "初始基准可能不同，需人工确认"
+        else:
+            reliability_reason = "初始值可靠，可直接计算累计变化"
+
+        # ── f) 监测间隔推断 ──────────────────────────────
+        interval_days = cfg.interval_days
+        interval_source = "报告日期范围"
+        if interval_days is None:
+            interval_days = _infer_interval_from_table(table)
+            interval_source = "从数据反推(众数)" if interval_days else "待推断"
+
+        # ── g) 验证方法列表 ──────────────────────────────
+        methods: list[dict] = []
+        if cat in (MonitoringCategory.ANCHOR_FORCE, MonitoringCategory.STRUT_FORCE):
+            methods.append({
+                "name": "锚索累计变化验证",
+                "formula": "本次内力 - 初始内力",
+                "tolerance": f"{cfg.cumulative_tolerance}kN",
+                "severity": "error",
+            })
+        elif is_deep:
+            interval_str = f"{interval_days:.0f}" if interval_days else "?"
+            methods.append({
+                "name": "深层位移速率验证",
+                "formula": f"abs(本次累计 - 上次累计) / {interval_str}天",
+                "tolerance": f"{cfg.rate_tolerance}mm/d",
+                "severity": "error",
+            })
+        else:
+            conv_suffix = f" × {cfg.unit_conversion:.0f}" if cfg.unit_conversion != 1.0 else ""
+            methods.append({
+                "name": "累计变化量验证",
+                "formula": f"(本次测值 - 初始测值){conv_suffix}",
+                "tolerance": f"{cfg.cumulative_tolerance}mm",
+                "severity": cfg.severity_for_cumulative,
+            })
+            interval_str = f"{interval_days:.0f}" if interval_days else "?"
+            methods.append({
+                "name": "变化速率验证",
+                "formula": f"本次变化量 / {interval_str}天",
+                "tolerance": f"{cfg.rate_tolerance}mm/d",
+                "severity": "error",
+            })
+
+        # 统计验证对所有表通用
+        stats_desc = "正/负方向最大值, 最大速率"
+        if is_deep:
+            stats_desc += " (豁免跨表引用检查)"
+        elif cat in (MonitoringCategory.ANCHOR_FORCE, MonitoringCategory.STRUT_FORCE):
+            stats_desc = "最大/最小内力"
+        methods.append({
+            "name": "统计验证",
+            "formula": stats_desc,
+            "tolerance": f"{FLOAT_TOLERANCE}",
+            "severity": "error",
+        })
+
+        # ── h) 特殊说明 ─────────────────────────────────
+        notes: list[str] = []
+        if is_deep:
+            notes.append("深层位移表豁免跨表引用检查(行业惯例, 全局最大引用跨孔位数据)")
+            notes.append("速率比较使用绝对值(忽略方向符号), 避免正负号导致误报")
+        if cfg.unit == "m" and not cfg.initial_value_reliable:
+            notes.append("高程数据累计变化不一致仅标warning, 因初始值可能非项目首测基准")
+        if cat == MonitoringCategory.WATER_LEVEL:
+            notes.append(f"水位容差放大至{cfg.cumulative_tolerance}mm, 初始基准可能不同")
+        if interval_days and interval_source == "从数据反推(众数)":
+            notes.append("监测间隔从数据反推(取众数), 个别测点间隔不同时降级为warning")
+
+        plans.append({
+            "table_index": idx + 1,
+            "table_name": name,
+            "category": cat.value,
+            "point_count": point_count,
+            "is_deep": is_deep,
+            "fields_detected": fields,
+            "data_sample": samples,
+            "unit": cfg.unit,
+            "unit_conversion": cfg.unit_conversion,
+            "conversion_note": conversion_note,
+            "initial_reliable": cfg.initial_value_reliable,
+            "reliability_reason": reliability_reason,
+            "interval_days": interval_days,
+            "interval_source": interval_source,
+            "verification_methods": methods,
+            "tolerance": cfg.cumulative_tolerance,
+            "severity": cfg.severity_for_cumulative,
+            "special_notes": notes,
+        })
+
+    logger.info("分析计划已生成: %d 张表", len(plans))
+    return plans
+
+
+def _infer_interval_from_table(table: MonitoringTable) -> Optional[float]:
+    """从表中测点数据反推监测间隔天数（取众数），兼容普通表和深层位移表"""
+    from collections import Counter
+
+    intervals: list[float] = []
+    if table.deep_points:
+        for dp in table.deep_points:
+            if (
+                dp.previous_cumulative is not None
+                and dp.current_cumulative is not None
+                and dp.change_rate is not None
+                and abs(dp.change_rate) > 1e-6
+            ):
+                diff = abs(dp.current_cumulative - dp.previous_cumulative)
+                if diff > 1e-6:
+                    inferred = diff / abs(dp.change_rate)
+                    if 0.5 < inferred < 365:
+                        intervals.append(round(inferred))
+    else:
+        for pt in table.points:
+            if (
+                pt.current_change is not None
+                and pt.change_rate is not None
+                and abs(pt.change_rate) > 1e-6
+            ):
+                interval = pt.current_change / pt.change_rate
+                if 0.5 < abs(interval) < 365:
+                    intervals.append(round(abs(interval)))
+    if not intervals:
+        return None
+    return Counter(intervals).most_common(1)[0][0]
+
+
 def enrich_configs_with_llm(report: MonitoringReport) -> None:
     """
     可选的 LLM 增强配置步骤。
