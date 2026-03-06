@@ -387,9 +387,9 @@ def enrich_configs_with_llm(report: MonitoringReport) -> None:
         return
 
     from openai import OpenAI
-    from src.config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
+    import src.config as cfg
 
-    client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+    client = OpenAI(api_key=cfg.LLM_API_KEY, base_url=cfg.LLM_BASE_URL)
 
     table_summaries = []
     for idx in tables_needing_review:
@@ -417,7 +417,7 @@ def enrich_configs_with_llm(report: MonitoringReport) -> None:
 
     try:
         resp = client.chat.completions.create(
-            model=LLM_MODEL,
+            model=cfg.LLM_MODEL,
             messages=[
                 {"role": "system", "content": "你是建筑变形监测数据分析专家。返回纯JSON，不要添加其他文字。"},
                 {"role": "user", "content": prompt},

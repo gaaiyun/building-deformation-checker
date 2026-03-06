@@ -78,12 +78,12 @@ def verify_errors_with_llm(
     )
 
     from openai import OpenAI
-    from src.config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
+    import src.config as cfg
 
     try:
-        client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+        client = OpenAI(api_key=cfg.LLM_API_KEY, base_url=cfg.LLM_BASE_URL)
         resp = client.chat.completions.create(
-            model=LLM_MODEL,
+            model=cfg.LLM_MODEL,
             messages=[
                 {"role": "system", "content": "你是建筑变形监测数据审核专家。返回纯JSON。"},
                 {"role": "user", "content": prompt},

@@ -13,7 +13,7 @@ from __future__ import annotations
 import json, logging, re
 from typing import Any
 from openai import OpenAI
-from src.config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
+import src.config as cfg
 from src.models.data_models import (
     DeepDisplacementPoint, MeasurementPoint, MonitoringCategory,
     MonitoringReport, MonitoringTable, ReportSummaryItem,
@@ -21,7 +21,7 @@ from src.models.data_models import (
 )
 
 logger = logging.getLogger(__name__)
-client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+client = OpenAI(api_key=cfg.LLM_API_KEY, base_url=cfg.LLM_BASE_URL)
 
 SYSTEM_PROMPT = """\
 你是建筑变形监测报告数据提取专家。从监测报告文本中精确提取所有监测数据表格，转为标准化JSON。
@@ -279,7 +279,7 @@ def parse_report_with_llm(raw_text: str) -> MonitoringReport:
         )
         try:
             resp = client.chat.completions.create(
-                model=LLM_MODEL,
+                model=cfg.LLM_MODEL,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": msg},
@@ -327,7 +327,7 @@ def verify_report_with_llm(report_md: str, raw_text: str) -> str:
     )
     try:
         resp = client.chat.completions.create(
-            model=LLM_MODEL,
+            model=cfg.LLM_MODEL,
             messages=[
                 {"role": "system", "content": "你是建筑工程监测领域资深专家。正负号代表方向不代表大小。"},
                 {"role": "user", "content": msg},

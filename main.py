@@ -33,8 +33,15 @@ def main():
     parser.add_argument("--no-ai-review", action="store_true", help="跳过 AI 最终审核")
     parser.add_argument("--no-self-verify", action="store_true", help="跳过自验证")
     parser.add_argument("--output", "-o", default=None, help="输出报告路径")
+    parser.add_argument("--model", "-m", default=None,
+                        help="指定 LLM 模型 (如 qwen3.5-plus, kimi-k2.5, glm-5)")
 
     args = parser.parse_args()
+
+    if args.model:
+        from src.config import set_model
+        set_model(args.model)
+        logger.info("使用模型: %s", args.model)
 
     pdf_path = args.pdf_path
     if not Path(pdf_path).exists():

@@ -288,6 +288,16 @@ with st.sidebar:
     auto_fallback = ocr_mode == "智能切换（推荐）"
 
     st.divider()
+    st.subheader("🤖 AI 模型")
+    from src.config import AVAILABLE_MODELS
+    selected_model = st.selectbox(
+        "选择 LLM 模型",
+        AVAILABLE_MODELS,
+        index=0,
+        help="Coding Plan 支持的模型，不同模型在理解表格和语义匹配上各有优劣",
+    )
+
+    st.divider()
     st.subheader("AI 功能")
     do_self_verify = st.checkbox("AI 自验证（确认错误）", value=True, help="对检出的错误用AI二次确认，减少误报")
     do_ai_review = st.checkbox("AI 最终审核", value=False, help="由AI专家对检查结果做最终整体评估")
@@ -316,9 +326,13 @@ if uploaded is not None:
     if st.button("🚀 开始检查", type="primary", use_container_width=True):
         log_records.clear()
 
+        # 运行时切换模型
+        from src.config import set_model
+        set_model(selected_model)
+
         # ── 实时进度容器 ──────────────────────────────
         progress_bar = st.progress(0)
-        status_container = st.status("正在检查报告...", expanded=True)
+        status_container = st.status(f"正在检查报告（模型: {selected_model}）...", expanded=True)
         start_time = time.time()
 
         try:
