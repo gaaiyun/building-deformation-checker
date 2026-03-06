@@ -1,45 +1,91 @@
 """
 建筑变形监测报告检查智能体 — Streamlit Web UI
+
+功能:
+- 上传PDF监测报告，自动提取数据并检查
+- 实时进度与日志显示
+- 多格式导出（Markdown / Word / HTML）
+- 分类展示检查结果
 """
 
+import io
 import logging
 import tempfile
+import time
+from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S")
+# ── 日志配置：捕获到 StreamHandler 供界面显示 ──────────
+log_records: list[str] = []
+
+
+class StreamlitLogHandler(logging.Handler):
+    """把日志记录收集到列表，供 UI 实时展示"""
+    def emit(self, record):
+        log_records.append(self.format(record))
+
+
+handler = StreamlitLogHandler()
+handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S"))
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+root_logger.addHandler(handler)
 logger = logging.getLogger("app")
 
-st.set_page_config(page_title="建筑变形监测报告检查", page_icon="🏗️", layout="wide")
+# ── 页面配置 ──────────────────────────────────────────
+st.set_page_config(
+    page_title="建筑变形监测报告检查",
+    page_icon="🏗️",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# ── 自定义样式 ────────────────────────────────────────
+st.markdown("""
+<style>
+    .stMetric > div { border: 1px solid #e0e0e0; border-radius: 8px; padding: 12px; }
+    .step-done { color: #28a745; }
+    .step-running { color: #fd7e14; }
+    div[data-testid="stExpander"] details summary p { font-weight: 600; }
+</style>
+""", unsafe_allow_html=True)
 
 st.title("🏗️ 建筑变形监测报告检查智能体")
-st.caption("上传监测报告PDF，自动提取数据、验证计算、检查统计和逻辑")
+st.caption("上传监测报告PDF → AI自动提取数据 → 逐条验证计算 → 生成检查报告")
 
+# ── 侧边栏设置 ────────────────────────────────────────
 with st.sidebar:
-    st.header("⚙️ 设置")
+    st.header("⚙️ 检查设置")
+
     ocr_mode = st.radio(
         "PDF提取方式",
         ["智能切换（推荐）", "仅 pdfplumber", "强制 PaddleOCR"],
         index=0,
-        help="智能切换：先用pdfplumber，效果不好自动切换PaddleOCR",
+        help="智能切换：先用pdfplumber提取，效果不好时自动尝试PaddleOCR",
     )
     use_ocr = ocr_mode == "强制 PaddleOCR"
     auto_fallback = ocr_mode == "智能切换（推荐）"
-    do_ai_review = st.checkbox("AI 最终审核", value=True)
-    do_self_verify = st.checkbox("AI 自验证（确认错误）", value=True)
-    st.divider()
-    st.markdown("**计算公式**")
-    st.markdown("""
-    - 本次变化 = 本次测值 − 上次测值
-    - 累计变化 = 本次测值 − 初始测值
-    - 变化速率 = 本次变化 / 时间(天)
-    """)
-    st.divider()
-    st.markdown("**注意**")
-    st.markdown("正负号代表**方向**，不代表大小")
 
-uploaded = st.file_uploader("上传监测报告 PDF", type=["pdf"], accept_multiple_files=False)
+    st.divider()
+    st.subheader("AI 功能")
+    do_self_verify = st.checkbox("AI 自验证（确认错误）", value=True, help="对检出的错误用AI二次确认，减少误报")
+    do_ai_review = st.checkbox("AI 最终审核", value=False, help="由AI专家对检查结果做最终整体评估")
+
+    st.divider()
+    st.subheader("📐 核心计算公式")
+    st.code("本次变化 = 本次测值 − 上次测值\n累计变化 = 本次测值 − 初始测值\n变化速率 = 本次变化 / 时间(天)", language=None)
+    st.info("⚠️ 正负号代表**方向**，不代表大小", icon="ℹ️")
+
+# ── 文件上传区 ────────────────────────────────────────
+uploaded = st.file_uploader(
+    "📄 上传监测报告 PDF",
+    type=["pdf"],
+    accept_multiple_files=False,
+    help="支持文字版PDF和扫描件PDF",
+)
 
 if uploaded is not None:
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
@@ -47,164 +93,390 @@ if uploaded is not None:
         tmp_path = tmp.name
 
     pdf_name = Path(uploaded.name).stem
+    st.success(f"已上传: **{uploaded.name}** ({uploaded.size / 1024:.0f} KB)")
 
     if st.button("🚀 开始检查", type="primary", use_container_width=True):
-        progress = st.progress(0, text="准备中...")
-        status_area = st.empty()
+        log_records.clear()
+
+        # ── 实时进度容器 ──────────────────────────────
+        progress_bar = st.progress(0)
+        status_container = st.status("正在检查报告...", expanded=True)
+        start_time = time.time()
 
         try:
-            # Step 1
-            progress.progress(5, text="Step 1/8: 提取PDF内容...")
-            status_area.info("正在提取PDF文本...")
+            # ━━ Step 1: PDF 提取 ━━━━━━━━━━━━━━━━━━━━━
+            with status_container:
+                st.write("📄 **Step 1/7** — 提取 PDF 内容...")
+            progress_bar.progress(5)
+
             from src.tools.pdf_extractor import extract_pdf
             raw_text = extract_pdf(tmp_path, use_ocr=use_ocr, auto_fallback=auto_fallback)
-            status_area.success(f"PDF提取完成，共 {len(raw_text)} 字符")
 
-            # Step 2
-            progress.progress(10, text="Step 2/8: LLM结构化解析...")
-            status_area.info("正在调用AI解析表格数据（可能需要1-3分钟）...")
+            with status_container:
+                st.write(f"  ✅ 提取完成: {len(raw_text):,} 字符")
+
+            # ━━ Step 2: LLM 结构化解析 ━━━━━━━━━━━━━━━
+            with status_container:
+                st.write("🤖 **Step 2/7** — AI 结构化解析（可能需要1-3分钟）...")
+            progress_bar.progress(10)
+
             from src.tools.llm_parser import parse_report_with_llm
             report = parse_report_with_llm(raw_text)
             report.raw_text = raw_text
 
-            # Step 2b: Enrich configs
-            progress.progress(35, text="Step 2b/8: 动态配置优化...")
             from src.tools.table_analyzer import enrich_configs_with_llm
             enrich_configs_with_llm(report)
-            status_area.success(f"解析完成: {report.project_name}，{len(report.tables)}张表")
 
-            # Step 3
-            progress.progress(40, text="Step 3/8: 计算验证...")
+            with status_container:
+                st.write(f"  ✅ 解析完成: **{report.project_name}** — {len(report.tables)} 张表, "
+                         f"{len(report.thresholds)} 项阈值, {len(report.summary_items)} 项汇总")
+            progress_bar.progress(40)
+
+            # ━━ Step 3: 计算验证 ━━━━━━━━━━━━━━━━━━━━━
+            with status_container:
+                st.write("🔢 **Step 3/7** — 计算验证...")
+            progress_bar.progress(45)
+
             from src.tools.calculation_checker import run_calculation_checks
             calc_issues = run_calculation_checks(report)
 
-            # Step 4
-            progress.progress(50, text="Step 4/8: 统计验证...")
+            with status_container:
+                st.write(f"  ✅ 计算验证: {len(calc_issues)} 个问题")
+
+            # ━━ Step 4: 统计验证 ━━━━━━━━━━━━━━━━━━━━━
+            with status_container:
+                st.write("📈 **Step 4/7** — 统计验证...")
+            progress_bar.progress(55)
+
             from src.tools.statistics_checker import run_statistics_checks
             stats_issues = run_statistics_checks(report)
 
-            # Step 5
-            progress.progress(55, text="Step 5/8: 逻辑检查（语义匹配）...")
+            with status_container:
+                st.write(f"  ✅ 统计验证: {len(stats_issues)} 个问题")
+
+            # ━━ Step 5: 逻辑检查 ━━━━━━━━━━━━━━━━━━━━━
+            with status_container:
+                st.write("🔍 **Step 5/7** — 逻辑检查（AI语义匹配）...")
+            progress_bar.progress(60)
+
             from src.tools.logic_checker import run_logic_checks
             logic_issues = run_logic_checks(report)
 
-            # Step 6: Self-verify
+            with status_container:
+                st.write(f"  ✅ 逻辑检查: {len(logic_issues)} 个问题")
+
+            # ━━ Step 6: AI 自验证 ━━━━━━━━━━━━━━━━━━━━
             all_issues = calc_issues + stats_issues + logic_issues
             if do_self_verify:
-                errors = [i for i in all_issues if i.severity == "error"]
-                if errors:
-                    progress.progress(65, text="Step 6/8: AI自验证...")
-                    status_area.info(f"AI正在确认 {len(errors)} 个错误...")
+                errors_to_verify = [i for i in all_issues if i.severity == "error"]
+                if errors_to_verify:
+                    with status_container:
+                        st.write(f"🔄 **Step 6/7** — AI 自验证（{len(errors_to_verify)} 个错误）...")
+                    progress_bar.progress(70)
+
                     from src.tools.self_verifier import verify_errors_with_llm
                     all_issues = verify_errors_with_llm(report, all_issues)
 
-            # Step 7
+                    with status_container:
+                        st.write("  ✅ 自验证完成")
+
+            # ━━ Step 7: AI 最终审核 ━━━━━━━━━━━━━━━━━━
             ai_review = ""
             if do_ai_review:
-                progress.progress(75, text="Step 7/8: AI最终审核...")
-                status_area.info("AI专家审核中...")
+                with status_container:
+                    st.write("🧑‍💼 **Step 7/7** — AI 专家最终审核...")
+                progress_bar.progress(80)
+
                 from src.tools.report_generator import generate_report_md
                 from src.tools.llm_parser import verify_report_with_llm
                 prelim = generate_report_md(report, calc_issues, stats_issues, logic_issues)
                 ai_review = verify_report_with_llm(prelim, raw_text)
 
-            progress.progress(90, text="Step 8/8: 生成检查报告...")
+                with status_container:
+                    st.write("  ✅ AI 审核完成")
+
+            # ━━ 生成报告 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            progress_bar.progress(90)
             from src.tools.report_generator import generate_report_md, save_report
             final_md = generate_report_md(report, calc_issues, stats_issues, logic_issues, ai_review)
             output_path = f"output/{pdf_name}_检查报告.md"
             save_report(final_md, output_path)
 
-            progress.progress(100, text="检查完成!")
-            status_area.empty()
+            elapsed = time.time() - start_time
+            progress_bar.progress(100)
+            status_container.update(label=f"✅ 检查完成！耗时 {elapsed:.0f} 秒", state="complete", expanded=False)
 
-            # ── 结果展示 ──────────────────────────────
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # 结果展示区
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
             errors = [i for i in all_issues if i.severity == "error"]
             warnings = [i for i in all_issues if i.severity == "warning"]
             infos = [i for i in all_issues if i.severity == "info"]
 
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("数据表", f"{len(report.tables)} 张")
-            col2.metric("错误", f"{len(errors)} 个", delta=None if not errors else f"-{len(errors)}", delta_color="inverse")
-            col3.metric("警告", f"{len(warnings)} 个")
-            col4.metric("提示", f"{len(infos)} 个")
+            st.markdown("---")
+            st.subheader("📊 检查结果总览")
 
-            tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 检查报告", "🔢 计算验证", "📈 统计验证", "🔍 逻辑检查", "🤖 AI审核"])
+            # ── 指标卡片 ──────────────────────────────
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("📋 数据表", f"{len(report.tables)} 张")
+            c2.metric("❌ 错误", f"{len(errors)}", delta=f"-{len(errors)}" if errors else None, delta_color="inverse")
+            c3.metric("⚠️ 警告", f"{len(warnings)}")
+            c4.metric("ℹ️ 提示", f"{len(infos)}")
+            c5.metric("⏱️ 耗时", f"{elapsed:.0f}s")
 
-            with tab1:
+            # ── 选项卡 ───────────────────────────────
+            tab_report, tab_calc, tab_stats, tab_logic, tab_ai, tab_log = st.tabs([
+                "📊 检查报告", "🔢 计算验证", "📈 统计验证",
+                "🔍 逻辑检查", "🤖 AI审核", "📋 运行日志",
+            ])
+
+            with tab_report:
                 st.markdown(final_md)
 
-            with tab2:
-                if not calc_issues:
-                    st.success("计算验证全部通过")
-                else:
-                    for issue in calc_issues:
-                        if issue.severity == "error":
-                            st.error(f"**{issue.table_name}** | {issue.point_id} | {issue.message}")
-                        elif issue.severity == "warning":
-                            st.warning(f"**{issue.table_name}** | {issue.point_id} | {issue.message}")
-                        else:
-                            st.info(issue.message)
+            with tab_calc:
+                _render_issues("计算验证", calc_issues)
 
-            with tab3:
-                if not stats_issues:
-                    st.success("统计验证全部通过")
-                else:
-                    for issue in stats_issues:
-                        if issue.severity == "error":
-                            st.error(f"**{issue.table_name}** | {issue.point_id} | {issue.message}")
-                        else:
-                            st.warning(f"**{issue.table_name}** | {issue.message}")
+            with tab_stats:
+                _render_issues("统计验证", stats_issues)
 
-            with tab4:
-                if not logic_issues:
-                    st.success("逻辑检查全部通过")
-                else:
-                    for issue in logic_issues:
-                        if issue.severity == "error":
-                            st.error(f"**{issue.table_name}** | {issue.point_id} | {issue.message}")
-                        elif issue.severity == "warning":
-                            st.warning(f"**{issue.table_name}** | {issue.point_id} | {issue.message}")
-                        else:
-                            st.info(issue.message)
+            with tab_logic:
+                _render_issues("逻辑检查", logic_issues)
 
-            with tab5:
+            with tab_ai:
                 if ai_review:
                     st.markdown(ai_review)
                 else:
-                    st.info("未启用AI审核")
+                    st.info("未启用AI审核，可在侧边栏开启")
 
-            st.divider()
-            st.download_button(
-                label="📥 下载检查报告 (Markdown)",
-                data=final_md,
-                file_name=f"{pdf_name}_检查报告.md",
-                mime="text/markdown",
-                use_container_width=True,
-            )
+            with tab_log:
+                st.text("\n".join(log_records) if log_records else "暂无日志")
+
+            # ── 导出按钮 ──────────────────────────────
+            st.markdown("---")
+            st.subheader("📥 导出检查报告")
+
+            dl_col1, dl_col2, dl_col3 = st.columns(3)
+
+            with dl_col1:
+                st.download_button(
+                    label="📄 下载 Markdown",
+                    data=final_md,
+                    file_name=f"{pdf_name}_检查报告.md",
+                    mime="text/markdown",
+                    use_container_width=True,
+                )
+
+            with dl_col2:
+                docx_bytes = _generate_docx(final_md, report, errors, warnings)
+                st.download_button(
+                    label="📝 下载 Word (docx)",
+                    data=docx_bytes,
+                    file_name=f"{pdf_name}_检查报告.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    use_container_width=True,
+                )
+
+            with dl_col3:
+                html_content = _generate_html(final_md, report.project_name)
+                st.download_button(
+                    label="🌐 下载 HTML (可打印PDF)",
+                    data=html_content,
+                    file_name=f"{pdf_name}_检查报告.html",
+                    mime="text/html",
+                    use_container_width=True,
+                )
 
         except Exception as e:
-            progress.empty()
-            status_area.empty()
+            progress_bar.empty()
+            status_container.update(label="❌ 处理失败", state="error")
             st.error(f"处理过程中出错: {e}")
             logger.exception("处理失败")
-else:
-    st.info("👆 请上传一个监测报告PDF文件开始检查")
 
-    with st.expander("ℹ️ 系统说明"):
+            with st.expander("📋 查看运行日志"):
+                st.text("\n".join(log_records))
+
+else:
+    # ── 未上传文件时的欢迎页面 ────────────────────────
+    col_left, col_right = st.columns([2, 1])
+
+    with col_left:
+        st.info("👆 请上传一个监测报告 PDF 文件开始检查")
+
+        st.markdown("### 🔍 检查流程")
         st.markdown("""
-### 支持的监测项类型
-- 支护结构顶部水平位移 / 基坑顶位移
-- 支护结构顶部竖向位移 / 基坑顶沉降
+1. **PDF 提取** — 自动识别文字版或扫描件，智能选择最佳提取方式
+2. **AI 结构化解析** — 用大语言模型理解不同公司的表格格式，提取为标准数据
+3. **计算验证** — 逐条验证累计变化量、变化速率（动态容差适配不同数据类型）
+4. **统计验证** — 验证最大值/最小值统计，检测方向性错误和跨表引用
+5. **逻辑检查** — AI语义匹配阈值与分表，检查安全状态判定
+6. **AI 自验证** — 对检出的错误进行二次确认，大幅减少误报
+7. **生成报告** — 多格式导出（Markdown / Word / HTML）
+        """)
+
+    with col_right:
+        st.markdown("### 📋 支持的监测项")
+        st.markdown("""
+- 支护结构顶部水平位移
+- 支护结构顶部竖向位移
 - 周边地面沉降 / 道路沉降
 - 管线沉降
-- 地下水位 / 水位监测
+- 地下水位
 - 锚索拉力 / 支撑轴力
-- 深层水平位移 / 支护桩测斜
-
-### 检查内容
-1. **计算验证**: 逐条验证累计变化量、变化速率（动态容差）
-2. **统计验证**: 验证最大值/最小值/最大速率统计（方向性+跨表检查）
-3. **逻辑检查**: 安全状态判定、汇总表一致性（AI语义匹配）
-4. **AI自验证**: 对检出的错误进行二次确认，减少误报
-5. **AI审核**: 由AI专家对检查结果做最终确认
+- 深层水平位移 / 测斜
+- 立柱位移 / 沉降
+- 裂缝监测
         """)
+
+        st.markdown("### ✨ 核心特点")
+        st.markdown("""
+- 🧠 AI 语义理解，适配不同公司格式
+- 📐 动态容差，不硬编码规则
+- 🔄 二次验证，减少误报
+- 📊 多格式导出
+        """)
+
+
+# ── 辅助函数 ──────────────────────────────────────────
+
+def _render_issues(title: str, issues: list) -> None:
+    """按表名分组展示检查问题"""
+    if not issues:
+        st.success(f"{title}全部通过 ✅")
+        return
+
+    errors = [i for i in issues if i.severity == "error"]
+    warnings = [i for i in issues if i.severity == "warning"]
+    infos = [i for i in issues if i.severity == "info"]
+
+    if errors:
+        st.error(f"发现 {len(errors)} 个错误")
+    if warnings:
+        st.warning(f"发现 {len(warnings)} 个警告")
+
+    grouped = defaultdict(list)
+    for issue in issues:
+        grouped[issue.table_name].append(issue)
+
+    for table_name, table_issues in grouped.items():
+        err_count = sum(1 for i in table_issues if i.severity == "error")
+        warn_count = sum(1 for i in table_issues if i.severity == "warning")
+        badge = ""
+        if err_count:
+            badge += f"❌{err_count} "
+        if warn_count:
+            badge += f"⚠️{warn_count}"
+
+        with st.expander(f"**{table_name}** {badge}", expanded=bool(err_count)):
+            for issue in table_issues:
+                if issue.severity == "error":
+                    st.error(f"**{issue.point_id}** | {issue.field_name}: {issue.message}")
+                elif issue.severity == "warning":
+                    st.warning(f"**{issue.point_id}** | {issue.field_name}: {issue.message}")
+                else:
+                    st.info(issue.message)
+
+
+def _generate_docx(md_content: str, report, errors: list, warnings: list) -> bytes:
+    """生成 Word 文档"""
+    from docx import Document
+    from docx.shared import Pt, RGBColor, Inches
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    doc = Document()
+
+    # 标题
+    title = doc.add_heading("建筑变形监测报告检查报告", level=0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    # 基本信息
+    doc.add_paragraph(f"项目名称: {report.project_name}")
+    doc.add_paragraph(f"监测单位: {report.monitoring_company}")
+    doc.add_paragraph(f"报告编号: {report.report_number}")
+    doc.add_paragraph(f"监测日期: {report.monitoring_date}")
+    doc.add_paragraph(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+    # 检查结果
+    doc.add_heading("检查结果统计", level=1)
+    table = doc.add_table(rows=4, cols=2, style="Table Grid")
+    table.cell(0, 0).text = "类别"
+    table.cell(0, 1).text = "数量"
+    table.cell(1, 0).text = "错误"
+    table.cell(1, 1).text = str(len(errors))
+    table.cell(2, 0).text = "警告"
+    table.cell(2, 1).text = str(len(warnings))
+    table.cell(3, 0).text = "合计"
+    table.cell(3, 1).text = str(len(errors) + len(warnings))
+
+    # 错误详情
+    if errors:
+        doc.add_heading("错误详情", level=1)
+        for i, err in enumerate(errors, 1):
+            p = doc.add_paragraph()
+            run = p.add_run(f"{i}. [{err.table_name}] {err.point_id} - {err.field_name}")
+            run.bold = True
+            run.font.color.rgb = RGBColor(0xCC, 0x00, 0x00)
+            doc.add_paragraph(f"   {err.message}", style="List Bullet")
+
+    # 警告详情
+    if warnings:
+        doc.add_heading("警告详情", level=1)
+        for i, warn in enumerate(warnings, 1):
+            p = doc.add_paragraph()
+            run = p.add_run(f"{i}. [{warn.table_name}] {warn.point_id} - {warn.field_name}")
+            run.bold = True
+            run.font.color.rgb = RGBColor(0xCC, 0x88, 0x00)
+            doc.add_paragraph(f"   {warn.message}", style="List Bullet")
+
+    # 结论
+    doc.add_heading("结论", level=1)
+    if report.conclusion:
+        doc.add_paragraph(f"报告原文结论: {report.conclusion}")
+    if errors:
+        doc.add_paragraph(f"自动检查结论: 发现 {len(errors)} 处错误和 {len(warnings)} 处警告，建议复核。")
+    else:
+        doc.add_paragraph("自动检查结论: 监测报告数据计算与统计结果验证通过。")
+
+    doc.add_paragraph("\n本报告由建筑变形监测报告检查智能体自动生成", style="Intense Quote")
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def _generate_html(md_content: str, project_name: str) -> str:
+    """生成可打印的 HTML 报告"""
+    import markdown
+
+    html_body = markdown.markdown(
+        md_content,
+        extensions=["tables", "fenced_code"],
+    )
+
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>{project_name} - 检查报告</title>
+    <style>
+        body {{ font-family: "Microsoft YaHei", "SimHei", sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; color: #333; }}
+        h1 {{ color: #1a5276; border-bottom: 3px solid #1a5276; padding-bottom: 10px; }}
+        h2 {{ color: #2c3e50; border-bottom: 1px solid #bdc3c7; padding-bottom: 6px; margin-top: 30px; }}
+        table {{ border-collapse: collapse; width: 100%; margin: 15px 0; }}
+        th, td {{ border: 1px solid #ddd; padding: 8px 12px; text-align: left; }}
+        th {{ background-color: #f2f2f2; font-weight: bold; }}
+        tr:nth-child(even) {{ background-color: #fafafa; }}
+        blockquote {{ border-left: 4px solid #3498db; margin: 15px 0; padding: 10px 20px; background: #ecf6fd; }}
+        code {{ background: #f4f4f4; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }}
+        hr {{ border: none; border-top: 1px solid #ddd; margin: 30px 0; }}
+        @media print {{
+            body {{ max-width: 100%; padding: 0; }}
+            h1 {{ page-break-before: avoid; }}
+            table {{ page-break-inside: avoid; }}
+        }}
+    </style>
+</head>
+<body>
+{html_body}
+</body>
+</html>"""
