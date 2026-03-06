@@ -35,6 +35,145 @@ root_logger.setLevel(logging.INFO)
 root_logger.addHandler(handler)
 logger = logging.getLogger("app")
 
+
+# ── 辅助函数（必须在 Streamlit UI 逻辑之前定义）─────────
+
+def _render_issues(title: str, issues: list) -> None:
+    """按表名分组展示检查问题"""
+    if not issues:
+        st.success(f"{title}全部通过 ✅")
+        return
+
+    errors = [i for i in issues if i.severity == "error"]
+    warnings = [i for i in issues if i.severity == "warning"]
+
+    if errors:
+        st.error(f"发现 {len(errors)} 个错误")
+    if warnings:
+        st.warning(f"发现 {len(warnings)} 个警告")
+
+    grouped = defaultdict(list)
+    for issue in issues:
+        grouped[issue.table_name].append(issue)
+
+    for table_name, table_issues in grouped.items():
+        err_count = sum(1 for i in table_issues if i.severity == "error")
+        warn_count = sum(1 for i in table_issues if i.severity == "warning")
+        badge = ""
+        if err_count:
+            badge += f"❌{err_count} "
+        if warn_count:
+            badge += f"⚠️{warn_count}"
+
+        with st.expander(f"**{table_name}** {badge}", expanded=bool(err_count)):
+            for issue in table_issues:
+                if issue.severity == "error":
+                    st.error(f"**{issue.point_id}** | {issue.field_name}: {issue.message}")
+                elif issue.severity == "warning":
+                    st.warning(f"**{issue.point_id}** | {issue.field_name}: {issue.message}")
+                else:
+                    st.info(issue.message)
+
+
+def _generate_docx(md_content: str, report, errors: list, warnings: list) -> bytes:
+    """生成 Word 文档"""
+    from docx import Document
+    from docx.shared import Pt, RGBColor, Inches
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    doc = Document()
+
+    title = doc.add_heading("建筑变形监测报告检查报告", level=0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    doc.add_paragraph(f"项目名称: {report.project_name}")
+    doc.add_paragraph(f"监测单位: {report.monitoring_company}")
+    doc.add_paragraph(f"报告编号: {report.report_number}")
+    doc.add_paragraph(f"监测日期: {report.monitoring_date}")
+    doc.add_paragraph(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+    doc.add_heading("检查结果统计", level=1)
+    table = doc.add_table(rows=4, cols=2, style="Table Grid")
+    table.cell(0, 0).text = "类别"
+    table.cell(0, 1).text = "数量"
+    table.cell(1, 0).text = "错误"
+    table.cell(1, 1).text = str(len(errors))
+    table.cell(2, 0).text = "警告"
+    table.cell(2, 1).text = str(len(warnings))
+    table.cell(3, 0).text = "合计"
+    table.cell(3, 1).text = str(len(errors) + len(warnings))
+
+    if errors:
+        doc.add_heading("错误详情", level=1)
+        for i, err in enumerate(errors, 1):
+            p = doc.add_paragraph()
+            run = p.add_run(f"{i}. [{err.table_name}] {err.point_id} - {err.field_name}")
+            run.bold = True
+            run.font.color.rgb = RGBColor(0xCC, 0x00, 0x00)
+            doc.add_paragraph(f"   {err.message}", style="List Bullet")
+
+    if warnings:
+        doc.add_heading("警告详情", level=1)
+        for i, warn in enumerate(warnings, 1):
+            p = doc.add_paragraph()
+            run = p.add_run(f"{i}. [{warn.table_name}] {warn.point_id} - {warn.field_name}")
+            run.bold = True
+            run.font.color.rgb = RGBColor(0xCC, 0x88, 0x00)
+            doc.add_paragraph(f"   {warn.message}", style="List Bullet")
+
+    doc.add_heading("结论", level=1)
+    if report.conclusion:
+        doc.add_paragraph(f"报告原文结论: {report.conclusion}")
+    if errors:
+        doc.add_paragraph(f"自动检查结论: 发现 {len(errors)} 处错误和 {len(warnings)} 处警告，建议复核。")
+    else:
+        doc.add_paragraph("自动检查结论: 监测报告数据计算与统计结果验证通过。")
+
+    doc.add_paragraph("\n本报告由建筑变形监测报告检查智能体自动生成", style="Intense Quote")
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def _generate_html(md_content: str, project_name: str) -> str:
+    """生成可打印的 HTML 报告"""
+    import markdown
+
+    html_body = markdown.markdown(
+        md_content,
+        extensions=["tables", "fenced_code"],
+    )
+
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>{project_name} - 检查报告</title>
+    <style>
+        body {{ font-family: "Microsoft YaHei", "SimHei", sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; color: #333; }}
+        h1 {{ color: #1a5276; border-bottom: 3px solid #1a5276; padding-bottom: 10px; }}
+        h2 {{ color: #2c3e50; border-bottom: 1px solid #bdc3c7; padding-bottom: 6px; margin-top: 30px; }}
+        table {{ border-collapse: collapse; width: 100%; margin: 15px 0; }}
+        th, td {{ border: 1px solid #ddd; padding: 8px 12px; text-align: left; }}
+        th {{ background-color: #f2f2f2; font-weight: bold; }}
+        tr:nth-child(even) {{ background-color: #fafafa; }}
+        blockquote {{ border-left: 4px solid #3498db; margin: 15px 0; padding: 10px 20px; background: #ecf6fd; }}
+        code {{ background: #f4f4f4; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }}
+        hr {{ border: none; border-top: 1px solid #ddd; margin: 30px 0; }}
+        @media print {{
+            body {{ max-width: 100%; padding: 0; }}
+            h1 {{ page-break-before: avoid; }}
+            table {{ page-break-inside: avoid; }}
+        }}
+    </style>
+</head>
+<body>
+{html_body}
+</body>
+</html>"""
+
+
 # ── 页面配置 ──────────────────────────────────────────
 st.set_page_config(
     page_title="建筑变形监测报告检查",
@@ -335,148 +474,3 @@ else:
 - 🔄 二次验证，减少误报
 - 📊 多格式导出
         """)
-
-
-# ── 辅助函数 ──────────────────────────────────────────
-
-def _render_issues(title: str, issues: list) -> None:
-    """按表名分组展示检查问题"""
-    if not issues:
-        st.success(f"{title}全部通过 ✅")
-        return
-
-    errors = [i for i in issues if i.severity == "error"]
-    warnings = [i for i in issues if i.severity == "warning"]
-    infos = [i for i in issues if i.severity == "info"]
-
-    if errors:
-        st.error(f"发现 {len(errors)} 个错误")
-    if warnings:
-        st.warning(f"发现 {len(warnings)} 个警告")
-
-    grouped = defaultdict(list)
-    for issue in issues:
-        grouped[issue.table_name].append(issue)
-
-    for table_name, table_issues in grouped.items():
-        err_count = sum(1 for i in table_issues if i.severity == "error")
-        warn_count = sum(1 for i in table_issues if i.severity == "warning")
-        badge = ""
-        if err_count:
-            badge += f"❌{err_count} "
-        if warn_count:
-            badge += f"⚠️{warn_count}"
-
-        with st.expander(f"**{table_name}** {badge}", expanded=bool(err_count)):
-            for issue in table_issues:
-                if issue.severity == "error":
-                    st.error(f"**{issue.point_id}** | {issue.field_name}: {issue.message}")
-                elif issue.severity == "warning":
-                    st.warning(f"**{issue.point_id}** | {issue.field_name}: {issue.message}")
-                else:
-                    st.info(issue.message)
-
-
-def _generate_docx(md_content: str, report, errors: list, warnings: list) -> bytes:
-    """生成 Word 文档"""
-    from docx import Document
-    from docx.shared import Pt, RGBColor, Inches
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-
-    doc = Document()
-
-    # 标题
-    title = doc.add_heading("建筑变形监测报告检查报告", level=0)
-    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-    # 基本信息
-    doc.add_paragraph(f"项目名称: {report.project_name}")
-    doc.add_paragraph(f"监测单位: {report.monitoring_company}")
-    doc.add_paragraph(f"报告编号: {report.report_number}")
-    doc.add_paragraph(f"监测日期: {report.monitoring_date}")
-    doc.add_paragraph(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
-    # 检查结果
-    doc.add_heading("检查结果统计", level=1)
-    table = doc.add_table(rows=4, cols=2, style="Table Grid")
-    table.cell(0, 0).text = "类别"
-    table.cell(0, 1).text = "数量"
-    table.cell(1, 0).text = "错误"
-    table.cell(1, 1).text = str(len(errors))
-    table.cell(2, 0).text = "警告"
-    table.cell(2, 1).text = str(len(warnings))
-    table.cell(3, 0).text = "合计"
-    table.cell(3, 1).text = str(len(errors) + len(warnings))
-
-    # 错误详情
-    if errors:
-        doc.add_heading("错误详情", level=1)
-        for i, err in enumerate(errors, 1):
-            p = doc.add_paragraph()
-            run = p.add_run(f"{i}. [{err.table_name}] {err.point_id} - {err.field_name}")
-            run.bold = True
-            run.font.color.rgb = RGBColor(0xCC, 0x00, 0x00)
-            doc.add_paragraph(f"   {err.message}", style="List Bullet")
-
-    # 警告详情
-    if warnings:
-        doc.add_heading("警告详情", level=1)
-        for i, warn in enumerate(warnings, 1):
-            p = doc.add_paragraph()
-            run = p.add_run(f"{i}. [{warn.table_name}] {warn.point_id} - {warn.field_name}")
-            run.bold = True
-            run.font.color.rgb = RGBColor(0xCC, 0x88, 0x00)
-            doc.add_paragraph(f"   {warn.message}", style="List Bullet")
-
-    # 结论
-    doc.add_heading("结论", level=1)
-    if report.conclusion:
-        doc.add_paragraph(f"报告原文结论: {report.conclusion}")
-    if errors:
-        doc.add_paragraph(f"自动检查结论: 发现 {len(errors)} 处错误和 {len(warnings)} 处警告，建议复核。")
-    else:
-        doc.add_paragraph("自动检查结论: 监测报告数据计算与统计结果验证通过。")
-
-    doc.add_paragraph("\n本报告由建筑变形监测报告检查智能体自动生成", style="Intense Quote")
-
-    buf = io.BytesIO()
-    doc.save(buf)
-    return buf.getvalue()
-
-
-def _generate_html(md_content: str, project_name: str) -> str:
-    """生成可打印的 HTML 报告"""
-    import markdown
-
-    html_body = markdown.markdown(
-        md_content,
-        extensions=["tables", "fenced_code"],
-    )
-
-    return f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <title>{project_name} - 检查报告</title>
-    <style>
-        body {{ font-family: "Microsoft YaHei", "SimHei", sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; color: #333; }}
-        h1 {{ color: #1a5276; border-bottom: 3px solid #1a5276; padding-bottom: 10px; }}
-        h2 {{ color: #2c3e50; border-bottom: 1px solid #bdc3c7; padding-bottom: 6px; margin-top: 30px; }}
-        table {{ border-collapse: collapse; width: 100%; margin: 15px 0; }}
-        th, td {{ border: 1px solid #ddd; padding: 8px 12px; text-align: left; }}
-        th {{ background-color: #f2f2f2; font-weight: bold; }}
-        tr:nth-child(even) {{ background-color: #fafafa; }}
-        blockquote {{ border-left: 4px solid #3498db; margin: 15px 0; padding: 10px 20px; background: #ecf6fd; }}
-        code {{ background: #f4f4f4; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }}
-        hr {{ border: none; border-top: 1px solid #ddd; margin: 30px 0; }}
-        @media print {{
-            body {{ max-width: 100%; padding: 0; }}
-            h1 {{ page-break-before: avoid; }}
-            table {{ page-break-inside: avoid; }}
-        }}
-    </style>
-</head>
-<body>
-{html_body}
-</body>
-</html>"""
