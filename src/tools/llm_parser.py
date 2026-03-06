@@ -120,15 +120,16 @@ def _build_report(data: dict) -> MonitoringReport:
                 previous_cumulative=_sf(dp.get("previous_cumulative")),current_cumulative=_sf(dp.get("current_cumulative")),
                 change_rate=_sf(dp.get("change_rate"))))
         s = tb.get("statistics",{})
-        t.statistics = StatisticsSummary(positive_max_id=str(s.get("positive_max_id","")),positive_max_value=_sf(s.get("positive_max_value")),
-            negative_max_id=str(s.get("negative_max_id","")),negative_max_value=_sf(s.get("negative_max_value")),
-            max_rate_id=str(s.get("max_rate_id","")),max_rate_value=_sf(s.get("max_rate_value")),
-            max_force_id=str(s.get("max_force_id","")),max_force_value=_sf(s.get("max_force_value")),
-            min_force_id=str(s.get("min_force_id","")),min_force_value=_sf(s.get("min_force_value")))
+        def _sid(v): return str(v) if v and str(v).lower() not in ("none","null") else ""
+        t.statistics = StatisticsSummary(positive_max_id=_sid(s.get("positive_max_id")),positive_max_value=_sf(s.get("positive_max_value")),
+            negative_max_id=_sid(s.get("negative_max_id")),negative_max_value=_sf(s.get("negative_max_value")),
+            max_rate_id=_sid(s.get("max_rate_id")),max_rate_value=_sf(s.get("max_rate_value")),
+            max_force_id=_sid(s.get("max_force_id")),max_force_value=_sf(s.get("max_force_value")),
+            min_force_id=_sid(s.get("min_force_id")),min_force_value=_sf(s.get("min_force_value")))
         r.tables.append(t)
     return r
 
-def _split_chunks(text: str, max_chars: int = 12000) -> list[str]:
+def _split_chunks(text: str, max_chars: int = 30000) -> list[str]:
     pages = re.split(r"(?=--- 第 \d+ 页)", text)
     pages = [p for p in pages if p.strip()]
     chunks, cur = [], ""
@@ -147,7 +148,7 @@ def parse_report_with_llm(raw_text: str) -> MonitoringReport:
         msg = f"以下是监测报告第{i+1}/{len(chunks)}段，请提取所有监测数据表格。无表格则tables返回空列表。\n\n```\n{chunk}\n```"
         resp = client.chat.completions.create(model=LLM_MODEL,
             messages=[{"role":"system","content":SYSTEM_PROMPT},{"role":"user","content":msg}],
-            temperature=0.1, max_tokens=16000)
+            temperature=0.1, max_tokens=32000)
         raw = resp.choices[0].message.content or ""
         try:
             parsed = _extract_json_from_response(raw)

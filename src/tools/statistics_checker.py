@@ -7,8 +7,10 @@
   - 最大变化速率统计
   - 最大/最小内力（锚索拉力）
 
-注意：同一监测项可能分布在多张表中（如水平位移分两页），
-统计值可能是跨表的全局统计。
+核心原则：
+  1. 每张表的统计值只与 **该表自身数据** 比对（不跨表聚合）
+  2. 方向性检查：若所有累计值均非正/非负，对应方向统计应为 "-"
+  3. 跨表引用检查：若统计引用的测点不在本表中，视为错误
 """
 
 from __future__ import annotations
@@ -37,57 +39,78 @@ def _fmt(v: Optional[float], p: int = 3) -> str:
     return f"{v:.{p}f}" if v is not None else "N/A"
 
 
-def _gather_sibling_data(
+def _get_table_own_data(
     table: MonitoringTable,
-    all_tables: list[MonitoringTable],
 ) -> tuple[list[tuple[str, float]], list[tuple[str, float]]]:
-    """
-    收集与 table 同类的所有表格数据（用于跨表统计验证）。
-    返回 (cumulative_values, rate_values)。
-    """
-    sibling_tables = [
-        t for t in all_tables
-        if t.monitoring_item == table.monitoring_item
-        and t.category == table.category
-        and (not table.borehole_id or t.borehole_id == table.borehole_id)
-    ]
-
+    """只取当前表自身的数据，不跨表聚合"""
     cum_vals: list[tuple[str, float]] = []
     rate_vals: list[tuple[str, float]] = []
 
-    for t in sibling_tables:
-        for pt in t.points:
-            if pt.cumulative_change is not None:
-                cum_vals.append((pt.point_id, pt.cumulative_change))
-            if pt.change_rate is not None:
-                rate_vals.append((pt.point_id, pt.change_rate))
-        for dp in t.deep_points:
-            label = f"深度{dp.depth}m"
-            if dp.current_cumulative is not None:
-                cum_vals.append((label, dp.current_cumulative))
-            if dp.change_rate is not None:
-                rate_vals.append((label, dp.change_rate))
+    for pt in table.points:
+        if pt.cumulative_change is not None:
+            cum_vals.append((pt.point_id, pt.cumulative_change))
+        if pt.change_rate is not None:
+            rate_vals.append((pt.point_id, pt.change_rate))
+    for dp in table.deep_points:
+        label = f"深度{dp.depth}m"
+        if dp.current_cumulative is not None:
+            cum_vals.append((label, dp.current_cumulative))
+        if dp.change_rate is not None:
+            rate_vals.append((label, dp.change_rate))
 
     return cum_vals, rate_vals
 
 
+def _get_table_point_ids(table: MonitoringTable) -> set[str]:
+    """获取本表所有测点 ID（用于检测跨表引用）"""
+    ids: set[str] = set()
+    for pt in table.points:
+        ids.add(pt.point_id)
+    for dp in table.deep_points:
+        ids.add(f"深度{dp.depth}m")
+        ids.add(str(dp.depth))
+    return ids
+
+
+def _check_cross_table_ref(
+    stat_id: str,
+    stat_field: str,
+    table_point_ids: set[str],
+    table_label: str,
+    issues: list[CheckIssue],
+) -> bool:
+    """检查统计引用的测点是否在本表中。返回 True 表示存在跨表引用问题。"""
+    if not stat_id or stat_id in ("None", "null", "N/A", "-", "/"):
+        return False
+    if stat_id in table_point_ids:
+        return False
+    for pid in table_point_ids:
+        if stat_id in pid or pid in stat_id:
+            return False
+    issues.append(CheckIssue(
+        severity="error",
+        table_name=table_label,
+        point_id=stat_id,
+        field_name=stat_field,
+        expected_value="本表测点",
+        actual_value=stat_id,
+        message=(
+            f"{stat_field}引用了测点 {stat_id}，但该测点不在本表中，"
+            f"疑似错误引用了其他表的统计值"
+        ),
+    ))
+    return True
+
+
 def check_table_statistics(
     table: MonitoringTable,
-    all_tables: list[MonitoringTable],
     issues: list[CheckIssue],
-    already_checked: set[str],
 ) -> None:
     """验证单张表的统计数据"""
     stats = table.statistics
     table_label = table.monitoring_item
     if table.borehole_id:
         table_label += f"({table.borehole_id})"
-
-    # 同名同类表只验证一次统计（因为统计值是全局的）
-    stat_key = f"{table.monitoring_item}|{table.borehole_id or ''}"
-    if stat_key in already_checked:
-        return
-    already_checked.add(stat_key)
 
     has_any_stat = (
         stats.positive_max_value is not None
@@ -99,52 +122,14 @@ def check_table_statistics(
     if not has_any_stat:
         return
 
-    cum_vals, rate_vals = _gather_sibling_data(table, all_tables)
-
-    # ── 深层位移表 ────────────────────────────────────────
-    if table.deep_points:
-        if cum_vals:
-            actual_pos_id, actual_pos_val = max(cum_vals, key=lambda x: x[1])
-            actual_neg_id, actual_neg_val = min(cum_vals, key=lambda x: x[1])
-
-            if stats.positive_max_value is not None:
-                if not _close(actual_pos_val, stats.positive_max_value, FLOAT_TOLERANCE):
-                    issues.append(CheckIssue(
-                        severity="error", table_name=table_label,
-                        point_id=actual_pos_id, field_name="正方向最大统计",
-                        expected_value=_fmt(actual_pos_val),
-                        actual_value=_fmt(stats.positive_max_value),
-                        message=f"正方向最大不符: 实际 {actual_pos_id}={_fmt(actual_pos_val)}, 报告 {stats.positive_max_id}={_fmt(stats.positive_max_value)}",
-                    ))
-
-            if stats.negative_max_value is not None:
-                if not _close(actual_neg_val, stats.negative_max_value, FLOAT_TOLERANCE):
-                    issues.append(CheckIssue(
-                        severity="error", table_name=table_label,
-                        point_id=actual_neg_id, field_name="负方向最大统计",
-                        expected_value=_fmt(actual_neg_val),
-                        actual_value=_fmt(stats.negative_max_value),
-                        message=f"负方向最大不符: 实际 {actual_neg_id}={_fmt(actual_neg_val)}, 报告 {stats.negative_max_id}={_fmt(stats.negative_max_value)}",
-                    ))
-
-        if rate_vals and stats.max_rate_value is not None:
-            actual_rate_id, actual_rate_val = max(rate_vals, key=lambda x: abs(x[1]))
-            if not _close(abs(actual_rate_val), abs(stats.max_rate_value), RATE_TOLERANCE):
-                issues.append(CheckIssue(
-                    severity="error", table_name=table_label,
-                    point_id=actual_rate_id, field_name="最大速率统计",
-                    expected_value=_fmt(actual_rate_val),
-                    actual_value=_fmt(stats.max_rate_value),
-                    message=f"最大速率不符: 实际 {actual_rate_id}={_fmt(actual_rate_val)}, 报告 {stats.max_rate_id}={_fmt(stats.max_rate_value)}",
-                ))
-        return
+    cum_vals, rate_vals = _get_table_own_data(table)
+    table_point_ids = _get_table_point_ids(table)
 
     # ── 锚索拉力 ─────────────────────────────────────────
     if table.category in (MonitoringCategory.ANCHOR_FORCE, MonitoringCategory.STRUT_FORCE):
         force_vals = [
             (pt.point_id, pt.current_value)
-            for t in [tt for tt in all_tables if tt.monitoring_item == table.monitoring_item]
-            for pt in t.points
+            for pt in table.points
             if pt.current_value is not None
         ]
         if force_vals:
@@ -171,52 +156,97 @@ def check_table_statistics(
                     ))
         return
 
-    # ── 通用表格 ──────────────────────────────────────────
+    # ── 通用表格（含深层位移）────────────────────────────────
     tol = FLOAT_TOLERANCE
     if table.category == MonitoringCategory.WATER_LEVEL:
         tol = FLOAT_TOLERANCE * 10
 
     if cum_vals:
-        actual_pos_id, actual_pos_val = max(cum_vals, key=lambda x: x[1])
-        actual_neg_id, actual_neg_val = min(cum_vals, key=lambda x: x[1])
+        pos_vals = [(pid, v) for pid, v in cum_vals if v > 0]
+        neg_vals = [(pid, v) for pid, v in cum_vals if v < 0]
 
+        # ── 正方向最大统计 ────────────────────────────────
         if stats.positive_max_value is not None:
-            if not _close(actual_pos_val, stats.positive_max_value, tol):
-                issues.append(CheckIssue(
-                    severity="error", table_name=table_label,
-                    point_id=actual_pos_id, field_name="正方向最大统计",
-                    expected_value=_fmt(actual_pos_val, 2),
-                    actual_value=_fmt(stats.positive_max_value, 2),
-                    message=f"正方向最大不符: 实际 {actual_pos_id}={_fmt(actual_pos_val, 2)}, 报告 {stats.positive_max_id}={_fmt(stats.positive_max_value, 2)}",
-                ))
+            cross_ref = _check_cross_table_ref(
+                stats.positive_max_id, "正方向最大统计",
+                table_point_ids, table_label, issues,
+            )
+            if not cross_ref:
+                if not pos_vals:
+                    issues.append(CheckIssue(
+                        severity="error", table_name=table_label,
+                        point_id=stats.positive_max_id or "N/A",
+                        field_name="正方向最大统计",
+                        expected_value="无正值，应为'-'",
+                        actual_value=f"{stats.positive_max_id}={_fmt(stats.positive_max_value, 2)}",
+                        message=(
+                            f"所有累计变化量均为非正值，正方向最大统计应为'-'，"
+                            f"但报告显示 {stats.positive_max_id}={_fmt(stats.positive_max_value, 2)}"
+                        ),
+                    ))
+                else:
+                    actual_pos_id, actual_pos_val = max(pos_vals, key=lambda x: x[1])
+                    if not _close(actual_pos_val, stats.positive_max_value, tol):
+                        issues.append(CheckIssue(
+                            severity="error", table_name=table_label,
+                            point_id=actual_pos_id, field_name="正方向最大统计",
+                            expected_value=_fmt(actual_pos_val, 2),
+                            actual_value=_fmt(stats.positive_max_value, 2),
+                            message=f"正方向最大不符: 实际 {actual_pos_id}={_fmt(actual_pos_val, 2)}, 报告 {stats.positive_max_id}={_fmt(stats.positive_max_value, 2)}",
+                        ))
 
+        # ── 负方向最大统计 ────────────────────────────────
         if stats.negative_max_value is not None:
-            if not _close(actual_neg_val, stats.negative_max_value, tol):
+            cross_ref = _check_cross_table_ref(
+                stats.negative_max_id, "负方向最大统计",
+                table_point_ids, table_label, issues,
+            )
+            if not cross_ref:
+                if not neg_vals:
+                    issues.append(CheckIssue(
+                        severity="error", table_name=table_label,
+                        point_id=stats.negative_max_id or "N/A",
+                        field_name="负方向最大统计",
+                        expected_value="无负值，应为'-'",
+                        actual_value=f"{stats.negative_max_id}={_fmt(stats.negative_max_value, 2)}",
+                        message=(
+                            f"所有累计变化量均为非负值，负方向最大统计应为'-'，"
+                            f"但报告显示 {stats.negative_max_id}={_fmt(stats.negative_max_value, 2)}"
+                        ),
+                    ))
+                else:
+                    actual_neg_id, actual_neg_val = min(neg_vals, key=lambda x: x[1])
+                    if not _close(actual_neg_val, stats.negative_max_value, tol):
+                        issues.append(CheckIssue(
+                            severity="error", table_name=table_label,
+                            point_id=actual_neg_id, field_name="负方向最大统计",
+                            expected_value=_fmt(actual_neg_val, 2),
+                            actual_value=_fmt(stats.negative_max_value, 2),
+                            message=f"负方向最大不符: 实际 {actual_neg_id}={_fmt(actual_neg_val, 2)}, 报告 {stats.negative_max_id}={_fmt(stats.negative_max_value, 2)}",
+                        ))
+
+    # ── 最大速率统计 ──────────────────────────────────────
+    if rate_vals and stats.max_rate_value is not None:
+        cross_ref = _check_cross_table_ref(
+            stats.max_rate_id, "最大速率统计",
+            table_point_ids, table_label, issues,
+        )
+        if not cross_ref:
+            actual_rate_id, actual_rate_val = max(rate_vals, key=lambda x: abs(x[1]))
+            if not _close(abs(actual_rate_val), abs(stats.max_rate_value), RATE_TOLERANCE):
                 issues.append(CheckIssue(
                     severity="error", table_name=table_label,
-                    point_id=actual_neg_id, field_name="负方向最大统计",
-                    expected_value=_fmt(actual_neg_val, 2),
-                    actual_value=_fmt(stats.negative_max_value, 2),
-                    message=f"负方向最大不符: 实际 {actual_neg_id}={_fmt(actual_neg_val, 2)}, 报告 {stats.negative_max_id}={_fmt(stats.negative_max_value, 2)}",
+                    point_id=actual_rate_id, field_name="最大速率统计",
+                    expected_value=_fmt(actual_rate_val),
+                    actual_value=_fmt(stats.max_rate_value),
+                    message=f"最大速率不符: 实际 {actual_rate_id}={_fmt(actual_rate_val)}, 报告 {stats.max_rate_id}={_fmt(stats.max_rate_value)}",
                 ))
-
-    if rate_vals and stats.max_rate_value is not None:
-        actual_rate_id, actual_rate_val = max(rate_vals, key=lambda x: abs(x[1]))
-        if not _close(abs(actual_rate_val), abs(stats.max_rate_value), RATE_TOLERANCE):
-            issues.append(CheckIssue(
-                severity="error", table_name=table_label,
-                point_id=actual_rate_id, field_name="最大速率统计",
-                expected_value=_fmt(actual_rate_val),
-                actual_value=_fmt(stats.max_rate_value),
-                message=f"最大速率不符: 实际 {actual_rate_id}={_fmt(actual_rate_val)}, 报告 {stats.max_rate_id}={_fmt(stats.max_rate_value)}",
-            ))
 
 
 def run_statistics_checks(report: MonitoringReport) -> list[CheckIssue]:
-    """对报告中所有表格的统计数据进行验证"""
+    """对报告中所有表格的统计数据进行验证（每张表独立检查）"""
     issues: list[CheckIssue] = []
-    already_checked: set[str] = set()
     for table in report.tables:
         logger.info("=== 统计验证: %s ===", table.monitoring_item)
-        check_table_statistics(table, report.tables, issues, already_checked)
+        check_table_statistics(table, issues)
     return issues

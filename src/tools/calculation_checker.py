@@ -150,18 +150,31 @@ def check_change_rate(
         expected_rate = pt.current_change / interval_days
 
         if not _close_enough(expected_rate, pt.change_rate, RATE_TOLERANCE):
+            pt_interval = abs(pt.current_change / pt.change_rate) if abs(pt.change_rate) > 1e-6 else 0
+            pt_interval_r = round(pt_interval)
+            interval_is_clean = abs(pt_interval - pt_interval_r) < 0.3
+            if pt_interval_r != interval_days and 1 <= pt_interval_r <= 365 and interval_is_clean:
+                severity = "warning"
+                msg = (
+                    f"变化速率与多数测点间隔({interval_days:.0f}天)不一致: "
+                    f"本次变化({_fmt(pt.current_change, 2)}) / {interval_days:.0f}天 = {_fmt(expected_rate, 3)}, "
+                    f"报告值 = {_fmt(pt.change_rate, 3)} (反推间隔≈{pt_interval_r}天，可能该点上次监测时间不同)"
+                )
+            else:
+                severity = "error"
+                msg = (
+                    f"变化速率计算不符: "
+                    f"本次变化({_fmt(pt.current_change, 2)}) / {interval_days:.0f}天 "
+                    f"= {_fmt(expected_rate, 3)}, 报告值 = {_fmt(pt.change_rate, 3)}"
+                )
             issues.append(CheckIssue(
-                severity="error",
+                severity=severity,
                 table_name=table.monitoring_item,
                 point_id=pt.point_id,
                 field_name="变化速率",
                 expected_value=_fmt(expected_rate, 3),
                 actual_value=_fmt(pt.change_rate, 3),
-                message=(
-                    f"变化速率计算不符: "
-                    f"本次变化({_fmt(pt.current_change, 2)}) / {interval_days:.0f}天 "
-                    f"= {_fmt(expected_rate, 3)}, 报告值 = {_fmt(pt.change_rate, 3)}"
-                ),
+                message=msg,
             ))
 
 
@@ -212,10 +225,10 @@ def check_deep_displacement_rate(
         if dp.previous_cumulative is None or dp.current_cumulative is None or dp.change_rate is None:
             continue
 
-        diff = abs(dp.current_cumulative - dp.previous_cumulative)
+        diff = dp.current_cumulative - dp.previous_cumulative
         expected_rate = diff / interval_days
 
-        if not _close_enough(expected_rate, dp.change_rate, RATE_TOLERANCE):
+        if not _close_enough(abs(expected_rate), abs(dp.change_rate), RATE_TOLERANCE):
             issues.append(CheckIssue(
                 severity="error",
                 table_name=table_label,
@@ -225,9 +238,10 @@ def check_deep_displacement_rate(
                 actual_value=_fmt(dp.change_rate, 3),
                 message=(
                     f"深层位移速率不符: "
-                    f"|{_fmt(dp.current_cumulative, 2)} - {_fmt(dp.previous_cumulative, 2)}| "
+                    f"({_fmt(dp.current_cumulative, 2)} - {_fmt(dp.previous_cumulative, 2)}) "
                     f"/ {interval_days:.0f} = {_fmt(expected_rate, 3)}, "
-                    f"报告值 = {_fmt(dp.change_rate, 3)}"
+                    f"报告值 = {_fmt(dp.change_rate, 3)} "
+                    f"(绝对值比较: |{_fmt(expected_rate, 3)}|={_fmt(abs(expected_rate), 3)} vs |{_fmt(dp.change_rate, 3)}|={_fmt(abs(dp.change_rate), 3)})"
                 ),
             ))
 

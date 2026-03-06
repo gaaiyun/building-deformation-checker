@@ -4,6 +4,10 @@ __pycache__/
 output/
 test_data/
 *.pdf
+*.docx
 .venv/
 .idea/
 .vscode/
+docx_images/
+pack_project/
+pack_project.tar.gz

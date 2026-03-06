@@ -62,9 +62,17 @@ def _find_threshold(thresholds, item_name):
 
 
 def _tables_match(table_item: str, summary_item: str) -> bool:
+    # "深层"/"测斜" must be checked BEFORE "水平位移" since "深层水平位移" contains "水平位移"
+    is_deep_t = any(k in table_item for k in ["深层", "测斜"])
+    is_deep_s = any(k in summary_item for k in ["深层", "测斜"])
+    if is_deep_t != is_deep_s:
+        return False
+    if is_deep_t and is_deep_s:
+        return True
+
     keywords_groups = [
-        ["水平位移", "顶部水平", "坡顶水平"],
-        ["竖向位移", "顶部竖向", "坡顶沉降"],
+        ["水平位移", "顶部水平", "坡顶水平", "基坑顶位移"],
+        ["竖向位移", "顶部竖向", "坡顶沉降", "基坑顶沉降"],
         ["地面沉降", "道路沉降", "周边地面", "周边道路"],
         ["管线"],
         ["水位", "地下水"],
@@ -153,19 +161,37 @@ def check_summary_consistency(report, issues):
             for t in matched
         )
 
-        all_cum = []
-        for t in matched:
-            if is_anchor:
+        if is_anchor:
+            # anchor/strut: summary uses max/min force value, not directional extremes
+            all_forces = []
+            for t in matched:
                 for pt in t.points:
                     if pt.current_value is not None:
-                        all_cum.append((pt.point_id, pt.current_value))
-            else:
-                for pt in t.points:
-                    if pt.cumulative_change is not None:
-                        all_cum.append((pt.point_id, pt.cumulative_change))
-                for dp in t.deep_points:
-                    if dp.current_cumulative is not None:
-                        all_cum.append((f"深度{dp.depth}m", dp.current_cumulative))
+                        all_forces.append((pt.point_id, pt.current_value))
+            if all_forces:
+                act_max_id, act_max = max(all_forces, key=lambda x: x[1])
+                act_min_id, act_min = min(all_forces, key=lambda x: x[1])
+                s_pos = _safe_float_from_str(si.positive_max)
+                s_neg = _safe_float_from_str(si.negative_max)
+                tol = FLOAT_TOLERANCE * 2
+                if s_pos is not None and not (abs(act_max - s_pos) <= tol or abs(act_min - s_pos) <= tol):
+                    issues.append(CheckIssue(
+                        severity="warning", table_name="简报汇总",
+                        point_id=si.monitoring_item, field_name="锚索力值",
+                        expected_value=f"max={act_max_id}/{_fmt(act_max,1)}, min={act_min_id}/{_fmt(act_min,1)}",
+                        actual_value=f"{si.positive_max_id}={si.positive_max}",
+                        message=f"锚索汇总值与分表不一致，请人工确认",
+                    ))
+            continue
+
+        all_cum = []
+        for t in matched:
+            for pt in t.points:
+                if pt.cumulative_change is not None:
+                    all_cum.append((pt.point_id, pt.cumulative_change))
+            for dp in t.deep_points:
+                if dp.current_cumulative is not None:
+                    all_cum.append((f"深度{dp.depth}m", dp.current_cumulative))
 
         if not all_cum:
             continue
