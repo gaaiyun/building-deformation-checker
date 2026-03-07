@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 from src.models.data_models import CheckIssue, MonitoringReport
+from src.tools.extraction_quality import append_issue_source_hint
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,9 @@ def generate_report_md(
     error_count = sum(1 for i in all_issues if i.severity == "error")
     warning_count = sum(1 for i in all_issues if i.severity == "warning")
     info_count = sum(1 for i in all_issues if i.severity == "info")
+    source_counter = Counter(
+        issue.suspected_source for issue in all_issues if issue.suspected_source
+    )
 
     lines: list[str] = []
 
@@ -55,6 +59,14 @@ def generate_report_md(
         lines.append("> 检查通过，未发现错误或警告。\n")
     elif error_count > 0:
         lines.append(f"> 发现 **{error_count}** 个计算错误，请重点关注。\n")
+    if source_counter:
+        source_parts = []
+        if source_counter.get("extraction"):
+            source_parts.append(f"疑似提取问题 {source_counter['extraction']} 条")
+        if source_counter.get("logic"):
+            source_parts.append(f"疑似规则/匹配问题 {source_counter['logic']} 条")
+        if source_parts:
+            lines.append("> " + "；".join(source_parts) + "，建议结合原文人工复核。\n")
     lines.append("")
 
     # ── 数据提取摘要 ──────────────────────────────────
@@ -62,6 +74,35 @@ def generate_report_md(
     lines.append(f"- 报警/控制值配置: {len(report.thresholds)} 项")
     lines.append(f"- 简报汇总项: {len(report.summary_items)} 项")
     lines.append(f"- 监测数据表: {len(report.tables)} 张")
+    diagnostics = report.extraction_diagnostics or {}
+    if diagnostics:
+        method = diagnostics.get("method", "unknown")
+        selected_profile = diagnostics.get("selected_profile", "")
+        raw_chars = diagnostics.get("raw_chars")
+        clean_chars = diagnostics.get("clean_chars")
+        compression_ratio = diagnostics.get("compression_ratio")
+        debug_dir = diagnostics.get("debug_dir", "")
+        high_markup_pages = diagnostics.get("high_markup_pages", [])
+        abnormal_table_count = diagnostics.get("abnormal_table_count", 0)
+
+        profile_label = f"{method}"
+        if selected_profile:
+            profile_label += f" ({selected_profile})"
+        lines.append(f"- 提取方式: {profile_label}")
+        if raw_chars is not None and clean_chars is not None:
+            lines.append(
+                f"- OCR 原始字符 / 清洗后字符: {raw_chars} / {clean_chars}"
+            )
+        if compression_ratio is not None:
+            lines.append(f"- 文本压缩率: {compression_ratio:.2%}")
+        if high_markup_pages:
+            page_text = ", ".join(str(page) for page in high_markup_pages[:10])
+            suffix = " ..." if len(high_markup_pages) > 10 else ""
+            lines.append(f"- HTML 过肥页: {page_text}{suffix}")
+        if abnormal_table_count:
+            lines.append(f"- 疑似提取异常表: {abnormal_table_count} 张")
+        if debug_dir:
+            lines.append(f"- OCR 调试目录: `{debug_dir}`")
     lines.append("")
 
     if report.tables:
@@ -74,6 +115,17 @@ def generate_report_md(
             pts = len(t.points) if t.points else len(t.deep_points)
             lines.append(f"| {i} | {name} | {t.category.value} | {pts} | {t.monitor_date} |")
         lines.append("")
+        if report.table_extraction_flags:
+            lines.append("### 提取质量提示\n")
+            for table_index, flags in sorted(report.table_extraction_flags.items()):
+                if table_index >= len(report.tables):
+                    continue
+                table = report.tables[table_index]
+                table_name = table.monitoring_item
+                if table.borehole_id:
+                    table_name += f" ({table.borehole_id})"
+                lines.append(f"- {table_name}: {'；'.join(flags)}")
+            lines.append("")
 
     # ── AI 理解与验证策略 ──────────────────────────────
     if analysis_plan:
@@ -159,7 +211,7 @@ def _section(lines: list[str], title: str, issues: list[CheckIssue]) -> None:
         for idx, issue in enumerate(errors, 1):
             lines.append(
                 f"| {idx} | {issue.table_name} | {issue.point_id} | "
-                f"{issue.field_name} | {issue.message} |"
+                f"{issue.field_name} | {_issue_message(issue)} |"
             )
         lines.append("")
 
@@ -170,15 +222,19 @@ def _section(lines: list[str], title: str, issues: list[CheckIssue]) -> None:
         for idx, issue in enumerate(warnings, 1):
             lines.append(
                 f"| {idx} | {issue.table_name} | {issue.point_id} | "
-                f"{issue.field_name} | {issue.message} |"
+                f"{issue.field_name} | {_issue_message(issue)} |"
             )
         lines.append("")
 
     if infos:
         lines.append("### 提示\n")
         for issue in infos:
-            lines.append(f"- {issue.message}")
+            lines.append(f"- {_issue_message(issue)}")
         lines.append("")
+
+
+def _issue_message(issue: CheckIssue) -> str:
+    return append_issue_source_hint(issue.message, issue.suspected_source)
 
 
 def save_report(md_content: str, output_path: str) -> str:

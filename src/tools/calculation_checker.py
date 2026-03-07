@@ -17,6 +17,7 @@ from collections import Counter
 from typing import Optional
 
 from src.config import RATE_TOLERANCE
+from src.tools.extraction_quality import annotate_issues_for_table
 from src.models.data_models import (
     CheckIssue,
     MonitoringCategory,
@@ -179,8 +180,10 @@ def check_deep_displacement_rate(
     issues: list[CheckIssue],
     interval_days: Optional[float] = None,
 ) -> None:
-    """深层水平位移速率验证"""
+    """深层水平位移速率验证（仅在存在速率列时执行）。"""
     if not table.deep_points:
+        return
+    if not any(dp.change_rate is not None for dp in table.deep_points):
         return
 
     cfg = table.verification_config
@@ -190,13 +193,16 @@ def check_deep_displacement_rate(
     if interval_days is None:
         rates_data: list[float] = []
         for dp in table.deep_points:
+            diff = None
+            if dp.current_change is not None:
+                diff = abs(dp.current_change)
+            elif dp.previous_cumulative is not None and dp.current_cumulative is not None:
+                diff = abs(dp.current_cumulative - dp.previous_cumulative)
             if (
-                dp.previous_cumulative is not None
-                and dp.current_cumulative is not None
+                diff is not None
                 and dp.change_rate is not None
                 and abs(dp.change_rate) > 1e-6
             ):
-                diff = abs(dp.current_cumulative - dp.previous_cumulative)
                 if diff > 1e-6:
                     inferred = diff / dp.change_rate
                     if 0.5 < abs(inferred) < 365:
@@ -204,7 +210,9 @@ def check_deep_displacement_rate(
         if rates_data:
             interval_days = Counter(rates_data).most_common(1)[0][0]
 
-    table_label = f"{table.monitoring_item}({table.borehole_id})"
+    table_label = table.monitoring_item
+    if table.borehole_id:
+        table_label += f"({table.borehole_id})"
 
     if interval_days is None:
         issues.append(CheckIssue(
@@ -221,10 +229,16 @@ def check_deep_displacement_rate(
     logger.info("深层位移表 [%s] 推断监测间隔 = %.0f 天", table_label, interval_days)
 
     for dp in table.deep_points:
-        if dp.previous_cumulative is None or dp.current_cumulative is None or dp.change_rate is None:
+        if dp.change_rate is None:
             continue
 
-        diff = dp.current_cumulative - dp.previous_cumulative
+        if dp.current_change is not None:
+            diff = dp.current_change
+        elif dp.previous_cumulative is not None and dp.current_cumulative is not None:
+            diff = dp.current_cumulative - dp.previous_cumulative
+        else:
+            continue
+
         expected_rate = diff / interval_days
 
         if not _close_enough(abs(expected_rate), abs(dp.change_rate), cfg.rate_tolerance):
@@ -240,6 +254,44 @@ def check_deep_displacement_rate(
                     f"({_fmt(dp.current_cumulative, 2)} - {_fmt(dp.previous_cumulative, 2)}) "
                     f"/ {interval_days:.0f} = {_fmt(expected_rate, 3)}, "
                     f"报告值 = {_fmt(dp.change_rate, 3)}"
+                ),
+            ))
+
+
+def check_deep_displacement_change(
+    table: MonitoringTable,
+    issues: list[CheckIssue],
+) -> None:
+    """深层位移本期变化验证：本期变化 = 本次累计 - 上次累计。"""
+    if not table.deep_points:
+        return
+
+    cfg = table.verification_config
+    table_label = table.monitoring_item
+    if table.borehole_id:
+        table_label += f"({table.borehole_id})"
+
+    for dp in table.deep_points:
+        if (
+            dp.previous_cumulative is None
+            or dp.current_cumulative is None
+            or dp.current_change is None
+        ):
+            continue
+
+        expected_change = dp.current_cumulative - dp.previous_cumulative
+        if not _close_enough(expected_change, dp.current_change, cfg.cumulative_tolerance):
+            issues.append(CheckIssue(
+                severity="error",
+                table_name=table_label,
+                point_id=f"深度{dp.depth}m",
+                field_name="本期变化",
+                expected_value=_fmt(expected_change, 3),
+                actual_value=_fmt(dp.current_change, 3),
+                message=(
+                    f"深层位移本期变化不符: "
+                    f"({_fmt(dp.current_cumulative, 2)} - {_fmt(dp.previous_cumulative, 2)}) "
+                    f"= {_fmt(expected_change, 3)}, 报告值 = {_fmt(dp.current_change, 3)}"
                 ),
             ))
 
@@ -276,15 +328,20 @@ def run_calculation_checks(report: MonitoringReport) -> list[CheckIssue]:
     """对报告中的所有表格运行计算验证"""
     issues: list[CheckIssue] = []
 
-    for table in report.tables:
+    for table_index, table in enumerate(report.tables):
         logger.info("=== 计算验证: %s ===", table.monitoring_item)
+        table_issues: list[CheckIssue] = []
 
         if table.category in (MonitoringCategory.ANCHOR_FORCE, MonitoringCategory.STRUT_FORCE):
-            check_anchor_force(table, issues)
+            check_anchor_force(table, table_issues)
         elif table.deep_points:
-            check_deep_displacement_rate(table, issues)
+            check_deep_displacement_change(table, table_issues)
+            check_deep_displacement_rate(table, table_issues)
         else:
-            check_cumulative_change(table, issues)
-            check_change_rate(table, issues)
+            check_cumulative_change(table, table_issues)
+            check_change_rate(table, table_issues)
+
+        annotate_issues_for_table(report, table_issues, table_index, default_source="report")
+        issues.extend(table_issues)
 
     return issues

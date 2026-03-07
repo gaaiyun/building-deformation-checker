@@ -35,6 +35,16 @@ SYSTEM_PROMPT = """\
 - 有些表没有"初始值"列，只有"本次变化量"和"累计变化量"，此时 initial_value 设 null
 - 累计变化量是从项目首测以来的总变化，不一定能通过表中两列算出
 
+## 关于深层位移 / 测斜表（重要）
+- 深层位移表常见列为“上次累计 / 本次累计 / 本期变化”，此时:
+  - previous_cumulative = 上次累计
+  - current_cumulative = 本次累计
+  - current_change = 本期变化
+  - change_rate = null
+- 只有当表头明确出现“变化速率 / mm/d”等速率列时，才填写 change_rate
+- 如果统计块写的是“最大变化位移”，填入 statistics.max_change_id / max_change_value
+- 不要把“本期变化”误填到 change_rate，也不要把“最大变化位移”误填到 max_rate_value
+
 ## 关于正负号(极其重要)
 - 正负号代表**方向**不代表大小！
 - 统计"正方向最大"=正值中最大; "负方向最大"=负值中绝对值最大(值最小)
@@ -64,8 +74,8 @@ SYSTEM_PROMPT = """\
     "table_unit":"mm",
     "initial_value_reliable":true,
     "points":[{"point_id":"","initial_value":null,"previous_value":null,"current_value":null,"current_change":null,"cumulative_change":null,"change_rate":null,"safety_status":""}],
-    "deep_points":[{"depth":0,"previous_cumulative":null,"current_cumulative":null,"change_rate":null}],
-    "statistics":{"positive_max_id":"","positive_max_value":null,"negative_max_id":"","negative_max_value":null,"max_rate_id":"","max_rate_value":null,"max_force_id":"","max_force_value":null,"min_force_id":"","min_force_value":null}
+    "deep_points":[{"depth":0,"previous_cumulative":null,"current_cumulative":null,"current_change":null,"change_rate":null}],
+    "statistics":{"positive_max_id":"","positive_max_value":null,"negative_max_id":"","negative_max_value":null,"max_rate_id":"","max_rate_value":null,"max_change_id":"","max_change_value":null,"max_force_id":"","max_force_value":null,"min_force_id":"","min_force_value":null}
   }],
   "conclusion":""
 }
@@ -186,6 +196,7 @@ def _build_report(data: dict) -> MonitoringReport:
                 depth=float(dp.get("depth", 0)),
                 previous_cumulative=_sf(dp.get("previous_cumulative")),
                 current_cumulative=_sf(dp.get("current_cumulative")),
+                current_change=_sf(dp.get("current_change")),
                 change_rate=_sf(dp.get("change_rate")),
             ))
         s = tb.get("statistics", {})
@@ -196,6 +207,8 @@ def _build_report(data: dict) -> MonitoringReport:
             negative_max_value=_sf(s.get("negative_max_value")),
             max_rate_id=_sid(s.get("max_rate_id")),
             max_rate_value=_sf(s.get("max_rate_value")),
+            max_change_id=_sid(s.get("max_change_id")),
+            max_change_value=_sf(s.get("max_change_value")),
             max_force_id=_sid(s.get("max_force_id")),
             max_force_value=_sf(s.get("max_force_value")),
             min_force_id=_sid(s.get("min_force_id")),

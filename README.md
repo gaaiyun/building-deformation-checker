@@ -56,10 +56,11 @@
                          ▼
 ┌────────────────────────────────────────────────────────┐
 │  Step 1: PDF 数据提取                                    │
-│  ┌──────────────┐   智能切换   ┌──────────────────┐     │
-│  │  pdfplumber   │ ──────────→ │  PaddleOCR API   │     │
-│  │  (文字版PDF)  │  质量不佳时  │  (扫描件/图片PDF) │     │
-│  └──────────────┘             └──────────────────┘     │
+│  ┌──────────────────┐   质量评估/回退   ┌──────────────┐ │
+│  │  PaddleOCR API   │ ───────────────→ │ pdfplumber    │ │
+│  │  table→primary→  │                  │ 文字层基线     │ │
+│  │  fallback        │                  │ (--no-ocr)     │ │
+│  └──────────────────┘                  └──────────────┘ │
 └────────────────────────┬───────────────────────────────┘
                          ▼
 ┌────────────────────────────────────────────────────────┐
@@ -149,15 +150,17 @@ markdown>=3.5.0      # Markdown 转 HTML
 
 | 配置项 | 说明 | 默认值 | 环境变量 |
 |--------|------|--------|----------|
-| `LLM_API_KEY` | DashScope API 密钥 | 内置 | `LLM_API_KEY` |
+| `LLM_API_KEY` | DashScope API 密钥 | 建议通过环境变量注入 | `LLM_API_KEY` |
 | `LLM_BASE_URL` | LLM API 基础 URL | `https://coding.dashscope.aliyuncs.com/v1` | `LLM_BASE_URL` |
 | `LLM_MODEL` | 模型名称 | `qwen3.5-plus` | `LLM_MODEL` |
-| `PADDLE_OCR_URL` | PaddleOCR 版式分析 API 地址 | 内置 | - |
-| `PADDLE_OCR_TOKEN` | PaddleOCR 认证 Token | 内置 | - |
+| `PADDLE_OCR_URL` | PaddleOCR 版式分析 API 地址 | 建议在 `src/config.py` 或环境中配置 | - |
+| `PADDLE_OCR_TOKEN` | PaddleOCR 认证 Token | 建议在 `src/config.py` 或环境中配置 | - |
 | `FLOAT_TOLERANCE` | 浮点数容差 (mm) | `0.15` | - |
 | `RATE_TOLERANCE` | 速率容差 (mm/d) | `0.05` | - |
 
 > **注意**：`FLOAT_TOLERANCE` 和 `RATE_TOLERANCE` 是全局默认值。实际验证时，`table_analyzer.py` 会根据每张表的数据特征动态调整容差，见 [动态验证配置](#3-动态验证配置-table_analyzerpy)。
+>
+> **安全建议**：不要把真实 API 密钥和 Token 提交到仓库，优先使用环境变量或本地未纳入版本控制的配置文件。
 
 ---
 
@@ -170,9 +173,10 @@ streamlit run app.py
 ```
 
 界面功能：
-- **侧边栏**：选择 PDF 提取方式（智能切换/仅pdfplumber/强制PaddleOCR）、AI 自验证开关、AI 最终审核开关
+- **侧边栏**：选择 PDF 提取方式（优先 PaddleOCR 表格 profile / 仅 pdfplumber / 强制 PaddleOCR）、AI 自验证开关、AI 最终审核开关
 - **进度显示**：`st.status` 8 步实时显示进度，`st.progress` 进度条
-- **结果展示**：指标卡片（数据表数、错误数、警告数、提示数、耗时）+ 7 个选项卡（检查报告/分析计划/计算验证/统计验证/逻辑检查/AI审核/运行日志）
+- **结果展示**：指标卡片（数据表数、错误数、警告数、提示数、耗时）+ 8 个选项卡（检查报告/提取诊断/分析计划/计算验证/统计验证/逻辑检查/AI审核/运行日志）
+- **提取诊断**：展示选中的 OCR profile、压缩率、高 markup 页、异常表、调试目录和提取尝试链路
 - **导出功能**：Markdown / Word (docx) / HTML（可打印为PDF）三种格式
 - **运行日志**：实时捕获所有模块的日志输出，通过自定义 `StreamlitLogHandler` 实现
 
@@ -184,6 +188,9 @@ python main.py "监测报告.pdf"
 
 # 强制使用 PaddleOCR（适用于扫描件）
 python main.py "扫描件.pdf" --ocr
+
+# 仅使用 pdfplumber（适用于文字层 PDF，对比基线）
+python main.py "报告.pdf" --no-ocr
 
 # 跳过 AI 最终审核（加速）
 python main.py "报告.pdf" --no-ai-review
@@ -258,46 +265,68 @@ python main.py "报告.pdf" -o output/my_report.md
 
 #### 技术方案
 
-提供两种提取引擎，支持智能切换：
+提供两类提取入口，并在 OCR 路径下进一步细分 profile：
 
-| 引擎 | 适用场景 | 技术 | 优点 | 缺点 |
+| 引擎 / Profile | 适用场景 | 技术 | 优点 | 缺点 |
 |------|---------|------|------|------|
-| **pdfplumber** | 文字版 PDF | 直接读取 PDF 文本层 | 速度快(5-10s)、精度高 | 对扫描件无效 |
-| **PaddleOCR** | 扫描件/图片 PDF | API 版式分析 + OCR | 支持扫描件、表格识别强 | 速度慢(20-30s)、需网络 |
+| **PaddleOCR table profile** | 表格密集、跨页表、复杂版式 PDF | API 版面解析 + 表格导向 prompt | 表格结构更完整，适合多页统计表 | 需要额外清洗图表噪声 |
+| **PaddleOCR primary / fallback** | table profile 质量一般或失败时 | API 版面解析 + OCR/回退参数 | 兜底能力更强 | 输出更容易带入噪声 |
+| **pdfplumber** | 文字层 PDF、对比基线 | 直接读取 PDF 文本层 | 速度快、噪声少 | 图文混排 / 扫描件容易错行或缺表 |
 
-#### 智能切换机制
+#### 当前默认提取链路
 
-`_assess_pdfplumber_quality()` 通过两个维度评估 pdfplumber 提取质量：
+当前实现不是“先 pdfplumber 再决定是否 OCR”，而是：
 
-1. **平均每页字符数**：低于 `MIN_CHARS_PER_PAGE`（50字符）则判定为扫描件
-2. **关键标志词检测**：检查是否包含 "监测"、"测点"、"变化"、"累计"、"速率" 中至少 2 个
-
-切换逻辑：
 ```
-if 强制OCR → 直接用PaddleOCR
+if --no-ocr:
+    直接使用 pdfplumber
 else:
-    text = pdfplumber提取
-    if 质量不佳 and 允许自动切换:
-        ocr_text = PaddleOCR提取
-        if OCR结果更长 → 用OCR版本
-        else → 保留pdfplumber版本（OCR也没更好）
-    else → 用pdfplumber结果
+    依次尝试 PaddleOCR:
+      1. table profile
+      2. primary profile
+      3. fallback profile
+    每次 OCR 后都执行 Markdown/HTML 表格清洗和质量评估
+    若 OCR 失败或质量不足 → 回退 pdfplumber
 ```
 
 #### PaddleOCR API 调用细节
 
 - **端点**：`PADDLE_OCR_URL`（PaddingPaddle AI Studio 部署）
-- **认证**：Bearer Token
+- **认证**：`Authorization: token <TOKEN>`
 - **输入**：PDF 文件 Base64 编码
-- **输出**：每页的 Markdown 文本 + 表格结构
+- **输出**：每页的 Markdown / HTML 混合文本 + 表格结构
 - **超时**：300 秒
-- **参数**：`fileType=0`（PDF）、关闭方向分类和图表识别以加速
+- **table profile 关键参数**：
+  - `markdownIgnoreLabels=["header","header_image","footer","footer_image","number","footnote","aside_text"]`
+  - `useLayoutDetection=True`
+  - `promptLabel="table"`
+  - `useOcrForImageBlock=False`
+  - `restructurePages=True`
+  - `mergeTables=True`
+  - `visualize=False`
+
+#### OCR 清洗与调试产物
+
+Paddle / MinerU 这类服务返回的 `markdown.text` 往往仍然包含大量 HTML 表格、图表标题、曲线坐标轴和图片占位。当前实现会在进入 LLM 前做一次轻量但针对性的清洗：
+
+1. 将 HTML 表格压缩成轻量文本表格
+2. 删除 `style/div/img` 等无意义包装
+3. 剔除 `监测数据成果曲线图`、位移曲线、坐标轴行、Markdown 图片行等噪声
+4. 保留表标题、统计块和关键列头，确保 `_split_chunks` 仍可按表边界分段
+
+调试模式下会在 `output/<pdf_stem>_ocr_debug/` 落盘：
+
+- `raw/page_XXX.md`：OCR 原始页内容
+- `clean/page_XXX.txt`：清洗后的页文本
+- `stats.json`：字符数、压缩率、表格数、异常页等指标
+- `request_profile.json`：实际请求 profile 参数
 
 #### 注意事项
 
 - PaddleOCR API 是外部服务，需确保 Token 有效且服务可用
-- 某些"盖章扫描件"实际上嵌入了文字层（OCR层），pdfplumber 可以提取到文字但质量可能不如 PaddleOCR
-- `extract_tables_with_pdfplumber()` 提取结构化表格数据，但当前主流程只用了 `extract_text_with_pdfplumber()`（文本模式），结构化表格交给 LLM 理解
+- 对于文字层很干净的 PDF，`--no-ocr` 仍然是重要对比基线
+- 同一监测项跨页表的统计块，当前规则层已按 `(monitoring_item, borehole_id)` 组内合并后再做统计判定
+- `extract_tables_with_pdfplumber()` 提取结构化表格数据，但当前主流程仍以文本/Markdown 进入 LLM，结构化字段由 LLM 统一理解
 
 ---
 
@@ -949,9 +978,9 @@ class StreamlitLogHandler(logging.Handler):
 | 测试项 | 结果 | 说明 |
 |--------|------|------|
 | pdfplumber 提取文字版 PDF | ✅ 通过 | 9985 字符，提取完整 |
-| PaddleOCR API 调用 | ✅ 通过 | 19 页，97531 字符 |
-| 智能质量评估（文字版） | ✅ 通过 | 正确判定为高质量 |
-| 智能切换（文字版不切换） | ✅ 通过 | 保持 pdfplumber 结果 |
+| PaddleOCR table profile 调用 | ✅ 通过 | 19 页，已压缩为清洗后 Markdown 文本 |
+| OCR 清洗与图表去噪 | ✅ 通过 | 坐标轴行、图片行、重复曲线噪声可被剔除 |
+| 多页统计合并 | ✅ 通过 | 同监测项跨页统计按组内合并后判定 |
 | LLM 超时容错 | ✅ 通过 | 配置增强/自验证超时不影响主流程 |
 
 ---

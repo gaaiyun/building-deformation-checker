@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import Optional
 
 from src.config import FLOAT_TOLERANCE
@@ -25,6 +26,7 @@ from src.models.data_models import (
     MonitoringTable,
     ThresholdConfig,
 )
+from src.tools.extraction_quality import annotate_issues_for_table
 
 logger = logging.getLogger(__name__)
 
@@ -79,32 +81,42 @@ def _build_semantic_maps(report: MonitoringReport) -> None:
     from openai import OpenAI
     import src.config as cfg
 
-    try:
-        client = OpenAI(api_key=cfg.LLM_API_KEY, base_url=cfg.LLM_BASE_URL)
-        resp = client.chat.completions.create(
-            model=cfg.LLM_MODEL,
-            messages=[
-                {"role": "system", "content": "你是建筑变形监测领域专家，擅长识别不同表述的同义关系。返回纯JSON。"},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.1,
-            max_tokens=4000,
-            timeout=60,
-        )
-        raw = resp.choices[0].message.content or ""
-        raw = re.sub(r'<think(?:ing)?>.*?</think(?:ing)?>', '', raw, flags=re.DOTALL).strip()
-        m = re.search(r'\{.*\}', raw, re.DOTALL)
-        if m:
-            data = json.loads(m.group())
-            report.threshold_map = data.get("threshold_to_tables", {})
-            report.summary_map = data.get("summary_to_tables", {})
-            logger.info(
-                "LLM语义匹配完成: %d阈值映射, %d汇总映射",
-                len(report.threshold_map), len(report.summary_map),
+    timeout_sec = getattr(cfg, "LLM_TIMEOUT_NORMAL", 90)
+    max_retries = getattr(cfg, "LLM_MAX_RETRIES", 2)
+    backoff_sec = getattr(cfg, "LLM_RETRY_BACKOFF_SEC", 10)
+    client = OpenAI(api_key=cfg.LLM_API_KEY, base_url=cfg.LLM_BASE_URL)
+
+    for attempt in range(1 + max_retries):
+        try:
+            resp = client.chat.completions.create(
+                model=cfg.LLM_MODEL,
+                messages=[
+                    {"role": "system", "content": "你是建筑变形监测领域专家，擅长识别不同表述的同义关系。返回纯JSON。"},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
+                max_tokens=4000,
+                timeout=timeout_sec,
             )
-            return
-    except Exception as e:
-        logger.warning("LLM语义匹配失败，回退到关键词匹配: %s", e)
+            raw = resp.choices[0].message.content or ""
+            raw = re.sub(r'<think(?:ing)?>.*?</think(?:ing)?>', '', raw, flags=re.DOTALL).strip()
+            m = re.search(r'\{.*\}', raw, re.DOTALL)
+            if m:
+                data = json.loads(m.group())
+                report.threshold_map = data.get("threshold_to_tables", {})
+                report.summary_map = data.get("summary_to_tables", {})
+                logger.info(
+                    "LLM语义匹配完成: %d阈值映射, %d汇总映射",
+                    len(report.threshold_map), len(report.summary_map),
+                )
+                return
+        except Exception as e:
+            if attempt < max_retries:
+                backoff = backoff_sec * (2 ** attempt)
+                logger.warning("LLM语义匹配失败，%ds 后重试: %s", backoff, e)
+                time.sleep(backoff)
+            else:
+                logger.warning("LLM语义匹配失败，回退到关键词匹配: %s", e)
 
     _build_fallback_maps(report, threshold_names, table_names, summary_names)
 
@@ -172,11 +184,12 @@ def _find_matched_tables(report: MonitoringReport, summary_item_name: str) -> li
 # ── Check Functions ──────────────────────────────────────────
 
 def check_safety_status(report: MonitoringReport, issues: list[CheckIssue]) -> None:
-    for table in report.tables:
+    for table_index, table in enumerate(report.tables):
         threshold = _find_threshold_semantic(report, table.monitoring_item)
         if threshold is None:
             continue
 
+        table_issues: list[CheckIssue] = []
         for pt in table.points:
             if not pt.safety_status:
                 continue
@@ -194,7 +207,7 @@ def check_safety_status(report: MonitoringReport, issues: list[CheckIssue]) -> N
 
             reported = pt.safety_status.strip()
             if reported == "正常" and should_be != "正常":
-                issues.append(CheckIssue(
+                table_issues.append(CheckIssue(
                     severity="error", table_name=table.monitoring_item,
                     point_id=pt.point_id, field_name="安全状态",
                     expected_value=should_be, actual_value=reported,
@@ -206,12 +219,14 @@ def check_safety_status(report: MonitoringReport, issues: list[CheckIssue]) -> N
                     ),
                 ))
             elif reported != "正常" and should_be == "正常":
-                issues.append(CheckIssue(
+                table_issues.append(CheckIssue(
                     severity="warning", table_name=table.monitoring_item,
                     point_id=pt.point_id, field_name="安全状态",
                     expected_value=should_be, actual_value=reported,
                     message=f"安全状态可能过严: 数据正常但标记为 {reported}",
                 ))
+        annotate_issues_for_table(report, table_issues, table_index, default_source="report")
+        issues.extend(table_issues)
 
 
 def check_summary_consistency(report: MonitoringReport, issues: list[CheckIssue]) -> None:
@@ -226,6 +241,7 @@ def check_summary_consistency(report: MonitoringReport, issues: list[CheckIssue]
                 field_name=si.monitoring_item,
                 expected_value="有对应分表", actual_value="未找到",
                 message=f"汇总项 [{si.monitoring_item}] 未找到对应分表",
+                suspected_source="logic",
             ))
             continue
 
@@ -253,6 +269,7 @@ def check_summary_consistency(report: MonitoringReport, issues: list[CheckIssue]
                         expected_value=f"max={act_max_id}/{_fmt(act_max, 1)}, min={act_min_id}/{_fmt(act_min, 1)}",
                         actual_value=f"{si.positive_max_id}={si.positive_max}",
                         message="锚索汇总值与分表不一致，请人工确认",
+                        suspected_source="report",
                     ))
             continue
 
@@ -268,33 +285,59 @@ def check_summary_consistency(report: MonitoringReport, issues: list[CheckIssue]
         if not all_cum:
             continue
 
-        actual_pos_id, actual_pos = max(all_cum, key=lambda x: x[1])
-        actual_neg_id, actual_neg = min(all_cum, key=lambda x: x[1])
+        pos_vals = [(point_id, value) for point_id, value in all_cum if value > 0]
+        neg_vals = [(point_id, value) for point_id, value in all_cum if value < 0]
         summary_pos = _safe_float_from_str(si.positive_max)
         summary_neg = _safe_float_from_str(si.negative_max)
         tol = FLOAT_TOLERANCE
 
-        if summary_pos is not None and abs(actual_pos - summary_pos) > tol:
-            issues.append(CheckIssue(
-                severity="error", table_name="简报汇总",
-                point_id=si.monitoring_item, field_name="正方向最大",
-                expected_value=f"{actual_pos_id}={_fmt(actual_pos)}",
-                actual_value=f"{si.positive_max_id}={si.positive_max}",
-                message="汇总表正方向最大与分表不一致",
-            ))
+        if summary_pos is not None:
+            if not pos_vals:
+                issues.append(CheckIssue(
+                    severity="error", table_name="简报汇总",
+                    point_id=si.monitoring_item, field_name="正方向最大",
+                    expected_value="-",
+                    actual_value=f"{si.positive_max_id}={si.positive_max}",
+                    message="分表中不存在正值，汇总表正方向最大应为空",
+                    suspected_source="report",
+                ))
+            else:
+                actual_pos_id, actual_pos = max(pos_vals, key=lambda x: x[1])
+                if abs(actual_pos - summary_pos) > tol:
+                    issues.append(CheckIssue(
+                        severity="error", table_name="简报汇总",
+                        point_id=si.monitoring_item, field_name="正方向最大",
+                        expected_value=f"{actual_pos_id}={_fmt(actual_pos)}",
+                        actual_value=f"{si.positive_max_id}={si.positive_max}",
+                        message="汇总表正方向最大与分表不一致",
+                        suspected_source="report",
+                    ))
 
-        if summary_neg is not None and abs(actual_neg - summary_neg) > tol:
-            issues.append(CheckIssue(
-                severity="error", table_name="简报汇总",
-                point_id=si.monitoring_item, field_name="负方向最大",
-                expected_value=f"{actual_neg_id}={_fmt(actual_neg)}",
-                actual_value=f"{si.negative_max_id}={si.negative_max}",
-                message="汇总表负方向最大与分表不一致",
-            ))
+        if summary_neg is not None:
+            if not neg_vals:
+                issues.append(CheckIssue(
+                    severity="error", table_name="简报汇总",
+                    point_id=si.monitoring_item, field_name="负方向最大",
+                    expected_value="-",
+                    actual_value=f"{si.negative_max_id}={si.negative_max}",
+                    message="分表中不存在负值，汇总表负方向最大应为空",
+                    suspected_source="report",
+                ))
+            else:
+                actual_neg_id, actual_neg = min(neg_vals, key=lambda x: x[1])
+                if abs(actual_neg - summary_neg) > tol:
+                    issues.append(CheckIssue(
+                        severity="error", table_name="简报汇总",
+                        point_id=si.monitoring_item, field_name="负方向最大",
+                        expected_value=f"{actual_neg_id}={_fmt(actual_neg)}",
+                        actual_value=f"{si.negative_max_id}={si.negative_max}",
+                        message="汇总表负方向最大与分表不一致",
+                        suspected_source="report",
+                    ))
 
 
 def check_point_count(report: MonitoringReport, issues: list[CheckIssue]) -> None:
-    for table in report.tables:
+    for table_index, table in enumerate(report.tables):
         if table.point_count <= 0:
             continue
         actual = len(table.points) if table.points else len(table.deep_points)
@@ -302,12 +345,14 @@ def check_point_count(report: MonitoringReport, issues: list[CheckIssue]) -> Non
             name = table.monitoring_item
             if table.borehole_id:
                 name += f"({table.borehole_id})"
-            issues.append(CheckIssue(
+            table_issues = [CheckIssue(
                 severity="warning", table_name=name, point_id="ALL",
                 field_name="监测点数量",
                 expected_value=str(table.point_count), actual_value=str(actual),
                 message=f"表头声明 {table.point_count} 个点, 实际 {actual} 行",
-            ))
+            )]
+            annotate_issues_for_table(report, table_issues, table_index, default_source="report")
+            issues.extend(table_issues)
 
 
 def run_logic_checks(report: MonitoringReport) -> list[CheckIssue]:

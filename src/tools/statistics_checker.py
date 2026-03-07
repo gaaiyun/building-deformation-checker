@@ -8,7 +8,7 @@
   - 最大/最小内力（锚索拉力）
 
 核心原则：
-  1. 每张表的统计值只与 **该表自身数据** 比对（不跨表聚合）
+  1. 同一监测项多页时，统计值与 **组内合并数据** 比对（而不是只看当前页）
   2. 方向性检查：若所有累计值均非正/非负，对应方向统计应为 "-"
   3. 跨表引用检查：若统计引用的测点不在本表中，视为错误
 """
@@ -16,9 +16,11 @@
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from typing import Optional
 
 from src.config import FLOAT_TOLERANCE, RATE_TOLERANCE
+from src.tools.extraction_quality import annotate_issues_for_table
 from src.models.data_models import (
     CheckIssue,
     MonitoringCategory,
@@ -41,10 +43,11 @@ def _fmt(v: Optional[float], p: int = 3) -> str:
 
 def _get_table_own_data(
     table: MonitoringTable,
-) -> tuple[list[tuple[str, float]], list[tuple[str, float]]]:
+) -> tuple[list[tuple[str, float]], list[tuple[str, float]], list[tuple[str, float]]]:
     """只取当前表自身的数据，不跨表聚合"""
     cum_vals: list[tuple[str, float]] = []
     rate_vals: list[tuple[str, float]] = []
+    change_vals: list[tuple[str, float]] = []
 
     for pt in table.points:
         if pt.cumulative_change is not None:
@@ -55,10 +58,12 @@ def _get_table_own_data(
         label = f"深度{dp.depth}m"
         if dp.current_cumulative is not None:
             cum_vals.append((label, dp.current_cumulative))
+        if dp.current_change is not None:
+            change_vals.append((label, dp.current_change))
         if dp.change_rate is not None:
             rate_vals.append((label, dp.change_rate))
 
-    return cum_vals, rate_vals
+    return cum_vals, rate_vals, change_vals
 
 
 def _get_table_point_ids(table: MonitoringTable) -> set[str]:
@@ -70,6 +75,41 @@ def _get_table_point_ids(table: MonitoringTable) -> set[str]:
         ids.add(f"深度{dp.depth}m")
         ids.add(str(dp.depth))
     return ids
+
+
+def _get_group_key(table: MonitoringTable) -> tuple[str, str]:
+    """同一监测项多页表按 monitoring_item + borehole_id 归组。"""
+    return table.monitoring_item.strip(), table.borehole_id.strip()
+
+
+def _build_allowed_point_ids_map(report: MonitoringReport) -> dict[tuple[str, str], set[str]]:
+    """为同一逻辑表的多页数据合并允许引用的测点集合。"""
+    allowed: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for table in report.tables:
+        allowed[_get_group_key(table)].update(_get_table_point_ids(table))
+    return allowed
+
+
+def _build_group_data_map(
+    report: MonitoringReport,
+) -> dict[tuple[str, str], tuple[list[tuple[str, float]], list[tuple[str, float]], list[tuple[str, float]]]]:
+    """为同一逻辑表的多页数据合并统计计算所需的值。"""
+    grouped_tables: dict[tuple[str, str], list[MonitoringTable]] = defaultdict(list)
+    for table in report.tables:
+        grouped_tables[_get_group_key(table)].append(table)
+
+    group_data: dict[tuple[str, str], tuple[list[tuple[str, float]], list[tuple[str, float]], list[tuple[str, float]]]] = {}
+    for group_key, tables in grouped_tables.items():
+        cum_vals: list[tuple[str, float]] = []
+        rate_vals: list[tuple[str, float]] = []
+        change_vals: list[tuple[str, float]] = []
+        for table in tables:
+            table_cum_vals, table_rate_vals, table_change_vals = _get_table_own_data(table)
+            cum_vals.extend(table_cum_vals)
+            rate_vals.extend(table_rate_vals)
+            change_vals.extend(table_change_vals)
+        group_data[group_key] = (cum_vals, rate_vals, change_vals)
+    return group_data
 
 
 def _check_cross_table_ref(
@@ -105,6 +145,8 @@ def _check_cross_table_ref(
 def check_table_statistics(
     table: MonitoringTable,
     issues: list[CheckIssue],
+    allowed_point_ids: Optional[set[str]] = None,
+    grouped_data: Optional[tuple[list[tuple[str, float]], list[tuple[str, float]], list[tuple[str, float]]]] = None,
 ) -> None:
     """验证单张表的统计数据"""
     stats = table.statistics
@@ -116,14 +158,15 @@ def check_table_statistics(
         stats.positive_max_value is not None
         or stats.negative_max_value is not None
         or stats.max_rate_value is not None
+        or stats.max_change_value is not None
         or stats.max_force_value is not None
         or stats.min_force_value is not None
     )
     if not has_any_stat:
         return
 
-    cum_vals, rate_vals = _get_table_own_data(table)
-    table_point_ids = _get_table_point_ids(table)
+    cum_vals, rate_vals, change_vals = grouped_data or _get_table_own_data(table)
+    table_point_ids = allowed_point_ids or _get_table_point_ids(table)
     is_deep = bool(table.deep_points)
 
     # ── 锚索拉力 ─────────────────────────────────────────
@@ -249,11 +292,40 @@ def check_table_statistics(
                     message=f"最大速率不符: 实际 {actual_rate_id}={_fmt(actual_rate_val)}, 报告 {stats.max_rate_id}={_fmt(stats.max_rate_value)}",
                 ))
 
+    if change_vals and stats.max_change_value is not None:
+        actual_change_id, actual_change_val = max(change_vals, key=lambda x: abs(x[1]))
+        if not _close(abs(actual_change_val), abs(stats.max_change_value), FLOAT_TOLERANCE):
+            issues.append(CheckIssue(
+                severity="error",
+                table_name=table_label,
+                point_id=actual_change_id,
+                field_name="最大变化位移统计",
+                expected_value=_fmt(actual_change_val),
+                actual_value=_fmt(stats.max_change_value),
+                message=(
+                    f"最大变化位移不符: 实际 {actual_change_id}={_fmt(actual_change_val)}, "
+                    f"报告 {stats.max_change_id}={_fmt(stats.max_change_value)}"
+                ),
+            ))
+
 
 def run_statistics_checks(report: MonitoringReport) -> list[CheckIssue]:
-    """对报告中所有表格的统计数据进行验证（每张表独立检查）"""
+    """对报告中所有表格的统计数据进行验证。"""
     issues: list[CheckIssue] = []
-    for table in report.tables:
+    allowed_point_ids_map = _build_allowed_point_ids_map(report)
+    group_data_map = _build_group_data_map(report)
+    for table_index, table in enumerate(report.tables):
         logger.info("=== 统计验证: %s ===", table.monitoring_item)
-        check_table_statistics(table, issues)
+        group_key = _get_group_key(table)
+        allowed_point_ids = allowed_point_ids_map[group_key]
+        grouped_data = group_data_map[group_key]
+        table_issues: list[CheckIssue] = []
+        check_table_statistics(
+            table,
+            table_issues,
+            allowed_point_ids=allowed_point_ids,
+            grouped_data=grouped_data,
+        )
+        annotate_issues_for_table(report, table_issues, table_index, default_source="report")
+        issues.extend(table_issues)
     return issues

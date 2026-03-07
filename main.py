@@ -2,7 +2,7 @@
 建筑变形监测报告检查智能体 — 主入口
 
 用法:
-  python main.py <PDF文件路径> [--ocr] [--no-ai-review] [--output <输出路径>]
+  python main.py <PDF文件路径> [--ocr | --no-ocr] [--no-ai-review] [--output <输出路径>]
 
 示例:
   python main.py "监测报告检查（测试）.pdf"
@@ -29,7 +29,9 @@ def main():
         description="建筑变形监测报告检查智能体",
     )
     parser.add_argument("pdf_path", help="待检查的 PDF 文件路径")
-    parser.add_argument("--ocr", action="store_true", help="使用 PaddleOCR（适用于扫描件）")
+    ocr_group = parser.add_mutually_exclusive_group()
+    ocr_group.add_argument("--ocr", action="store_true", help="强制优先使用 PaddleOCR，失败时回退 pdfplumber")
+    ocr_group.add_argument("--no-ocr", action="store_true", help="仅使用 pdfplumber，不调用 PaddleOCR")
     parser.add_argument("--no-ai-review", action="store_true", help="跳过 AI 最终审核")
     parser.add_argument("--no-self-verify", action="store_true", help="跳过自验证")
     parser.add_argument("--output", "-o", default=None, help="输出报告路径")
@@ -58,12 +60,29 @@ def main():
 
     from src.tools.pdf_extractor import extract_pdf
 
-    raw_text = extract_pdf(
+    extraction_result = extract_pdf(
         pdf_path,
         use_ocr=args.ocr,
-        ocr_output_dir=f"output/{pdf_name}_ocr" if args.ocr else None,
+        prefer_ocr=not args.no_ocr,
+        auto_fallback=not args.no_ocr,
+        ocr_output_dir=f"output/{pdf_name}_ocr_debug",
+        return_details=True,
     )
+    raw_text = extraction_result.text
+    extraction_result.diagnostics.setdefault("method", extraction_result.method)
+    extraction_result.diagnostics.setdefault("selected_profile", extraction_result.selected_profile)
+    extraction_result.diagnostics.setdefault("debug_dir", extraction_result.debug_output_dir)
     logger.info("提取完成，文本长度: %d 字符", len(raw_text))
+    logger.info(
+        "  - 提取方式: %s (%s), 原始字符=%s, 清洗后字符=%s, 压缩率=%s",
+        extraction_result.method,
+        extraction_result.selected_profile,
+        extraction_result.diagnostics.get("raw_chars"),
+        extraction_result.diagnostics.get("clean_chars"),
+        extraction_result.diagnostics.get("compression_ratio"),
+    )
+    if extraction_result.debug_output_dir:
+        logger.info("  - OCR 调试目录: %s", extraction_result.debug_output_dir)
 
     # ── Step 2: LLM 结构化解析 ────────────────────────────
     logger.info("=" * 60)
@@ -74,11 +93,21 @@ def main():
 
     report = parse_report_with_llm(raw_text)
     report.raw_text = raw_text
+    report.extraction_diagnostics = extraction_result.diagnostics
+
+    from src.tools.extraction_quality import analyze_extraction_quality
+    analyze_extraction_quality(report)
 
     logger.info("解析结果: %s", report.project_name)
     logger.info("  - 阈值配置: %d 项", len(report.thresholds))
     logger.info("  - 汇总项: %d 项", len(report.summary_items))
     logger.info("  - 数据表: %d 张", len(report.tables))
+    if report.extraction_diagnostics:
+        logger.info(
+            "  - 提取诊断: 高 markup 页=%d, 疑似异常表=%d",
+            len(report.extraction_diagnostics.get("high_markup_pages", [])),
+            report.extraction_diagnostics.get("abnormal_table_count", 0),
+        )
     for t in report.tables:
         pts = len(t.points) if t.points else len(t.deep_points)
         label = t.monitoring_item
@@ -91,6 +120,13 @@ def main():
         )
 
     # ── Step 2b: LLM Config Enrichment ────────────────────
+    import src.config as cfg
+    step_delay = getattr(cfg, "LLM_STEP_DELAY_SEC", 0)
+    if step_delay > 0:
+        logger.info("等待 %d 秒以避免限流...", step_delay)
+        import time
+        time.sleep(step_delay)
+
     from src.tools.table_analyzer import enrich_configs_with_llm
     enrich_configs_with_llm(report)
 
@@ -145,6 +181,11 @@ def main():
     if not args.no_self_verify:
         errors = [i for i in all_issues if i.severity == "error"]
         if errors:
+            step_delay = getattr(cfg, "LLM_STEP_DELAY_SEC", 0)
+            if step_delay > 0:
+                logger.info("等待 %d 秒以避免限流...", step_delay)
+                time.sleep(step_delay)
+
             logger.info("=" * 60)
             logger.info("Step 6: AI 自验证 (%d 个错误)", len(errors))
             logger.info("=" * 60)

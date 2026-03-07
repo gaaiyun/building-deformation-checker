@@ -30,7 +30,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import re
+import time
 from typing import Optional
 
 from src.config import FLOAT_TOLERANCE, RATE_TOLERANCE
@@ -161,6 +164,7 @@ def generate_analysis_plan(report: MonitoringReport) -> list[dict]:
                 "depth": dp.depth is not None,
                 "previous_cumulative": dp.previous_cumulative is not None,
                 "current_cumulative": dp.current_cumulative is not None,
+                "current_change": dp.current_change is not None,
                 "change_rate": dp.change_rate is not None,
             }
         elif table.points:
@@ -184,6 +188,8 @@ def generate_analysis_plan(report: MonitoringReport) -> list[dict]:
                     parts.append(f"上次累计={dp.previous_cumulative:.2f}")
                 if dp.current_cumulative is not None:
                     parts.append(f"本次累计={dp.current_cumulative:.2f}")
+                if dp.current_change is not None:
+                    parts.append(f"本期变化={dp.current_change:.3f}")
                 if dp.change_rate is not None:
                     parts.append(f"速率={dp.change_rate:.3f}")
                 samples.append(", ".join(parts))
@@ -251,13 +257,21 @@ def generate_analysis_plan(report: MonitoringReport) -> list[dict]:
                 "severity": "error",
             })
         elif is_deep:
-            interval_str = f"{interval_days:.0f}" if interval_days else "?"
-            methods.append({
-                "name": "深层位移速率验证",
-                "formula": f"abs(本次累计 - 上次累计) / {interval_str}天",
-                "tolerance": f"{cfg.rate_tolerance}mm/d",
-                "severity": "error",
-            })
+            if any(dp.current_change is not None for dp in table.deep_points):
+                methods.append({
+                    "name": "深层位移本期变化验证",
+                    "formula": "本次累计 - 上次累计",
+                    "tolerance": f"{FLOAT_TOLERANCE}mm",
+                    "severity": "error",
+                })
+            if any(dp.change_rate is not None for dp in table.deep_points):
+                interval_str = f"{interval_days:.0f}" if interval_days else "?"
+                methods.append({
+                    "name": "深层位移速率验证",
+                    "formula": f"本期变化 / {interval_str}天",
+                    "tolerance": f"{cfg.rate_tolerance}mm/d",
+                    "severity": "error",
+                })
         else:
             conv_suffix = f" × {cfg.unit_conversion:.0f}" if cfg.unit_conversion != 1.0 else ""
             methods.append({
@@ -277,6 +291,10 @@ def generate_analysis_plan(report: MonitoringReport) -> list[dict]:
         # 统计验证对所有表通用
         stats_desc = "正/负方向最大值, 最大速率"
         if is_deep:
+            if any(dp.current_change is not None for dp in table.deep_points):
+                stats_desc = "正/负方向最大值, 最大变化位移"
+                if any(dp.change_rate is not None for dp in table.deep_points):
+                    stats_desc += ", 最大速率"
             stats_desc += " (豁免跨表引用检查)"
         elif cat in (MonitoringCategory.ANCHOR_FORCE, MonitoringCategory.STRUT_FORCE):
             stats_desc = "最大/最小内力"
@@ -331,13 +349,15 @@ def _infer_interval_from_table(table: MonitoringTable) -> Optional[float]:
     intervals: list[float] = []
     if table.deep_points:
         for dp in table.deep_points:
+            diff = None
             if (
                 dp.previous_cumulative is not None
                 and dp.current_cumulative is not None
-                and dp.change_rate is not None
-                and abs(dp.change_rate) > 1e-6
             ):
                 diff = abs(dp.current_cumulative - dp.previous_cumulative)
+            elif dp.current_change is not None:
+                diff = abs(dp.current_change)
+            if diff is not None and dp.change_rate is not None and abs(dp.change_rate) > 1e-6:
                 if diff > 1e-6:
                     inferred = diff / abs(dp.change_rate)
                     if 0.5 < inferred < 365:
@@ -376,7 +396,7 @@ def enrich_configs_with_llm(report: MonitoringReport) -> None:
         has_initial = sample.initial_value is not None
         has_cumulative = sample.cumulative_change is not None
         if has_initial and has_cumulative:
-            expected = sample.current_value - sample.initial_value if sample.current_value else None
+            expected = sample.current_value - sample.initial_value if sample.current_value is not None else None
             if expected is not None:
                 ratio = abs(expected / sample.cumulative_change) if sample.cumulative_change else 0
                 # 如果计算值与报告值相差超过100倍，说明可能有单位或基准问题
@@ -415,34 +435,44 @@ def enrich_configs_with_llm(report: MonitoringReport) -> None:
         '{"table_idx":0,"unit":"mm","initial_reliable":true,"severity":"error"}'
     )
 
-    try:
-        resp = client.chat.completions.create(
-            model=cfg.LLM_MODEL,
-            messages=[
-                {"role": "system", "content": "你是建筑变形监测数据分析专家。返回纯JSON，不要添加其他文字。"},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.1,
-            max_tokens=2000,
-            timeout=60,
-        )
-        import json, re
-        raw = resp.choices[0].message.content or ""
-        raw = re.sub(r'<think(?:ing)?>.*?</think(?:ing)?>', '', raw, flags=re.DOTALL).strip()
-        m = re.search(r'\[.*\]', raw, re.DOTALL)
-        if m:
-            results = json.loads(m.group())
-            for item in results:
-                idx = item.get("table_idx")
-                if idx is not None and 0 <= idx < len(report.tables):
-                    cfg = report.tables[idx].verification_config
-                    if item.get("unit"):
-                        cfg.unit = item["unit"]
-                        cfg.unit_conversion = 1000.0 if item["unit"] == "m" else 1.0
-                    if "initial_reliable" in item:
-                        cfg.initial_value_reliable = item["initial_reliable"]
-                    if item.get("severity"):
-                        cfg.severity_for_cumulative = item["severity"]
-            logger.info("LLM 增强了 %d 张表的验证配置", len(results))
-    except Exception as e:
-        logger.warning("LLM 配置增强失败（不影响主流程）: %s", e)
+    timeout_sec = getattr(cfg, "LLM_TIMEOUT_LARGE", 180)
+    max_retries = getattr(cfg, "LLM_MAX_RETRIES", 2)
+    backoff_sec = getattr(cfg, "LLM_RETRY_BACKOFF_SEC", 10)
+
+    for attempt in range(1 + max_retries):
+        try:
+            resp = client.chat.completions.create(
+                model=cfg.LLM_MODEL,
+                messages=[
+                    {"role": "system", "content": "你是建筑变形监测数据分析专家。返回纯JSON，不要添加其他文字。"},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
+                max_tokens=2000,
+                timeout=timeout_sec,
+            )
+            raw = resp.choices[0].message.content or ""
+            raw = re.sub(r'<think(?:ing)?>.*?</think(?:ing)?>', '', raw, flags=re.DOTALL).strip()
+            m = re.search(r'\[.*\]', raw, re.DOTALL)
+            if m:
+                results = json.loads(m.group())
+                for item in results:
+                    idx = item.get("table_idx")
+                    if idx is not None and 0 <= idx < len(report.tables):
+                        tbl_cfg = report.tables[idx].verification_config
+                        if item.get("unit"):
+                            tbl_cfg.unit = item["unit"]
+                            tbl_cfg.unit_conversion = 1000.0 if item["unit"] == "m" else 1.0
+                        if "initial_reliable" in item:
+                            tbl_cfg.initial_value_reliable = item["initial_reliable"]
+                        if item.get("severity"):
+                            tbl_cfg.severity_for_cumulative = item["severity"]
+                logger.info("LLM 增强了 %d 张表的验证配置", len(results))
+            return
+        except Exception as e:
+            if attempt < max_retries:
+                backoff = backoff_sec * (2 ** attempt)
+                logger.warning("LLM 配置增强失败，%ds 后重试: %s", backoff, e)
+                time.sleep(backoff)
+            else:
+                logger.warning("LLM 配置增强失败（不影响主流程）: %s", e)

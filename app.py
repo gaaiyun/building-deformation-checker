@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
+from src.tools.extraction_quality import append_issue_source_hint
 
 # ── 日志配置：捕获到 StreamHandler 供界面显示 ──────────
 log_records: list[str] = []
@@ -46,11 +47,14 @@ def _render_issues(title: str, issues: list) -> None:
 
     errors = [i for i in issues if i.severity == "error"]
     warnings = [i for i in issues if i.severity == "warning"]
+    infos = [i for i in issues if i.severity == "info"]
 
     if errors:
         st.error(f"发现 {len(errors)} 个错误")
     if warnings:
         st.warning(f"发现 {len(warnings)} 个警告")
+    if infos:
+        st.info(f"发现 {len(infos)} 个提示")
 
     grouped = defaultdict(list)
     for issue in issues:
@@ -67,12 +71,69 @@ def _render_issues(title: str, issues: list) -> None:
 
         with st.expander(f"**{table_name}** {badge}", expanded=bool(err_count)):
             for issue in table_issues:
+                message = append_issue_source_hint(issue.message, issue.suspected_source)
                 if issue.severity == "error":
-                    st.error(f"**{issue.point_id}** | {issue.field_name}: {issue.message}")
+                    st.error(f"**{issue.point_id}** | {issue.field_name}: {message}")
                 elif issue.severity == "warning":
-                    st.warning(f"**{issue.point_id}** | {issue.field_name}: {issue.message}")
+                    st.warning(f"**{issue.point_id}** | {issue.field_name}: {message}")
                 else:
-                    st.info(issue.message)
+                    st.info(message)
+
+
+def _render_extraction_diagnostics(report) -> None:
+    diagnostics = report.extraction_diagnostics or {}
+    if not diagnostics:
+        return
+
+    st.markdown("### 🧾 提取诊断")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("原始字符", f"{diagnostics.get('raw_chars', 0):,}")
+    c2.metric("清洗后字符", f"{diagnostics.get('clean_chars', 0):,}")
+    ratio = diagnostics.get("compression_ratio", 0.0)
+    c3.metric("压缩率", f"{ratio:.1%}")
+    c4.metric("异常页", f"{len(diagnostics.get('high_markup_pages', []))}")
+    c5.metric("异常表", f"{diagnostics.get('abnormal_table_count', 0)}")
+
+    method = diagnostics.get("method", "unknown")
+    profile = diagnostics.get("selected_profile", "")
+    label = f"{method} ({profile})" if profile else method
+    st.caption(f"提取方式: {label}")
+
+    attempts = diagnostics.get("attempts", [])
+    if attempts:
+        st.markdown("**提取尝试链路**")
+        for attempt in attempts:
+            if attempt.get("error"):
+                st.warning(f"{attempt['profile']}: {attempt['error']}")
+            else:
+                st.caption(
+                    f"{attempt['profile']}: clean={attempt.get('clean_chars', 0):,} chars, "
+                    f"pages={attempt.get('page_count', 0)}, "
+                    f"compression={attempt.get('compression_ratio', 0.0):.1%}"
+                )
+
+    high_markup_pages = diagnostics.get("high_markup_pages", [])
+    if high_markup_pages:
+        page_label = "，".join(str(page + 1) for page in high_markup_pages[:12])
+        suffix = " ..." if len(high_markup_pages) > 12 else ""
+        st.caption(f"高 markup 页: 第 {page_label} 页{suffix}")
+
+    debug_dir = diagnostics.get("debug_dir", "")
+    if debug_dir:
+        st.markdown("**OCR 调试目录**")
+        st.code(debug_dir, language=None)
+
+    flagged_tables = report.table_extraction_flags or {}
+    if flagged_tables:
+        st.markdown("**疑似提取异常表**")
+        for table_index, flags in sorted(flagged_tables.items()):
+            if table_index >= len(report.tables):
+                continue
+            table = report.tables[table_index]
+            table_name = table.monitoring_item
+            if table.borehole_id:
+                table_name += f" ({table.borehole_id})"
+            st.warning(f"{table_name}: {'；'.join(flags)}")
 
 
 def _render_analysis_plan(analysis_plan: list[dict]) -> None:
@@ -280,12 +341,13 @@ with st.sidebar:
 
     ocr_mode = st.radio(
         "PDF提取方式",
-        ["智能切换（推荐）", "仅 pdfplumber", "强制 PaddleOCR"],
+        ["优先 PaddleOCR（表格 profile）", "仅 pdfplumber", "强制 PaddleOCR"],
         index=0,
-        help="智能切换：先用pdfplumber提取，效果不好时自动尝试PaddleOCR",
+        help="默认先用表格优先的 PaddleOCR profile，必要时依次回退到其他 OCR profile 和 pdfplumber",
     )
     use_ocr = ocr_mode == "强制 PaddleOCR"
-    auto_fallback = ocr_mode == "智能切换（推荐）"
+    prefer_ocr = ocr_mode != "仅 pdfplumber"
+    auto_fallback = ocr_mode != "仅 pdfplumber"
 
     st.divider()
     st.subheader("🤖 AI 模型")
@@ -342,10 +404,27 @@ if uploaded is not None:
             progress_bar.progress(5)
 
             from src.tools.pdf_extractor import extract_pdf
-            raw_text = extract_pdf(tmp_path, use_ocr=use_ocr, auto_fallback=auto_fallback)
+            extraction_result = extract_pdf(
+                tmp_path,
+                use_ocr=use_ocr,
+                prefer_ocr=prefer_ocr,
+                auto_fallback=auto_fallback,
+                ocr_output_dir=f"output/{pdf_name}_ocr_debug",
+                return_details=True,
+            )
+            raw_text = extraction_result.text
+            extraction_result.diagnostics.setdefault("method", extraction_result.method)
+            extraction_result.diagnostics.setdefault("selected_profile", extraction_result.selected_profile)
+            extraction_result.diagnostics.setdefault("debug_dir", extraction_result.debug_output_dir)
 
             with status_container:
-                st.write(f"  ✅ 提取完成: {len(raw_text):,} 字符")
+                st.write(
+                    "  ✅ 提取完成: "
+                    f"{len(raw_text):,} 字符 "
+                    f"({extraction_result.method}/{extraction_result.selected_profile}, "
+                    f"{extraction_result.diagnostics.get('raw_chars', 0):,} → "
+                    f"{extraction_result.diagnostics.get('clean_chars', 0):,})"
+                )
 
             # ━━ Step 2: LLM 结构化解析 ━━━━━━━━━━━━━━━
             with status_container:
@@ -355,6 +434,17 @@ if uploaded is not None:
             from src.tools.llm_parser import parse_report_with_llm
             report = parse_report_with_llm(raw_text)
             report.raw_text = raw_text
+            report.extraction_diagnostics = extraction_result.diagnostics
+
+            from src.tools.extraction_quality import analyze_extraction_quality
+            analyze_extraction_quality(report)
+
+            import src.config as cfg
+            step_delay = getattr(cfg, "LLM_STEP_DELAY_SEC", 0)
+            if step_delay > 0:
+                with status_container:
+                    st.write(f"  ⏳ 等待 {step_delay} 秒以避免限流...")
+                time.sleep(step_delay)
 
             from src.tools.table_analyzer import enrich_configs_with_llm
             enrich_configs_with_llm(report)
@@ -413,6 +503,12 @@ if uploaded is not None:
             if do_self_verify:
                 errors_to_verify = [i for i in all_issues if i.severity == "error"]
                 if errors_to_verify:
+                    step_delay = getattr(cfg, "LLM_STEP_DELAY_SEC", 0)
+                    if step_delay > 0:
+                        with status_container:
+                            st.write(f"  ⏳ 等待 {step_delay} 秒以避免限流...")
+                        time.sleep(step_delay)
+
                     with status_container:
                         st.write(f"🔄 **Step 7/8** — AI 自验证（{len(errors_to_verify)} 个错误）...")
                     progress_bar.progress(70)
@@ -432,7 +528,7 @@ if uploaded is not None:
 
                 from src.tools.report_generator import generate_report_md
                 from src.tools.llm_parser import verify_report_with_llm
-                prelim = generate_report_md(report, calc_issues, stats_issues, logic_issues)
+                prelim = generate_report_md(report, calc_issues, stats_issues, logic_issues, analysis_plan=analysis_plan)
                 ai_review = verify_report_with_llm(prelim, raw_text)
 
                 with status_container:
@@ -467,15 +563,19 @@ if uploaded is not None:
             c3.metric("⚠️ 警告", f"{len(warnings)}")
             c4.metric("ℹ️ 提示", f"{len(infos)}")
             c5.metric("⏱️ 耗时", f"{elapsed:.0f}s")
+            _render_extraction_diagnostics(report)
 
             # ── 选项卡 ───────────────────────────────
-            tab_report, tab_plan, tab_calc, tab_stats, tab_logic, tab_ai, tab_log = st.tabs([
-                "📊 检查报告", "🧠 分析计划", "🔢 计算验证", "📈 统计验证",
+            tab_report, tab_extract, tab_plan, tab_calc, tab_stats, tab_logic, tab_ai, tab_log = st.tabs([
+                "📊 检查报告", "🧾 提取诊断", "🧠 分析计划", "🔢 计算验证", "📈 统计验证",
                 "🔍 逻辑检查", "🤖 AI审核", "📋 运行日志",
             ])
 
             with tab_report:
                 st.markdown(final_md)
+
+            with tab_extract:
+                _render_extraction_diagnostics(report)
 
             with tab_plan:
                 _render_analysis_plan(analysis_plan)
@@ -551,11 +651,11 @@ else:
 
         st.markdown("### 🔍 检查流程")
         st.markdown("""
-1. **PDF 提取** — 自动识别文字版或扫描件，智能选择最佳提取方式
+1. **PDF 提取** — 默认先走 PaddleOCR 表格 profile，自动清洗图表噪声并落盘调试信息
 2. **AI 结构化解析** — 用大语言模型理解不同公司的表格格式，提取为标准数据
 3. **表格分析计划** — ReAct风格分析每张表的字段、单位、验证策略（透明展示AI理解过程）
-4. **计算验证** — 逐条验证累计变化量、变化速率（动态容差适配不同数据类型）
-5. **统计验证** — 验证最大值/最小值统计，检测方向性错误和跨表引用
+4. **计算验证** — 逐条验证累计变化量、变化速率和深层位移本期变化（动态容差适配不同数据类型）
+5. **统计验证** — 验证最大值/最小值统计，支持同监测项多页合并后再判定
 6. **逻辑检查** — AI语义匹配阈值与分表，检查安全状态判定
 7. **AI 自验证** — 对检出的错误进行二次确认，大幅减少误报
 8. **生成报告** — 多格式导出（Markdown / Word / HTML）

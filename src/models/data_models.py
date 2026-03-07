@@ -72,6 +72,7 @@ class DeepDisplacementPoint:
     depth: float
     previous_cumulative: Optional[float] = None
     current_cumulative: Optional[float] = None
+    current_change: Optional[float] = None
     change_rate: Optional[float] = None
 
 
@@ -84,6 +85,8 @@ class StatisticsSummary:
     negative_max_value: Optional[float] = None
     max_rate_id: str = ""
     max_rate_value: Optional[float] = None
+    max_change_id: str = ""
+    max_change_value: Optional[float] = None
     max_force_id: str = ""
     max_force_value: Optional[float] = None
     min_force_id: str = ""
@@ -141,6 +144,8 @@ class MonitoringReport:
 
     threshold_map: dict = field(default_factory=dict)
     summary_map: dict = field(default_factory=dict)
+    table_extraction_flags: dict[int, list[str]] = field(default_factory=dict)
+    extraction_diagnostics: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -153,6 +158,7 @@ class CheckIssue:
     expected_value: str
     actual_value: str
     message: str
+    suspected_source: str = ""
 
     def __str__(self):
         icon = {"error": "[错误]", "warning": "[警告]", "info": "[提示]"}.get(
