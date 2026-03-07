@@ -30,7 +30,7 @@ def main():
     )
     parser.add_argument("pdf_path", help="待检查的 PDF 文件路径")
     ocr_group = parser.add_mutually_exclusive_group()
-    ocr_group.add_argument("--ocr", action="store_true", help="强制优先使用 PaddleOCR，失败时回退 pdfplumber")
+    ocr_group.add_argument("--ocr", action="store_true", help="优先使用 PaddleOCR，失败时回退 pdfplumber")
     ocr_group.add_argument("--no-ocr", action="store_true", help="仅使用 pdfplumber，不调用 PaddleOCR")
     parser.add_argument("--no-ai-review", action="store_true", help="跳过 AI 最终审核")
     parser.add_argument("--no-self-verify", action="store_true", help="跳过自验证")
@@ -63,7 +63,7 @@ def main():
     extraction_result = extract_pdf(
         pdf_path,
         use_ocr=args.ocr,
-        prefer_ocr=not args.no_ocr,
+        prefer_ocr=args.ocr,
         auto_fallback=not args.no_ocr,
         ocr_output_dir=f"output/{pdf_name}_ocr_debug",
         return_details=True,

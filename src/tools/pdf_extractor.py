@@ -515,7 +515,7 @@ def extract_with_paddle_ocr(
 def extract_pdf(
     pdf_path: str,
     use_ocr: bool = False,
-    prefer_ocr: bool = True,
+    prefer_ocr: bool = False,
     auto_fallback: bool = True,
     ocr_output_dir: Optional[str] = None,
     return_details: bool = False,
@@ -523,8 +523,8 @@ def extract_pdf(
     """
     统一入口：提取 PDF 内容为纯文本。
 
-    默认优先使用 PaddleOCR 主 profile，必要时回退到 OCR 次 profile，
-    最后回退到 pdfplumber。
+    默认优先使用 pdfplumber；若文本层质量不足则自动切换 OCR。
+    当 prefer_ocr/use_ocr 为真时，先尝试 PaddleOCR，再回退 pdfplumber。
     """
     if use_ocr or prefer_ocr:
         mode = "强制 PaddleOCR" if use_ocr else "优先 PaddleOCR"
@@ -590,16 +590,34 @@ def extract_pdf(
     text = extract_text_with_pdfplumber(pdf_path)
     if auto_fallback and not _assess_text_quality(text, max(1, text.count("--- 第 "))):
         logger.info("pdfplumber 提取效果不佳，自动切换到 PaddleOCR")
-        try:
-            result = _extract_with_paddle_profile(
-                pdf_path,
-                profile_name="primary",
-                profile=PADDLE_PRIMARY_PROFILE,
-                debug_output_dir=ocr_output_dir,
-            )
-            return result if return_details else result.text
-        except Exception as exc:
-            logger.warning("PaddleOCR 调用失败，保留 pdfplumber 结果: %s", exc)
+        attempts: list[dict] = []
+        for profile_name, profile in (
+            ("table", PADDLE_TABLE_PROFILE),
+            ("primary", PADDLE_PRIMARY_PROFILE),
+            ("fallback", PADDLE_FALLBACK_PROFILE),
+        ):
+            try:
+                debug_dir = ocr_output_dir if profile_name == "table" else None
+                result = _extract_with_paddle_profile(
+                    pdf_path,
+                    profile_name=profile_name,
+                    profile=profile,
+                    debug_output_dir=debug_dir,
+                )
+                attempts.append({
+                    "profile": profile_name,
+                    "clean_chars": result.diagnostics["clean_chars"],
+                    "page_count": result.diagnostics["page_count"],
+                    "compression_ratio": result.diagnostics["compression_ratio"],
+                })
+                result.diagnostics["attempts"] = attempts
+                result.diagnostics["debug_dir"] = result.debug_output_dir
+                if _assess_text_quality(result.text, result.diagnostics["page_count"]):
+                    return result if return_details else result.text
+                logger.warning("自动切换 OCR 后，%s profile 质量一般，继续尝试下一 profile", profile_name)
+            except Exception as exc:
+                attempts.append({"profile": profile_name, "error": str(exc)})
+                logger.warning("自动切换 OCR 时，%s profile 失败: %s", profile_name, exc)
 
     result = PDFExtractionResult(
         text=text,

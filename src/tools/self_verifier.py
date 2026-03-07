@@ -14,7 +14,7 @@ import json
 import logging
 import re
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 from src.models.data_models import CheckIssue, MonitoringReport
 from src.tools.extraction_quality import infer_source_from_reason
@@ -40,6 +40,7 @@ def _find_table_text(raw_text: str, table_name: str) -> str:
 def verify_errors_with_llm(
     report: MonitoringReport,
     errors: list[CheckIssue],
+    progress_callback: Optional[Callable[[dict], None]] = None,
 ) -> list[CheckIssue]:
     """
     Self-verify error-level findings using LLM.
@@ -55,16 +56,33 @@ def verify_errors_with_llm(
     from openai import OpenAI
     import src.config as cfg
 
-    timeout_sec = getattr(cfg, "LLM_TIMEOUT_LARGE", 180)
+    timeout_sec = getattr(cfg, "LLM_TIMEOUT_NORMAL", 90)
     max_retries = getattr(cfg, "LLM_MAX_RETRIES", 2)
     backoff_sec = getattr(cfg, "LLM_RETRY_BACKOFF_SEC", 10)
 
     client = OpenAI(api_key=cfg.LLM_API_KEY, base_url=cfg.LLM_BASE_URL)
     dismissed = 0
     downgraded = 0
+    total_batches = (len(to_verify) + BATCH_SIZE - 1) // BATCH_SIZE
+
+    if progress_callback:
+        progress_callback({
+            "stage": "start",
+            "total_errors": len(to_verify),
+            "total_batches": total_batches,
+        })
 
     for batch_start in range(0, len(to_verify), BATCH_SIZE):
         batch = to_verify[batch_start : batch_start + BATCH_SIZE]
+        batch_index = batch_start // BATCH_SIZE + 1
+        if progress_callback:
+            progress_callback({
+                "stage": "batch_start",
+                "batch_index": batch_index,
+                "total_batches": total_batches,
+                "batch_size": len(batch),
+                "total_errors": len(to_verify),
+            })
         error_descriptions = []
         for j, err in enumerate(batch):
             context = _find_table_text(report.raw_text, err.table_name)
@@ -128,12 +146,28 @@ def verify_errors_with_llm(
                 if attempt < max_retries:
                     backoff = backoff_sec * (2 ** attempt)
                     logger.warning("自验证本批请求失败，%ds 后重试: %s", backoff, e)
+                    if progress_callback:
+                        progress_callback({
+                            "stage": "batch_retry",
+                            "batch_index": batch_index,
+                            "total_batches": total_batches,
+                            "attempt": attempt + 2,
+                            "max_attempts": max_retries + 1,
+                            "error": str(e),
+                        })
                     time.sleep(backoff)
                 else:
                     logger.warning("自验证本批LLM调用失败 (non-fatal): %s", e)
                     break
 
         if verdicts is None:
+            if progress_callback:
+                progress_callback({
+                    "stage": "batch_failed",
+                    "batch_index": batch_index,
+                    "total_batches": total_batches,
+                    "error": str(last_exc) if last_exc else "unknown",
+                })
             continue
 
         for v in verdicts:
@@ -170,8 +204,24 @@ def verify_errors_with_llm(
                 if normalized_origin:
                     target.suspected_source = normalized_origin
 
+        if progress_callback:
+            progress_callback({
+                "stage": "batch_finish",
+                "batch_index": batch_index,
+                "total_batches": total_batches,
+                "dismissed": dismissed,
+                "downgraded": downgraded,
+            })
+
     logger.info(
         "自验证完成: %d个确认, %d个降级, %d个排除",
         len(to_verify) - dismissed - downgraded, downgraded, dismissed,
     )
+    if progress_callback:
+        progress_callback({
+            "stage": "done",
+            "total_errors": len(to_verify),
+            "dismissed": dismissed,
+            "downgraded": downgraded,
+        })
     return errors

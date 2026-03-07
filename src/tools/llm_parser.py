@@ -10,8 +10,8 @@ Architecture:
 """
 
 from __future__ import annotations
-import json, logging, re
-from typing import Any
+import json, logging, re, time
+from typing import Any, Callable, Optional
 from openai import OpenAI
 import src.config as cfg
 from src.models.data_models import (
@@ -330,7 +330,11 @@ def parse_report_with_llm(raw_text: str) -> MonitoringReport:
     return report
 
 
-def verify_report_with_llm(report_md: str, raw_text: str) -> str:
+def verify_report_with_llm(
+    report_md: str,
+    raw_text: str,
+    progress_callback: Optional[Callable[[str], None]] = None,
+) -> str:
     text_preview = raw_text[:6000]
     msg = (
         "以下是监测报告自动检查结果和原始文本。请审核是否有遗漏或误判。"
@@ -338,18 +342,30 @@ def verify_report_with_llm(report_md: str, raw_text: str) -> str:
         f"## 检查报告\n{report_md}\n\n"
         f"## 原始文本(前6000字)\n```\n{text_preview}\n```\n\n请给出审核意见。"
     )
-    try:
-        resp = client.chat.completions.create(
-            model=cfg.LLM_MODEL,
-            messages=[
-                {"role": "system", "content": "你是建筑工程监测领域资深专家。正负号代表方向不代表大小。"},
-                {"role": "user", "content": msg},
-            ],
-            temperature=0.3,
-            max_tokens=4000,
-            timeout=120,
-        )
-        return resp.choices[0].message.content or ""
-    except Exception as e:
-        logger.error("AI审核调用失败: %s", e)
-        return f"AI审核调用失败: {e}"
+    timeout_sec = getattr(cfg, "LLM_TIMEOUT_NORMAL", 90)
+    max_retries = getattr(cfg, "LLM_MAX_RETRIES", 1)
+    backoff_sec = getattr(cfg, "LLM_RETRY_BACKOFF_SEC", 10)
+
+    for attempt in range(1 + max_retries):
+        try:
+            if progress_callback:
+                progress_callback(f"提交最终审核请求（第 {attempt + 1}/{max_retries + 1} 次）")
+            resp = client.chat.completions.create(
+                model=cfg.LLM_MODEL,
+                messages=[
+                    {"role": "system", "content": "你是建筑工程监测领域资深专家。正负号代表方向不代表大小。"},
+                    {"role": "user", "content": msg},
+                ],
+                temperature=0.3,
+                max_tokens=4000,
+                timeout=timeout_sec,
+            )
+            return resp.choices[0].message.content or ""
+        except Exception as e:
+            logger.error("AI审核调用失败: %s", e)
+            if attempt < max_retries:
+                if progress_callback:
+                    progress_callback(f"最终审核失败，准备重试：{e}")
+                time.sleep(backoff_sec * (2 ** attempt))
+            else:
+                return f"AI审核调用失败: {e}"

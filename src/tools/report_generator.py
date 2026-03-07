@@ -127,9 +127,9 @@ def generate_report_md(
                 lines.append(f"- {table_name}: {'；'.join(flags)}")
             lines.append("")
 
-    # ── AI 理解与验证策略 ──────────────────────────────
+    # ── 表格理解与验证策略 ────────────────────────────
     if analysis_plan:
-        lines.append("## AI 理解与验证策略\n")
+        lines.append("## 表格理解与验证策略\n")
         for plan in analysis_plan:
             header = f"### {plan['table_name']} ({plan['category']} | {plan['point_count']}个测点)\n"
             lines.append(header)
@@ -141,8 +141,8 @@ def generate_report_md(
                 unit_desc += f" ({plan['conversion_note']})"
             lines.append(f"- **单位**: {unit_desc}")
 
-            reliable_icon = "✅" if plan["initial_reliable"] else "⚠"
-            lines.append(f"- **初始值**: {reliable_icon} {plan['reliability_reason']}")
+            reliable_text = "可靠" if plan["initial_reliable"] else "需谨慎"
+            lines.append(f"- **初始值**: {reliable_text}，{plan['reliability_reason']}")
 
             if plan["interval_days"]:
                 lines.append(f"- **监测间隔**: {plan['interval_days']:.0f}天 ({plan['interval_source']})")
@@ -151,9 +151,8 @@ def generate_report_md(
 
             lines.append("- **验证规则**:")
             for method in plan["verification_methods"]:
-                icon = "⚠" if method["severity"] == "warning" else "✅"
                 lines.append(
-                    f"  - {icon} {method['name']} = `{method['formula']}`, "
+                    f"  - {method['name']} = `{method['formula']}`, "
                     f"容差={method['tolerance']}, {method['severity']}"
                 )
 
@@ -168,9 +167,9 @@ def generate_report_md(
     _section(lines, "统计验证结果", stats_issues)
     _section(lines, "逻辑检查结果", logic_issues)
 
-    # ── AI 补充审核 ──────────────────────────────────
+    # ── 补充审核 ─────────────────────────────────────
     if ai_review:
-        lines.append("## AI 专家补充审核\n")
+        lines.append("## 补充审核意见\n")
         lines.append(ai_review)
         lines.append("")
 
@@ -187,7 +186,7 @@ def generate_report_md(
             f"{warning_count} 处警告，建议复核上述问题。\n"
         )
 
-    lines.append("\n---\n*本报告由建筑变形监测报告检查智能体自动生成*\n")
+    lines.append("\n---\n*本报告由建筑变形监测报告核验台自动生成*\n")
     return "\n".join(lines)
 
 

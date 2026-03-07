@@ -173,11 +173,11 @@ streamlit run app.py
 ```
 
 界面功能：
-- **侧边栏**：选择 PDF 提取方式（优先 PaddleOCR 表格 profile / 仅 pdfplumber / 强制 PaddleOCR）、AI 自验证开关、AI 最终审核开关
-- **进度显示**：`st.status` 8 步实时显示进度，`st.progress` 进度条
-- **结果展示**：指标卡片（数据表数、错误数、警告数、提示数、耗时）+ 8 个选项卡（检查报告/提取诊断/分析计划/计算验证/统计验证/逻辑检查/AI审核/运行日志）
+- **侧边栏**：选择 PDF 提取方式（优先 pdfplumber / 优先 PaddleOCR 表格 profile / 强制 PaddleOCR）、错误复核开关、最终审核开关
+- **进度显示**：`st.status` 8 步实时显示进度，`st.progress` 进度条；第 7/8 步会显示批次、重试和完成状态
+- **结果展示**：指标卡片（数据表数、错误数、警告数、提示数、耗时）+ 8 个选项卡（检查报告/提取诊断/分析计划/计算验证/统计验证/逻辑检查/最终审核/运行日志）
 - **提取诊断**：展示选中的 OCR profile、压缩率、高 markup 页、异常表、调试目录和提取尝试链路
-- **导出功能**：Markdown / Word (docx) / HTML（可打印为PDF）三种格式
+- **导出功能**：Markdown / Word (docx) / HTML（可打印为PDF）三种格式，其中 Word 导出采用统一黑色字体与正式文档排版
 - **运行日志**：实时捕获所有模块的日志输出，通过自定义 `StreamlitLogHandler` 实现
 
 ### 命令行
@@ -275,18 +275,22 @@ python main.py "报告.pdf" -o output/my_report.md
 
 #### 当前默认提取链路
 
-当前实现不是“先 pdfplumber 再决定是否 OCR”，而是：
+当前默认策略为“pdfplumber 优先，按需回退 OCR”：
 
 ```
-if --no-ocr:
-    直接使用 pdfplumber
-else:
+if --ocr:
     依次尝试 PaddleOCR:
       1. table profile
       2. primary profile
       3. fallback profile
-    每次 OCR 后都执行 Markdown/HTML 表格清洗和质量评估
     若 OCR 失败或质量不足 → 回退 pdfplumber
+else:
+    先使用 pdfplumber
+    若文本层质量不足:
+      1. table profile
+      2. primary profile
+      3. fallback profile
+    每次 OCR 后都执行 Markdown/HTML 表格清洗和质量评估
 ```
 
 #### PaddleOCR API 调用细节
@@ -324,7 +328,7 @@ Paddle / MinerU 这类服务返回的 `markdown.text` 往往仍然包含大量 H
 #### 注意事项
 
 - PaddleOCR API 是外部服务，需确保 Token 有效且服务可用
-- 对于文字层很干净的 PDF，`--no-ocr` 仍然是重要对比基线
+- 对于文字层很干净的 PDF，默认策略通常已经足够；`--no-ocr` 仍然是重要对比基线
 - 同一监测项跨页表的统计块，当前规则层已按 `(monitoring_item, borehole_id)` 组内合并后再做统计判定
 - `extract_tables_with_pdfplumber()` 提取结构化表格数据，但当前主流程仍以文本/Markdown 进入 LLM，结构化字段由 LLM 统一理解
 
@@ -626,17 +630,18 @@ if 报告标"报警" but 应为"正常" → warning（过严不算大错）
 
 #### 工作流程
 
-1. 筛选所有 `severity="error"` 的问题（最多 20 个）
+1. 筛选所有 `severity="error"` 的问题
 2. 对每个错误，从原始文本中截取相关表格片段（~2000 字符上下文）
 3. 组装 prompt，要求 LLM 逐一确认：
    - `confirm`：错误确实存在 → 保持 error
    - `downgrade`：不确定 → 降级为 warning
    - `dismiss`：是误报 → 降级为 info
-4. 提供领域知识提示（正负号规则、高程精度、水位基准）
+4. 提供领域知识提示（正负号规则、高程精度、水位基准、分页拆表与提取误报）
+5. 通过进度回调向 Streamlit 报告批次开始、重试、失败和完成状态
 
 #### 关键设计
 
-- `MAX_ERRORS_TO_VERIFY = 20`：限制最大验证数量，避免 token 过多
+- 按批次处理错误项，不再固定截断到 20 条
 - 使用 `id()` 做对象身份匹配，确保修改的是原始 CheckIssue 对象
 - 失败时 non-fatal，返回原始错误列表
 
@@ -654,7 +659,7 @@ if 报告标"报警" but 应为"正常" → warning（过严不算大错）
 ## 计算验证结果 (错误/警告/提示分组)
 ## 统计验证结果
 ## 逻辑检查结果
-## AI 专家补充审核 (可选)
+## 补充审核意见 (可选)
 ## 结论
 ```
 
@@ -666,7 +671,7 @@ if 报告标"报警" but 应为"正常" → warning（过严不算大错）
 | **Word (docx)** | `python-docx` 生成 | 正式文档提交 |
 | **HTML** | `markdown` 库转换 + CSS | 浏览器打印为 PDF |
 
-Word 导出包含：标题居中、基本信息段落、结果统计表格、红色错误/橙色警告详情、结论。
+Word 导出包含：标题页、基础信息表、检查摘要、问题表格和结论，统一使用黑色字体与正式表格样式。
 
 HTML 导出包含：微软雅黑字体、响应式布局、打印优化（`@media print`）。
 
