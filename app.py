@@ -9,6 +9,7 @@
 """
 
 import io
+import inspect
 import logging
 import tempfile
 import time
@@ -38,6 +39,23 @@ logger = logging.getLogger("app")
 
 
 # ── 辅助函数（必须在 Streamlit UI 逻辑之前定义）─────────
+
+def _call_with_optional_progress_callback(func, *args, progress_callback=None, **kwargs):
+    """兼容旧签名：若目标函数不支持 progress_callback，则自动降级为无回调调用。"""
+    if progress_callback is None:
+        return func(*args, **kwargs)
+
+    supports_progress = False
+    try:
+        supports_progress = "progress_callback" in inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        supports_progress = False
+
+    if supports_progress:
+        return func(*args, progress_callback=progress_callback, **kwargs)
+
+    logger.warning("%s 不支持 progress_callback，已自动切换为兼容模式", getattr(func, "__name__", "callable"))
+    return func(*args, **kwargs)
 
 def _render_issues(title: str, issues: list) -> None:
     """按表名分组展示检查问题"""
@@ -853,7 +871,12 @@ if uploaded is not None:
                             )
 
                     from src.tools.self_verifier import verify_errors_with_llm
-                    all_issues = verify_errors_with_llm(report, all_issues, progress_callback=_on_self_verify_progress)
+                    all_issues = _call_with_optional_progress_callback(
+                        verify_errors_with_llm,
+                        report,
+                        all_issues,
+                        progress_callback=_on_self_verify_progress,
+                    )
 
                     with status_container:
                         st.write("完成：错误复核结束")
@@ -872,7 +895,8 @@ if uploaded is not None:
                 from src.tools.report_generator import generate_report_md
                 from src.tools.llm_parser import verify_report_with_llm
                 prelim = generate_report_md(report, calc_issues, stats_issues, logic_issues, analysis_plan=analysis_plan)
-                ai_review = verify_report_with_llm(
+                ai_review = _call_with_optional_progress_callback(
+                    verify_report_with_llm,
                     prelim,
                     raw_text,
                     progress_callback=lambda msg: update_phase("Step 8/8 · 最终审核", msg, 88),
