@@ -193,6 +193,53 @@ class SelfVerifierTests(unittest.TestCase):
         self.assertGreaterEqual(warning_count, 3)
         self.assertGreaterEqual(error_count, 3)
 
+    def test_self_verifier_truncates_when_error_count_exceeds_limit(self):
+        issues = [
+            CheckIssue(
+                severity="error",
+                table_name="支护结构顶部水平位移",
+                point_id=f"P{i}",
+                field_name="累计变化量",
+                expected_value="1.00",
+                actual_value="2.00",
+                message="累计变化量不符",
+            )
+            for i in range(30)
+        ]
+        report = MonitoringReport(raw_text="支护结构顶部水平位移 原文片段")
+        events: list[dict] = []
+
+        class FakeOpenAI:
+            calls = 0
+
+            def __init__(self, *args, **kwargs):
+                self.chat = types.SimpleNamespace(
+                    completions=types.SimpleNamespace(create=self._create)
+                )
+
+            def _create(self, model, messages, temperature, max_tokens, timeout):
+                FakeOpenAI.calls += 1
+                prompt = messages[1]["content"]
+                batch_size = int(re.search(r"本批共 (\d+) 个错误", prompt).group(1))
+                verdicts = [{
+                    "error_idx": idx,
+                    "verdict": "confirm",
+                    "reason": "确认",
+                    "suspected_origin": "report",
+                } for idx in range(batch_size)]
+                return types.SimpleNamespace(
+                    choices=[types.SimpleNamespace(message=types.SimpleNamespace(content=json.dumps(verdicts, ensure_ascii=False)))]
+                )
+
+        with patch.dict(sys.modules, {"openai": types.SimpleNamespace(OpenAI=FakeOpenAI)}), \
+             patch("src.config.SELF_VERIFY_MAX_ERRORS", 10), \
+             patch("src.config.SELF_VERIFY_BATCH_SIZE", 5), \
+             patch("src.config.SELF_VERIFY_MAX_PARALLEL", 1):
+            verify_errors_with_llm(report, issues, progress_callback=events.append)
+
+        self.assertTrue(any(evt.get("stage") == "truncated" for evt in events))
+        self.assertEqual(FakeOpenAI.calls, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

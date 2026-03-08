@@ -10,7 +10,7 @@ Implements the two-LLM verification pattern for higher accuracy.
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import json
 import logging
 import re
@@ -274,6 +274,20 @@ def verify_errors_with_llm(
     single_shot_threshold = max(1, int(getattr(cfg, "SELF_VERIFY_SINGLE_SHOT_THRESHOLD", 6)))
     context_chars = max(60, int(getattr(cfg, "SELF_VERIFY_CONTEXT_CHARS", DEFAULT_CONTEXT_CHARS)))
     max_parallel = max(1, int(getattr(cfg, "SELF_VERIFY_MAX_PARALLEL", 2)))
+    max_total_sec = max(10, int(getattr(cfg, "SELF_VERIFY_MAX_TOTAL_SEC", 90)))
+    max_errors = max(1, int(getattr(cfg, "SELF_VERIFY_MAX_ERRORS", 24)))
+    deadline = time.time() + max_total_sec
+
+    if len(to_verify) > max_errors:
+        skipped_count = len(to_verify) - max_errors
+        to_verify = to_verify[:max_errors]
+        logger.warning("自验证错误数超过上限，仅处理前 %d 条，跳过 %d 条", max_errors, skipped_count)
+        if progress_callback:
+            progress_callback({
+                "stage": "truncated",
+                "processed_errors": len(to_verify),
+                "skipped_errors": skipped_count,
+            })
 
     if len(to_verify) <= single_shot_threshold:
         batch_size = len(to_verify)
@@ -298,6 +312,14 @@ def verify_errors_with_llm(
 
     if parallelism <= 1:
         for batch_start, batch_index, batch in batches:
+            if time.time() >= deadline:
+                logger.warning("自验证达到总耗时上限(%ds)，提前结束", max_total_sec)
+                if progress_callback:
+                    progress_callback({
+                        "stage": "deadline_reached",
+                        "max_total_sec": max_total_sec,
+                    })
+                break
             if progress_callback:
                 progress_callback({
                     "stage": "batch_start",
@@ -358,6 +380,9 @@ def verify_errors_with_llm(
         future_map = {}
         with ThreadPoolExecutor(max_workers=parallelism, thread_name_prefix="self_verify") as executor:
             for batch_start, batch_index, batch in batches:
+                if time.time() >= deadline:
+                    logger.warning("自验证达到总耗时上限(%ds)，停止提交新批次", max_total_sec)
+                    break
                 if progress_callback:
                     progress_callback({
                         "stage": "batch_start",
@@ -377,54 +402,78 @@ def verify_errors_with_llm(
                 )
                 future_map[future] = (batch_start, batch_index, batch)
 
-            for future in as_completed(future_map):
-                batch_start, batch_index, batch = future_map[future]
-                try:
-                    result = future.result()
-                except Exception as exc:
-                    logger.warning("自验证第 %d/%d 批并发执行异常: %s", batch_index, total_batches, exc)
+            while future_map:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    logger.warning("自验证达到总耗时上限(%ds)，提前结束并取消未完成批次", max_total_sec)
+                    for pending in future_map:
+                        pending.cancel()
                     if progress_callback:
                         progress_callback({
-                            "stage": "batch_failed",
-                            "batch_index": batch_index,
-                            "total_batches": total_batches,
-                            "error": str(exc),
+                            "stage": "deadline_reached",
+                            "max_total_sec": max_total_sec,
                         })
-                    continue
-                if result["split"] and progress_callback:
-                    progress_callback({
-                        "stage": "batch_split",
-                        "batch_index": batch_index,
-                        "total_batches": total_batches,
-                        "batch_size": len(batch),
-                        "error": str(result["error"]) if result["error"] else "unknown",
-                    })
-                if result["all_failed"]:
+                    break
+                done_futures, _ = wait(set(future_map.keys()), timeout=max(1.0, remaining), return_when=FIRST_COMPLETED)
+                if not done_futures:
+                    logger.warning("自验证等待批次结果超时，提前结束并取消未完成批次")
+                    for pending in future_map:
+                        pending.cancel()
                     if progress_callback:
                         progress_callback({
-                            "stage": "batch_failed",
+                            "stage": "deadline_reached",
+                            "max_total_sec": max_total_sec,
+                        })
+                    break
+
+                for future in done_futures:
+                    batch_start, batch_index, batch = future_map.pop(future)
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        logger.warning("自验证第 %d/%d 批并发执行异常: %s", batch_index, total_batches, exc)
+                        if progress_callback:
+                            progress_callback({
+                                "stage": "batch_failed",
+                                "batch_index": batch_index,
+                                "total_batches": total_batches,
+                                "error": str(exc),
+                            })
+                        continue
+                    if result["split"] and progress_callback:
+                        progress_callback({
+                            "stage": "batch_split",
                             "batch_index": batch_index,
                             "total_batches": total_batches,
+                            "batch_size": len(batch),
                             "error": str(result["error"]) if result["error"] else "unknown",
                         })
-                    continue
-                for segment_batch, segment_verdicts in result["segments"]:
-                    dismissed_delta, downgraded_delta = _apply_verdicts(
-                        errors=errors,
-                        batch=segment_batch,
-                        verdicts=segment_verdicts,
-                        batch_start=batch_start,
-                    )
-                    dismissed += dismissed_delta
-                    downgraded += downgraded_delta
-                if progress_callback:
-                    progress_callback({
-                        "stage": "batch_finish",
-                        "batch_index": batch_index,
-                        "total_batches": total_batches,
-                        "dismissed": dismissed,
-                        "downgraded": downgraded,
-                    })
+                    if result["all_failed"]:
+                        if progress_callback:
+                            progress_callback({
+                                "stage": "batch_failed",
+                                "batch_index": batch_index,
+                                "total_batches": total_batches,
+                                "error": str(result["error"]) if result["error"] else "unknown",
+                            })
+                        continue
+                    for segment_batch, segment_verdicts in result["segments"]:
+                        dismissed_delta, downgraded_delta = _apply_verdicts(
+                            errors=errors,
+                            batch=segment_batch,
+                            verdicts=segment_verdicts,
+                            batch_start=batch_start,
+                        )
+                        dismissed += dismissed_delta
+                        downgraded += downgraded_delta
+                    if progress_callback:
+                        progress_callback({
+                            "stage": "batch_finish",
+                            "batch_index": batch_index,
+                            "total_batches": total_batches,
+                            "dismissed": dismissed,
+                            "downgraded": downgraded,
+                        })
 
     logger.info(
         "自验证完成: %d个确认, %d个降级, %d个排除",

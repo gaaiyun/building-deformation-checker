@@ -46,13 +46,15 @@ SELF_VERIFY_RETRY_BACKOFF_SEC = int(os.getenv("SELF_VERIFY_RETRY_BACKOFF_SEC", "
 SELF_VERIFY_SINGLE_SHOT_THRESHOLD = int(os.getenv("SELF_VERIFY_SINGLE_SHOT_THRESHOLD", "6"))  # 少量错误直接单次复核
 SELF_VERIFY_CONTEXT_CHARS = int(os.getenv("SELF_VERIFY_CONTEXT_CHARS", "120"))  # 自验证上下文截取长度
 SELF_VERIFY_MAX_PARALLEL = int(os.getenv("SELF_VERIFY_MAX_PARALLEL", "2"))  # 自验证并发上限
+SELF_VERIFY_MAX_TOTAL_SEC = int(os.getenv("SELF_VERIFY_MAX_TOTAL_SEC", "90"))  # 自验证总耗时上限（秒）
+SELF_VERIFY_MAX_ERRORS = int(os.getenv("SELF_VERIFY_MAX_ERRORS", "24"))  # 自验证最多处理的错误数
 CONFIG_ENRICH_TIMEOUT_SEC = int(os.getenv("CONFIG_ENRICH_TIMEOUT_SEC", "45"))  # 配置增强超时
 CONFIG_ENRICH_MAX_RETRIES = int(os.getenv("CONFIG_ENRICH_MAX_RETRIES", "0"))   # 配置增强重试
 CONFIG_ENRICH_RETRY_BACKOFF_SEC = int(os.getenv("CONFIG_ENRICH_RETRY_BACKOFF_SEC", "2"))
-FINAL_REVIEW_TIMEOUT_SEC = int(os.getenv("FINAL_REVIEW_TIMEOUT_SEC", "60"))  # 最终审核超时
+FINAL_REVIEW_TIMEOUT_SEC = int(os.getenv("FINAL_REVIEW_TIMEOUT_SEC", "35"))  # 最终审核超时
 FINAL_REVIEW_MAX_RETRIES = int(os.getenv("FINAL_REVIEW_MAX_RETRIES", "0"))   # 最终审核重试
 FINAL_REVIEW_RETRY_BACKOFF_SEC = int(os.getenv("FINAL_REVIEW_RETRY_BACKOFF_SEC", "2"))
-FINAL_REVIEW_PREVIEW_CHARS = int(os.getenv("FINAL_REVIEW_PREVIEW_CHARS", "3000"))  # 最终审核原文预览长度
+FINAL_REVIEW_PREVIEW_CHARS = int(os.getenv("FINAL_REVIEW_PREVIEW_CHARS", "2200"))  # 最终审核原文预览长度
 
 # ── 数值精度 ──────────────────────────────────────────────
 FLOAT_TOLERANCE = 0.15  # mm，允许的浮点误差

@@ -869,6 +869,17 @@ if uploaded is not None:
                                 "Step 7/8 · 错误复核",
                                 f"第 {batch_index}/{total_batches} 批失败：{event.get('error', '')}",
                             )
+                        elif stage == "truncated":
+                            update_phase(
+                                "Step 7/8 · 错误复核",
+                                f"错误项过多，已处理前 {event.get('processed_errors', 0)} 条，跳过 {event.get('skipped_errors', 0)} 条。",
+                            )
+                        elif stage == "deadline_reached":
+                            update_phase(
+                                "Step 7/8 · 错误复核",
+                                f"达到总耗时上限({event.get('max_total_sec', 0)}s)，已提前结束并继续后续步骤。",
+                                82,
+                            )
                         elif stage == "done":
                             update_phase(
                                 "Step 7/8 · 错误复核",
