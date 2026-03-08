@@ -335,16 +335,17 @@ def verify_report_with_llm(
     raw_text: str,
     progress_callback: Optional[Callable[[str], None]] = None,
 ) -> str:
-    text_preview = raw_text[:6000]
+    preview_chars = getattr(cfg, "FINAL_REVIEW_PREVIEW_CHARS", 3000)
+    text_preview = raw_text[:preview_chars]
     msg = (
         "以下是监测报告自动检查结果和原始文本。请审核是否有遗漏或误判。"
         "注意正负号代表方向不代表大小。\n\n"
         f"## 检查报告\n{report_md}\n\n"
-        f"## 原始文本(前6000字)\n```\n{text_preview}\n```\n\n请给出审核意见。"
+        f"## 原始文本(前{preview_chars}字)\n```\n{text_preview}\n```\n\n请给出审核意见。"
     )
-    timeout_sec = getattr(cfg, "LLM_TIMEOUT_NORMAL", 90)
-    max_retries = getattr(cfg, "LLM_MAX_RETRIES", 1)
-    backoff_sec = getattr(cfg, "LLM_RETRY_BACKOFF_SEC", 10)
+    timeout_sec = getattr(cfg, "FINAL_REVIEW_TIMEOUT_SEC", getattr(cfg, "LLM_TIMEOUT_NORMAL", 90))
+    max_retries = getattr(cfg, "FINAL_REVIEW_MAX_RETRIES", 0)
+    backoff_sec = getattr(cfg, "FINAL_REVIEW_RETRY_BACKOFF_SEC", 2)
 
     for attempt in range(1 + max_retries):
         try:

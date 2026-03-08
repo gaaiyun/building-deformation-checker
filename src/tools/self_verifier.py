@@ -22,10 +22,10 @@ from src.tools.extraction_quality import infer_source_from_reason
 logger = logging.getLogger(__name__)
 
 DEFAULT_BATCH_SIZE = 5  # 默认每批验证的错误数量
-DEFAULT_CONTEXT_CHARS = 220
+DEFAULT_CONTEXT_CHARS = 120
 
 
-def _build_prompt(batch: list[CheckIssue], raw_text: str) -> str:
+def _build_prompt(batch: list[CheckIssue], raw_text: str, context_chars: int) -> str:
     """Build self-verification prompt for a batch of issues."""
     error_descriptions = []
     for j, err in enumerate(batch):
@@ -35,7 +35,7 @@ def _build_prompt(batch: list[CheckIssue], raw_text: str) -> str:
             f"字段={err.field_name}, 期望={err.expected_value}, "
             f"实际={err.actual_value}\n"
             f"描述: {err.message}\n"
-            f"原文片段: {context[:DEFAULT_CONTEXT_CHARS]}"
+            f"原文片段: {context[:context_chars]}"
         )
 
     return (
@@ -201,6 +201,11 @@ def verify_errors_with_llm(
     max_retries = getattr(cfg, "SELF_VERIFY_MAX_RETRIES", 0)
     backoff_sec = getattr(cfg, "SELF_VERIFY_RETRY_BACKOFF_SEC", 2)
     batch_size = max(1, int(getattr(cfg, "SELF_VERIFY_BATCH_SIZE", DEFAULT_BATCH_SIZE)))
+    single_shot_threshold = max(1, int(getattr(cfg, "SELF_VERIFY_SINGLE_SHOT_THRESHOLD", 6)))
+    context_chars = max(60, int(getattr(cfg, "SELF_VERIFY_CONTEXT_CHARS", DEFAULT_CONTEXT_CHARS)))
+
+    if len(to_verify) <= single_shot_threshold:
+        batch_size = len(to_verify)
 
     client = OpenAI(api_key=cfg.LLM_API_KEY, base_url=cfg.LLM_BASE_URL)
     dismissed = 0
@@ -226,7 +231,7 @@ def verify_errors_with_llm(
                 "batch_size": len(batch),
                 "total_errors": len(to_verify),
             })
-        prompt = _build_prompt(batch, report.raw_text)
+        prompt = _build_prompt(batch, report.raw_text, context_chars)
         verdicts, last_exc = _request_verdicts(
             client,
             cfg,
@@ -255,7 +260,7 @@ def verify_errors_with_llm(
                     single_verdicts, single_exc = _request_verdicts(
                         client,
                         cfg,
-                        _build_prompt([single_issue], report.raw_text),
+                        _build_prompt([single_issue], report.raw_text, context_chars),
                         timeout_sec=max(20, min(timeout_sec, 30)),
                         max_retries=0,
                         backoff_sec=1,

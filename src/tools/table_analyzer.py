@@ -435,9 +435,9 @@ def enrich_configs_with_llm(report: MonitoringReport) -> None:
         '{"table_idx":0,"unit":"mm","initial_reliable":true,"severity":"error"}'
     )
 
-    timeout_sec = getattr(cfg, "LLM_TIMEOUT_LARGE", 180)
-    max_retries = getattr(cfg, "LLM_MAX_RETRIES", 2)
-    backoff_sec = getattr(cfg, "LLM_RETRY_BACKOFF_SEC", 10)
+    timeout_sec = getattr(cfg, "CONFIG_ENRICH_TIMEOUT_SEC", getattr(cfg, "LLM_TIMEOUT_LARGE", 180))
+    max_retries = getattr(cfg, "CONFIG_ENRICH_MAX_RETRIES", 0)
+    backoff_sec = getattr(cfg, "CONFIG_ENRICH_RETRY_BACKOFF_SEC", 2)
 
     for attempt in range(1 + max_retries):
         try:
