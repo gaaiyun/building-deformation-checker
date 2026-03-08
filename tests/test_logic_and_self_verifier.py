@@ -150,6 +150,49 @@ class SelfVerifierTests(unittest.TestCase):
         self.assertEqual(FakeOpenAI.calls.count(1), 2)
         self.assertTrue(all(issue.severity == "warning" for issue in verified))
 
+    def test_self_verifier_parallel_mode_keeps_results_correct(self):
+        issues = [
+            CheckIssue(
+                severity="error",
+                table_name="支护结构顶部水平位移",
+                point_id=f"P{i}",
+                field_name="累计变化量",
+                expected_value="1.00",
+                actual_value="2.00",
+                message="累计变化量不符",
+            )
+            for i in range(8)
+        ]
+        report = MonitoringReport(raw_text="支护结构顶部水平位移 原文片段")
+
+        class FakeOpenAI:
+            def __init__(self, *args, **kwargs):
+                self.chat = types.SimpleNamespace(
+                    completions=types.SimpleNamespace(create=self._create)
+                )
+
+            def _create(self, model, messages, temperature, max_tokens, timeout):
+                prompt = messages[1]["content"]
+                batch_size = int(re.search(r"本批共 (\d+) 个错误", prompt).group(1))
+                verdicts = [{
+                    "error_idx": idx,
+                    "verdict": "downgrade" if idx % 2 == 0 else "confirm",
+                    "reason": "并发复核测试",
+                    "suspected_origin": "logic" if idx % 2 == 0 else "report",
+                } for idx in range(batch_size)]
+                return types.SimpleNamespace(
+                    choices=[types.SimpleNamespace(message=types.SimpleNamespace(content=json.dumps(verdicts, ensure_ascii=False)))]
+                )
+
+        with patch.dict(sys.modules, {"openai": types.SimpleNamespace(OpenAI=FakeOpenAI)}), \
+             patch("src.config.SELF_VERIFY_MAX_PARALLEL", 2):
+            verified = verify_errors_with_llm(report, issues)
+
+        warning_count = sum(1 for issue in verified if issue.severity == "warning")
+        error_count = sum(1 for issue in verified if issue.severity == "error")
+        self.assertGreaterEqual(warning_count, 3)
+        self.assertGreaterEqual(error_count, 3)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -10,6 +10,7 @@ Implements the two-LLM verification pattern for higher accuracy.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import logging
 import re
@@ -165,6 +166,75 @@ def _apply_verdicts(
     return dismissed, downgraded
 
 
+def _verify_batch_task(
+    raw_text: str,
+    batch: list[CheckIssue],
+    *,
+    timeout_sec: int,
+    max_retries: int,
+    backoff_sec: int,
+    context_chars: int,
+) -> dict:
+    """Verify one batch and fall back to single-item verification if needed."""
+    from openai import OpenAI
+    import src.config as cfg
+
+    client = OpenAI(api_key=cfg.LLM_API_KEY, base_url=cfg.LLM_BASE_URL)
+    prompt = _build_prompt(batch, raw_text, context_chars)
+    verdicts, last_exc = _request_verdicts(
+        client,
+        cfg,
+        prompt,
+        timeout_sec=timeout_sec,
+        max_retries=max_retries,
+        backoff_sec=backoff_sec,
+        max_tokens=2600 if len(batch) > 1 else 1400,
+        progress_callback=None,
+    )
+    if verdicts is not None:
+        return {
+            "split": False,
+            "segments": [(batch, verdicts)],
+            "error": None,
+            "all_failed": False,
+        }
+
+    if len(batch) <= 1:
+        return {
+            "split": False,
+            "segments": [],
+            "error": last_exc,
+            "all_failed": True,
+        }
+
+    logger.warning("自验证批次失败，拆分为单条重试")
+    segments: list[tuple[list[CheckIssue], list[dict]]] = []
+    single_client = OpenAI(api_key=cfg.LLM_API_KEY, base_url=cfg.LLM_BASE_URL)
+    final_exc = last_exc
+    for single_issue in batch:
+        single_verdicts, single_exc = _request_verdicts(
+            single_client,
+            cfg,
+            _build_prompt([single_issue], raw_text, context_chars),
+            timeout_sec=max(20, min(timeout_sec, 30)),
+            max_retries=0,
+            backoff_sec=1,
+            max_tokens=1200,
+            progress_callback=None,
+        )
+        if single_verdicts is None:
+            final_exc = single_exc or final_exc
+            continue
+        segments.append(([single_issue], single_verdicts))
+
+    return {
+        "split": True,
+        "segments": segments,
+        "error": final_exc,
+        "all_failed": not segments,
+    }
+
+
 def _find_table_text(raw_text: str, table_name: str) -> str:
     """Extract ~2000 chars of raw text around the table name mention."""
     clean_name = table_name.replace("(", "").replace(")", "").replace("（", "").replace("）", "")
@@ -203,14 +273,19 @@ def verify_errors_with_llm(
     batch_size = max(1, int(getattr(cfg, "SELF_VERIFY_BATCH_SIZE", DEFAULT_BATCH_SIZE)))
     single_shot_threshold = max(1, int(getattr(cfg, "SELF_VERIFY_SINGLE_SHOT_THRESHOLD", 6)))
     context_chars = max(60, int(getattr(cfg, "SELF_VERIFY_CONTEXT_CHARS", DEFAULT_CONTEXT_CHARS)))
+    max_parallel = max(1, int(getattr(cfg, "SELF_VERIFY_MAX_PARALLEL", 2)))
 
     if len(to_verify) <= single_shot_threshold:
         batch_size = len(to_verify)
 
-    client = OpenAI(api_key=cfg.LLM_API_KEY, base_url=cfg.LLM_BASE_URL)
     dismissed = 0
     downgraded = 0
     total_batches = (len(to_verify) + batch_size - 1) // batch_size
+    batches: list[tuple[int, int, list[CheckIssue]]] = []
+    for batch_start in range(0, len(to_verify), batch_size):
+        batch = to_verify[batch_start : batch_start + batch_size]
+        batch_index = batch_start // batch_size + 1
+        batches.append((batch_start, batch_index, batch))
 
     if progress_callback:
         progress_callback({
@@ -219,71 +294,126 @@ def verify_errors_with_llm(
             "total_batches": total_batches,
             "batch_size": batch_size,
         })
+    parallelism = min(max_parallel, total_batches)
 
-    for batch_start in range(0, len(to_verify), batch_size):
-        batch = to_verify[batch_start : batch_start + batch_size]
-        batch_index = batch_start // batch_size + 1
+    if parallelism <= 1:
+        for batch_start, batch_index, batch in batches:
+            if progress_callback:
+                progress_callback({
+                    "stage": "batch_start",
+                    "batch_index": batch_index,
+                    "total_batches": total_batches,
+                    "batch_size": len(batch),
+                    "total_errors": len(to_verify),
+                })
+            result = _verify_batch_task(
+                report.raw_text,
+                batch,
+                timeout_sec=timeout_sec,
+                max_retries=max_retries,
+                backoff_sec=backoff_sec,
+                context_chars=context_chars,
+            )
+            if result["split"] and progress_callback:
+                progress_callback({
+                    "stage": "batch_split",
+                    "batch_index": batch_index,
+                    "total_batches": total_batches,
+                    "batch_size": len(batch),
+                    "error": str(result["error"]) if result["error"] else "unknown",
+                })
+            if result["all_failed"]:
+                if progress_callback:
+                    progress_callback({
+                        "stage": "batch_failed",
+                        "batch_index": batch_index,
+                        "total_batches": total_batches,
+                        "error": str(result["error"]) if result["error"] else "unknown",
+                    })
+                continue
+            for segment_batch, segment_verdicts in result["segments"]:
+                dismissed_delta, downgraded_delta = _apply_verdicts(
+                    errors=errors,
+                    batch=segment_batch,
+                    verdicts=segment_verdicts,
+                    batch_start=batch_start,
+                )
+                dismissed += dismissed_delta
+                downgraded += downgraded_delta
+            if progress_callback:
+                progress_callback({
+                    "stage": "batch_finish",
+                    "batch_index": batch_index,
+                    "total_batches": total_batches,
+                    "dismissed": dismissed,
+                    "downgraded": downgraded,
+                })
+    else:
         if progress_callback:
             progress_callback({
-                "stage": "batch_start",
-                "batch_index": batch_index,
+                "stage": "parallel_start",
+                "parallelism": parallelism,
                 "total_batches": total_batches,
-                "batch_size": len(batch),
-                "total_errors": len(to_verify),
             })
-        prompt = _build_prompt(batch, report.raw_text, context_chars)
-        verdicts, last_exc = _request_verdicts(
-            client,
-            cfg,
-            prompt,
-            timeout_sec=timeout_sec,
-            max_retries=max_retries,
-            backoff_sec=backoff_sec,
-            max_tokens=2600 if len(batch) > 1 else 1400,
-            progress_callback=progress_callback,
-            batch_index=batch_index,
-            total_batches=total_batches,
-        )
-
-        if verdicts is None:
-            if len(batch) > 1:
-                logger.warning("自验证第 %d/%d 批失败，拆分为单条重试", batch_index, total_batches)
+        future_map = {}
+        with ThreadPoolExecutor(max_workers=parallelism, thread_name_prefix="self_verify") as executor:
+            for batch_start, batch_index, batch in batches:
                 if progress_callback:
+                    progress_callback({
+                        "stage": "batch_start",
+                        "batch_index": batch_index,
+                        "total_batches": total_batches,
+                        "batch_size": len(batch),
+                        "total_errors": len(to_verify),
+                    })
+                future = executor.submit(
+                    _verify_batch_task,
+                    report.raw_text,
+                    batch,
+                    timeout_sec=timeout_sec,
+                    max_retries=max_retries,
+                    backoff_sec=backoff_sec,
+                    context_chars=context_chars,
+                )
+                future_map[future] = (batch_start, batch_index, batch)
+
+            for future in as_completed(future_map):
+                batch_start, batch_index, batch = future_map[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    logger.warning("自验证第 %d/%d 批并发执行异常: %s", batch_index, total_batches, exc)
+                    if progress_callback:
+                        progress_callback({
+                            "stage": "batch_failed",
+                            "batch_index": batch_index,
+                            "total_batches": total_batches,
+                            "error": str(exc),
+                        })
+                    continue
+                if result["split"] and progress_callback:
                     progress_callback({
                         "stage": "batch_split",
                         "batch_index": batch_index,
                         "total_batches": total_batches,
                         "batch_size": len(batch),
-                        "error": str(last_exc) if last_exc else "unknown",
+                        "error": str(result["error"]) if result["error"] else "unknown",
                     })
-                for item_offset, single_issue in enumerate(batch, start=1):
-                    single_verdicts, single_exc = _request_verdicts(
-                        client,
-                        cfg,
-                        _build_prompt([single_issue], report.raw_text, context_chars),
-                        timeout_sec=max(20, min(timeout_sec, 30)),
-                        max_retries=0,
-                        backoff_sec=1,
-                        max_tokens=1200,
-                        progress_callback=progress_callback,
-                        batch_index=batch_index,
-                        total_batches=total_batches,
-                    )
-                    if single_verdicts is None:
-                        logger.warning(
-                            "自验证第 %d/%d 批拆单后第 %d/%d 条仍失败: %s",
-                            batch_index,
-                            total_batches,
-                            item_offset,
-                            len(batch),
-                            single_exc,
-                        )
-                        continue
+                if result["all_failed"]:
+                    if progress_callback:
+                        progress_callback({
+                            "stage": "batch_failed",
+                            "batch_index": batch_index,
+                            "total_batches": total_batches,
+                            "error": str(result["error"]) if result["error"] else "unknown",
+                        })
+                    continue
+                for segment_batch, segment_verdicts in result["segments"]:
                     dismissed_delta, downgraded_delta = _apply_verdicts(
                         errors=errors,
-                        batch=[single_issue],
-                        verdicts=single_verdicts,
-                        batch_start=batch_start + item_offset - 1,
+                        batch=segment_batch,
+                        verdicts=segment_verdicts,
+                        batch_start=batch_start,
                     )
                     dismissed += dismissed_delta
                     downgraded += downgraded_delta
@@ -295,34 +425,6 @@ def verify_errors_with_llm(
                         "dismissed": dismissed,
                         "downgraded": downgraded,
                     })
-                continue
-
-            if progress_callback:
-                progress_callback({
-                    "stage": "batch_failed",
-                    "batch_index": batch_index,
-                    "total_batches": total_batches,
-                    "error": str(last_exc) if last_exc else "unknown",
-                })
-            continue
-
-        dismissed_delta, downgraded_delta = _apply_verdicts(
-            errors=errors,
-            batch=batch,
-            verdicts=verdicts,
-            batch_start=batch_start,
-        )
-        dismissed += dismissed_delta
-        downgraded += downgraded_delta
-
-        if progress_callback:
-            progress_callback({
-                "stage": "batch_finish",
-                "batch_index": batch_index,
-                "total_batches": total_batches,
-                "dismissed": dismissed,
-                "downgraded": downgraded,
-            })
 
     logger.info(
         "自验证完成: %d个确认, %d个降级, %d个排除",
