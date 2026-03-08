@@ -58,6 +58,26 @@ def _infer_interval_days(table: MonitoringTable) -> Optional[float]:
     return Counter(intervals).most_common(1)[0][0]
 
 
+def _choose_interval_days(
+    table: MonitoringTable,
+    configured_interval: Optional[float],
+) -> Optional[float]:
+    """
+    Choose the best interval for rate validation.
+
+    Prefer row-inferred interval when it forms a consistent near-match to the
+    global report interval (typical 9d vs 10d discrepancy in fishzhu-like reports).
+    """
+    inferred_interval = _infer_interval_days(table)
+    if configured_interval is None:
+        return inferred_interval
+    if inferred_interval is None:
+        return configured_interval
+    if abs(inferred_interval - configured_interval) <= 2:
+        return inferred_interval
+    return configured_interval
+
+
 def check_cumulative_change(
     table: MonitoringTable,
     issues: list[CheckIssue],
@@ -69,7 +89,8 @@ def check_cumulative_change(
     cfg = table.verification_config
 
     if not cfg.initial_value_reliable:
-        pass
+        logger.info("表 [%s] 初始基准不可靠，跳过累计变化量验证", table.monitoring_item)
+        return
 
     for pt in table.points:
         if pt.initial_value is None or pt.current_value is None or pt.cumulative_change is None:
@@ -119,9 +140,9 @@ def check_change_rate(
     cfg = table.verification_config
 
     if interval_days is None:
-        interval_days = cfg.interval_days
-    if interval_days is None:
-        interval_days = _infer_interval_days(table)
+        interval_days = _choose_interval_days(table, cfg.interval_days)
+    else:
+        interval_days = _choose_interval_days(table, interval_days)
     if interval_days is None:
         logger.warning("表 [%s] 无法推断监测间隔天数，跳过速率验证", table.monitoring_item)
         issues.append(CheckIssue(
@@ -190,7 +211,10 @@ def check_deep_displacement_rate(
 
     if interval_days is None:
         interval_days = cfg.interval_days
-    if interval_days is None:
+    chosen_interval = None
+    if interval_days is not None:
+        chosen_interval = interval_days
+    if chosen_interval is None:
         rates_data: list[float] = []
         for dp in table.deep_points:
             diff = None
@@ -208,13 +232,34 @@ def check_deep_displacement_rate(
                     if 0.5 < abs(inferred) < 365:
                         rates_data.append(round(abs(inferred)))
         if rates_data:
-            interval_days = Counter(rates_data).most_common(1)[0][0]
+            chosen_interval = Counter(rates_data).most_common(1)[0][0]
+    else:
+        rates_data: list[float] = []
+        for dp in table.deep_points:
+            diff = None
+            if dp.current_change is not None:
+                diff = abs(dp.current_change)
+            elif dp.previous_cumulative is not None and dp.current_cumulative is not None:
+                diff = abs(dp.current_cumulative - dp.previous_cumulative)
+            if (
+                diff is not None
+                and dp.change_rate is not None
+                and abs(dp.change_rate) > 1e-6
+                and diff > 1e-6
+            ):
+                inferred = diff / dp.change_rate
+                if 0.5 < abs(inferred) < 365:
+                    rates_data.append(round(abs(inferred)))
+        if rates_data:
+            inferred_interval = Counter(rates_data).most_common(1)[0][0]
+            if abs(inferred_interval - chosen_interval) <= 2:
+                chosen_interval = inferred_interval
 
     table_label = table.monitoring_item
     if table.borehole_id:
         table_label += f"({table.borehole_id})"
 
-    if interval_days is None:
+    if chosen_interval is None:
         issues.append(CheckIssue(
             severity="info",
             table_name=table_label,
@@ -226,6 +271,7 @@ def check_deep_displacement_rate(
         ))
         return
 
+    interval_days = chosen_interval
     logger.info("深层位移表 [%s] 推断监测间隔 = %.0f 天", table_label, interval_days)
 
     for dp in table.deep_points:
