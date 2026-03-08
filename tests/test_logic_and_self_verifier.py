@@ -99,7 +99,7 @@ class SelfVerifierTests(unittest.TestCase):
         with patch.dict(sys.modules, {"openai": types.SimpleNamespace(OpenAI=FakeOpenAI)}):
             verified = verify_errors_with_llm(report, issues)
 
-        self.assertEqual(FakeOpenAI.calls, 7)
+        self.assertEqual(FakeOpenAI.calls, 5)
         self.assertEqual(verified[-1].severity, "warning")
         self.assertEqual(verified[0].suspected_source, "extraction")
 

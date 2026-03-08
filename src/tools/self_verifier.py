@@ -21,7 +21,7 @@ from src.tools.extraction_quality import infer_source_from_reason
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BATCH_SIZE = 3  # 默认每批验证的错误数量
+DEFAULT_BATCH_SIZE = 5  # 默认每批验证的错误数量
 DEFAULT_CONTEXT_CHARS = 220
 
 
@@ -197,9 +197,9 @@ def verify_errors_with_llm(
     from openai import OpenAI
     import src.config as cfg
 
-    timeout_sec = getattr(cfg, "LLM_TIMEOUT_NORMAL", 90)
-    max_retries = getattr(cfg, "LLM_MAX_RETRIES", 2)
-    backoff_sec = getattr(cfg, "LLM_RETRY_BACKOFF_SEC", 10)
+    timeout_sec = getattr(cfg, "SELF_VERIFY_TIMEOUT_SEC", getattr(cfg, "LLM_TIMEOUT_NORMAL", 90))
+    max_retries = getattr(cfg, "SELF_VERIFY_MAX_RETRIES", 0)
+    backoff_sec = getattr(cfg, "SELF_VERIFY_RETRY_BACKOFF_SEC", 2)
     batch_size = max(1, int(getattr(cfg, "SELF_VERIFY_BATCH_SIZE", DEFAULT_BATCH_SIZE)))
 
     client = OpenAI(api_key=cfg.LLM_API_KEY, base_url=cfg.LLM_BASE_URL)
@@ -256,9 +256,9 @@ def verify_errors_with_llm(
                         client,
                         cfg,
                         _build_prompt([single_issue], report.raw_text),
-                        timeout_sec=max(45, min(timeout_sec, 60)),
-                        max_retries=max_retries,
-                        backoff_sec=backoff_sec,
+                        timeout_sec=max(20, min(timeout_sec, 30)),
+                        max_retries=0,
+                        backoff_sec=1,
                         max_tokens=1200,
                         progress_callback=progress_callback,
                         batch_index=batch_index,
