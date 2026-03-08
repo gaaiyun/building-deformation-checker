@@ -99,9 +99,56 @@ class SelfVerifierTests(unittest.TestCase):
         with patch.dict(sys.modules, {"openai": types.SimpleNamespace(OpenAI=FakeOpenAI)}):
             verified = verify_errors_with_llm(report, issues)
 
-        self.assertEqual(FakeOpenAI.calls, 5)
+        self.assertEqual(FakeOpenAI.calls, 7)
         self.assertEqual(verified[-1].severity, "warning")
         self.assertEqual(verified[0].suspected_source, "extraction")
+
+    def test_self_verifier_falls_back_to_single_item_when_batch_times_out(self):
+        issues = [
+            CheckIssue(
+                severity="error",
+                table_name="支护结构顶部水平位移",
+                point_id=f"P{i}",
+                field_name="累计变化量",
+                expected_value="1.00",
+                actual_value="2.00",
+                message="累计变化量不符",
+            )
+            for i in range(2)
+        ]
+        report = MonitoringReport(raw_text="支护结构顶部水平位移 原文片段")
+
+        class FakeOpenAI:
+            calls = []
+
+            def __init__(self, *args, **kwargs):
+                self.chat = types.SimpleNamespace(
+                    completions=types.SimpleNamespace(create=self._create)
+                )
+
+            def _create(self, model, messages, temperature, max_tokens, timeout):
+                prompt = messages[1]["content"]
+                batch_size = int(re.search(r"本批共 (\d+) 个错误", prompt).group(1))
+                FakeOpenAI.calls.append(batch_size)
+                if batch_size > 1:
+                    raise TimeoutError("batch timeout")
+                verdicts = [{
+                    "error_idx": 0,
+                    "verdict": "downgrade",
+                    "reason": "拆单后确认更像提取误差",
+                    "suspected_origin": "extraction",
+                }]
+                return types.SimpleNamespace(
+                    choices=[types.SimpleNamespace(message=types.SimpleNamespace(content=json.dumps(verdicts, ensure_ascii=False)))]
+                )
+
+        with patch.dict(sys.modules, {"openai": types.SimpleNamespace(OpenAI=FakeOpenAI)}), \
+             patch("src.tools.self_verifier.time.sleep", return_value=None):
+            verified = verify_errors_with_llm(report, issues)
+
+        self.assertEqual(FakeOpenAI.calls[0], 2)
+        self.assertEqual(FakeOpenAI.calls.count(1), 2)
+        self.assertTrue(all(issue.severity == "warning" for issue in verified))
 
 
 if __name__ == "__main__":

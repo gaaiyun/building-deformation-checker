@@ -851,6 +851,11 @@ if uploaded is not None:
                                 "Step 7/8 · 错误复核",
                                 f"第 {batch_index}/{total_batches} 批重试中：{event.get('error', '')}",
                             )
+                        elif stage == "batch_split":
+                            update_phase(
+                                "Step 7/8 · 错误复核",
+                                f"第 {batch_index}/{total_batches} 批超时，已拆分为单条继续复核。",
+                            )
                         elif stage == "batch_finish":
                             progress = 72 + int(batch_index / total_batches * 10)
                             update_phase(

@@ -39,6 +39,7 @@ LLM_TIMEOUT_LARGE = int(os.getenv("LLM_TIMEOUT_LARGE", "180"))   # 大 prompt �
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "2"))         # 应用层重试次数
 LLM_RETRY_BACKOFF_SEC = int(os.getenv("LLM_RETRY_BACKOFF_SEC", "10"))  # 首次重试等待秒数
 LLM_STEP_DELAY_SEC = int(os.getenv("LLM_STEP_DELAY_SEC", "0"))   # 步骤间延迟（0=禁用）
+SELF_VERIFY_BATCH_SIZE = int(os.getenv("SELF_VERIFY_BATCH_SIZE", "3"))  # 自验证默认批次大小
 
 # ── 数值精度 ──────────────────────────────────────────────
 FLOAT_TOLERANCE = 0.15  # mm，允许的浮点误差
