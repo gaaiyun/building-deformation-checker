@@ -12,16 +12,15 @@ Architecture:
 from __future__ import annotations
 import json, logging, re, time
 from typing import Any, Callable, Optional
-from openai import OpenAI
 import src.config as cfg
 from src.models.data_models import (
     DeepDisplacementPoint, MeasurementPoint, MonitoringCategory,
     MonitoringReport, MonitoringTable, ReportSummaryItem,
     StatisticsSummary, ThresholdConfig,
 )
+from src.utils.llm_client import call_chat_completion
 
 logger = logging.getLogger(__name__)
-client = OpenAI(api_key=cfg.LLM_API_KEY, base_url=cfg.LLM_BASE_URL)
 
 SYSTEM_PROMPT = """\
 你是建筑变形监测报告数据提取专家。从监测报告文本中精确提取所有监测数据表格，转为标准化JSON。
@@ -284,41 +283,46 @@ def parse_report_with_llm(raw_text: str) -> MonitoringReport:
     chunks = _split_chunks(raw_text)
     logger.info("文本分为 %d 个片段发送给 LLM", len(chunks))
     all_tables, first = [], {}
+    success_count = 0
     for i, chunk in enumerate(chunks):
         logger.info("正在处理第 %d/%d 段 (%d字符)...", i + 1, len(chunks), len(chunk))
         msg = (
             f"以下是监测报告第{i + 1}/{len(chunks)}段，请提取所有监测数据表格。"
             f"无表格则tables返回空列表。\n\n```\n{chunk}\n```"
         )
-        try:
-            resp = client.chat.completions.create(
-                model=cfg.LLM_MODEL,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": msg},
-                ],
-                temperature=0.1,
-                max_tokens=32000,
-                timeout=300,
-            )
-        except Exception as e:
-            logger.error("第%d段LLM调用失败: %s", i + 1, e)
+        raw = call_chat_completion(
+            [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": msg},
+            ],
+            timeout=300,
+            max_tokens=32000,
+            max_retries=getattr(cfg, "LLM_MAX_RETRIES", 2),
+            temperature=0.1,
+        )
+        if raw is None:
+            logger.error("第%d段LLM调用失败: 所有重试均未成功", i + 1)
             continue
-        raw = resp.choices[0].message.content or ""
         try:
             parsed = _extract_json_from_response(raw)
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, ValueError) as e:
             logger.error("第%d段JSON解析失败: %s", i + 1, e)
             continue
-        if i == 0:
+        success_count += 1
+        if not first:
             first = parsed
         else:
-            for key in ("thresholds", "summary_items"):
+            for key in ("thresholds", "summary_items", "project_name", "monitoring_company", "report_number", "monitoring_period", "monitoring_date", "conclusion", "interval_days"):
                 existing = first.get(key, [])
                 new_items = parsed.get(key, [])
-                if new_items and not existing:
+                if key in ("thresholds", "summary_items"):
+                    if new_items and not existing:
+                        first[key] = new_items
+                elif new_items and not existing:
                     first[key] = new_items
         all_tables.extend(parsed.get("tables", []))
+    if success_count == 0 or not first:
+        raise RuntimeError("LLM 结构化解析失败：所有文本片段调用均未成功，请检查模型服务连接或稍后重试。")
     first["tables"] = all_tables
     report = _build_report(first)
     report.raw_text = raw_text
@@ -348,25 +352,24 @@ def verify_report_with_llm(
     backoff_sec = getattr(cfg, "FINAL_REVIEW_RETRY_BACKOFF_SEC", 2)
 
     for attempt in range(1 + max_retries):
-        try:
+        if progress_callback:
+            progress_callback(f"提交最终审核请求（第 {attempt + 1}/{max_retries + 1} 次）")
+        result = call_chat_completion(
+            [
+                {"role": "system", "content": "你是建筑工程监测领域资深专家。正负号代表方向不代表大小。"},
+                {"role": "user", "content": msg},
+            ],
+            timeout=timeout_sec,
+            max_tokens=4000,
+            max_retries=0,
+            temperature=0.3,
+        )
+        if result is not None:
+            return result
+        logger.error("AI审核调用失败: 第 %d 次请求未成功", attempt + 1)
+        if attempt < max_retries:
             if progress_callback:
-                progress_callback(f"提交最终审核请求（第 {attempt + 1}/{max_retries + 1} 次）")
-            resp = client.chat.completions.create(
-                model=cfg.LLM_MODEL,
-                messages=[
-                    {"role": "system", "content": "你是建筑工程监测领域资深专家。正负号代表方向不代表大小。"},
-                    {"role": "user", "content": msg},
-                ],
-                temperature=0.3,
-                max_tokens=4000,
-                timeout=timeout_sec,
-            )
-            return resp.choices[0].message.content or ""
-        except Exception as e:
-            logger.error("AI审核调用失败: %s", e)
-            if attempt < max_retries:
-                if progress_callback:
-                    progress_callback(f"最终审核失败，准备重试：{e}")
-                time.sleep(backoff_sec * (2 ** attempt))
-            else:
-                return f"AI审核调用失败: {e}"
+                progress_callback("最终审核失败，准备重试。")
+            time.sleep(backoff_sec * (2 ** attempt))
+
+    return "AI审核调用失败: 最终审核请求未成功返回结果。"
