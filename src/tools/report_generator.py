@@ -24,6 +24,7 @@ def generate_report_md(
     logic_issues: list[CheckIssue],
     ai_review: str = "",
     analysis_plan: list[dict] | None = None,
+    process_notes: list[str] | None = None,
 ) -> str:
     """生成 Markdown 格式的检查报告"""
     all_issues = calc_issues + stats_issues + logic_issues
@@ -68,6 +69,12 @@ def generate_report_md(
         if source_parts:
             lines.append("> " + "；".join(source_parts) + "，建议结合原文人工复核。\n")
     lines.append("")
+
+    if process_notes:
+        lines.append("## 流程说明\n")
+        for note in process_notes:
+            lines.append(f"- {note}")
+        lines.append("")
 
     # ── 数据提取摘要 ──────────────────────────────────
     lines.append("## 数据提取摘要\n")

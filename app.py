@@ -822,6 +822,7 @@ if uploaded is not None:
 
             # ━━ Step 7: AI 自验证 ━━━━━━━━━━━━━━━━━━━━
             all_issues = calc_issues + stats_issues + logic_issues
+            process_notes: list[str] = []
             if do_self_verify:
                 errors_to_verify = [i for i in all_issues if i.severity == "error"]
                 if errors_to_verify:
@@ -876,19 +877,31 @@ if uploaded is not None:
                             )
 
                     from src.tools.self_verifier import verify_errors_with_llm
-                    all_issues = _call_with_optional_progress_callback(
-                        verify_errors_with_llm,
-                        report,
-                        all_issues,
-                        progress_callback=_on_self_verify_progress,
-                    )
-
-                    with status_container:
-                        st.write("完成：错误复核结束")
+                    try:
+                        all_issues = _call_with_optional_progress_callback(
+                            verify_errors_with_llm,
+                            report,
+                            all_issues,
+                            progress_callback=_on_self_verify_progress,
+                        )
+                        with status_container:
+                            st.write("完成：错误复核结束")
+                    except Exception as exc:
+                        logger.exception("Step 7 自验证失败，已跳过并继续生成结果")
+                        process_notes.append(f"错误复核未完成，已跳过。原因: {exc}")
+                        update_phase(
+                            "Step 7/8 · 错误复核",
+                            f"失败已跳过：{exc}",
+                            82,
+                        )
+                        with status_container:
+                            st.warning(f"错误复核失败，已跳过并继续生成报告：{exc}")
                 else:
                     update_phase("Step 7/8 · 错误复核", "没有 error 级问题，跳过复核。", 82)
+                    process_notes.append("错误复核未执行：没有 error 级问题。")
             else:
                 update_phase("Step 7/8 · 错误复核", "已关闭该步骤。", 82)
+                process_notes.append("错误复核未执行：用户关闭了该步骤。")
 
             # ━━ Step 8: AI 最终审核 ━━━━━━━━━━━━━━━━━━
             ai_review = ""
@@ -899,24 +912,50 @@ if uploaded is not None:
 
                 from src.tools.report_generator import generate_report_md
                 from src.tools.llm_parser import verify_report_with_llm
-                prelim = generate_report_md(report, calc_issues, stats_issues, logic_issues, analysis_plan=analysis_plan)
-                ai_review = _call_with_optional_progress_callback(
-                    verify_report_with_llm,
-                    prelim,
-                    raw_text,
-                    progress_callback=lambda msg: update_phase("Step 8/8 · 最终审核", msg, 88),
+                prelim = generate_report_md(
+                    report,
+                    calc_issues,
+                    stats_issues,
+                    logic_issues,
+                    analysis_plan=analysis_plan,
+                    process_notes=process_notes,
                 )
-
-                update_phase("Step 8/8 · 最终审核", "完成：最终审核结果已返回。", 92)
-                with status_container:
-                    st.write("完成：最终审核结束")
+                try:
+                    ai_review = _call_with_optional_progress_callback(
+                        verify_report_with_llm,
+                        prelim,
+                        raw_text,
+                        progress_callback=lambda msg: update_phase("Step 8/8 · 最终审核", msg, 88),
+                    )
+                    update_phase("Step 8/8 · 最终审核", "完成：最终审核结果已返回。", 92)
+                    with status_container:
+                        st.write("完成：最终审核结束")
+                except Exception as exc:
+                    logger.exception("Step 8 最终审核失败，已跳过并继续生成结果")
+                    process_notes.append(f"最终审核未完成，已跳过。原因: {exc}")
+                    update_phase(
+                        "Step 8/8 · 最终审核",
+                        f"失败已跳过：{exc}",
+                        92,
+                    )
+                    with status_container:
+                        st.warning(f"最终审核失败，已跳过并继续生成报告：{exc}")
             else:
                 update_phase("Step 8/8 · 最终审核", "已关闭该步骤，直接生成报告。", 92)
+                process_notes.append("最终审核未执行：用户关闭了该步骤。")
 
             # ━━ 生成报告 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             update_phase("Step 8/8 · 生成报告", "整理最终报告与导出文件。", 94)
             from src.tools.report_generator import generate_report_md, save_report
-            final_md = generate_report_md(report, calc_issues, stats_issues, logic_issues, ai_review, analysis_plan)
+            final_md = generate_report_md(
+                report,
+                calc_issues,
+                stats_issues,
+                logic_issues,
+                ai_review,
+                analysis_plan,
+                process_notes=process_notes,
+            )
             output_path = f"output/{pdf_name}_检查报告.md"
             save_report(final_md, output_path)
 

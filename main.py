@@ -178,6 +178,7 @@ def main():
 
     # ── Step 6: 自验证 ────────────────────────────────────
     all_issues = calc_issues + stats_issues + logic_issues
+    process_notes: list[str] = []
     if not args.no_self_verify:
         errors = [i for i in all_issues if i.severity == "error"]
         if errors:
@@ -192,10 +193,18 @@ def main():
 
             from src.tools.self_verifier import verify_errors_with_llm
 
-            all_issues = verify_errors_with_llm(report, all_issues)
-            calc_issues = [i for i in all_issues if i in calc_issues]
-            stats_issues = [i for i in all_issues if i in stats_issues]
-            logic_issues = [i for i in all_issues if i in logic_issues]
+            try:
+                all_issues = verify_errors_with_llm(report, all_issues)
+                calc_issues = [i for i in all_issues if i in calc_issues]
+                stats_issues = [i for i in all_issues if i in stats_issues]
+                logic_issues = [i for i in all_issues if i in logic_issues]
+            except Exception as exc:
+                logger.exception("Step 6 自验证失败，已跳过并继续生成结果")
+                process_notes.append(f"错误复核未完成，已跳过。原因: {exc}")
+        else:
+            process_notes.append("错误复核未执行：没有 error 级问题。")
+    else:
+        process_notes.append("错误复核未执行：用户关闭了该步骤。")
 
     # ── Step 7: AI 最终审核（可选）──────────────────────────
     ai_review = ""
@@ -207,9 +216,22 @@ def main():
         from src.tools.report_generator import generate_report_md
         from src.tools.llm_parser import verify_report_with_llm
 
-        preliminary_md = generate_report_md(report, calc_issues, stats_issues, logic_issues, analysis_plan=analysis_plan)
-        ai_review = verify_report_with_llm(preliminary_md, raw_text)
-        logger.info("AI 审核完成")
+        preliminary_md = generate_report_md(
+            report,
+            calc_issues,
+            stats_issues,
+            logic_issues,
+            analysis_plan=analysis_plan,
+            process_notes=process_notes,
+        )
+        try:
+            ai_review = verify_report_with_llm(preliminary_md, raw_text)
+            logger.info("AI 审核完成")
+        except Exception as exc:
+            logger.exception("Step 7 最终审核失败，已跳过并继续生成结果")
+            process_notes.append(f"最终审核未完成，已跳过。原因: {exc}")
+    else:
+        process_notes.append("最终审核未执行：用户关闭了该步骤。")
 
     # ── Step 8: 生成检查报告 ──────────────────────────────
     logger.info("=" * 60)
@@ -218,7 +240,15 @@ def main():
 
     from src.tools.report_generator import generate_report_md, save_report
 
-    final_md = generate_report_md(report, calc_issues, stats_issues, logic_issues, ai_review, analysis_plan)
+    final_md = generate_report_md(
+        report,
+        calc_issues,
+        stats_issues,
+        logic_issues,
+        ai_review,
+        analysis_plan,
+        process_notes=process_notes,
+    )
     save_report(final_md, output_path)
 
     # ── 汇总输出 ──────────────────────────────────────────
