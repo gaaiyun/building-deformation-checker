@@ -6,7 +6,7 @@ from collections import Counter
 from statistics import median
 from typing import Optional
 
-from src.models.data_models import CheckIssue, MonitoringReport, MonitoringTable
+from src.models.data_models import CheckIssue, MonitoringCategory, MonitoringReport, MonitoringTable
 
 SOURCE_HINTS = {
     "extraction": "（可能为 PDF 提取或列匹配问题，建议核对原文）",
@@ -90,10 +90,16 @@ def analyze_extraction_quality(report: MonitoringReport) -> MonitoringReport:
                 "current_change": [pt.current_change for pt in table.points],
                 "change_rate": [pt.change_rate for pt in table.points],
             }
-            sparse_fields = [
-                field for field, values in field_values.items()
-                if values and _non_null_ratio(values) < 0.5
-            ]
+
+            required_fields = {"initial_value", "current_value", "cumulative_change"}
+            if table.category not in {MonitoringCategory.ANCHOR_FORCE, MonitoringCategory.STRUT_FORCE}:
+                required_fields.add("change_rate")
+
+            sparse_fields = []
+            for field in required_fields:
+                values = field_values.get(field, [])
+                if values and _non_null_ratio(values) < 0.5:
+                    sparse_fields.append(field)
             if sparse_fields:
                 flags.append(f"关键列空值较多: {', '.join(sparse_fields)}")
 
@@ -118,10 +124,18 @@ def analyze_extraction_quality(report: MonitoringReport) -> MonitoringReport:
                 "current_change": [dp.current_change for dp in table.deep_points],
                 "change_rate": [dp.change_rate for dp in table.deep_points],
             }
-            sparse_fields = [
-                field for field, values in field_values.items()
-                if values and _non_null_ratio(values) < 0.5
-            ]
+            sparse_fields = []
+            for field in ("previous_cumulative", "current_cumulative"):
+                values = field_values[field]
+                if values and _non_null_ratio(values) < 0.5:
+                    sparse_fields.append(field)
+
+            change_ratio = _non_null_ratio(field_values["current_change"])
+            rate_ratio = _non_null_ratio(field_values["change_rate"])
+            # 深层位移表可能只有 previous_cumulative + current_cumulative + change_rate
+            # 没有 current_change 列是正常的，只有两者都缺才标记
+            if change_ratio < 0.5 and rate_ratio < 0.5:
+                sparse_fields.append("current_change 和 change_rate 均缺失")
             if sparse_fields:
                 flags.append(f"深层表关键列空值较多: {', '.join(sparse_fields)}")
 
@@ -145,4 +159,3 @@ def analyze_extraction_quality(report: MonitoringReport) -> MonitoringReport:
     report.table_extraction_flags = flags_by_table
     report.extraction_diagnostics = diagnostics
     return report
-

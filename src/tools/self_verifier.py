@@ -179,7 +179,7 @@ def _verify_batch_task(
     from openai import OpenAI
     import src.config as cfg
 
-    client = OpenAI(api_key=cfg.LLM_API_KEY, base_url=cfg.LLM_BASE_URL)
+    client = OpenAI(api_key=cfg.LLM_API_KEY, base_url=cfg.LLM_BASE_URL, max_retries=0)
     prompt = _build_prompt(batch, raw_text, context_chars)
     verdicts, last_exc = _request_verdicts(
         client,
@@ -209,7 +209,7 @@ def _verify_batch_task(
 
     logger.warning("自验证批次失败，拆分为单条重试")
     segments: list[tuple[list[CheckIssue], list[dict]]] = []
-    single_client = OpenAI(api_key=cfg.LLM_API_KEY, base_url=cfg.LLM_BASE_URL)
+    single_client = OpenAI(api_key=cfg.LLM_API_KEY, base_url=cfg.LLM_BASE_URL, max_retries=0)
     final_exc = last_exc
     for single_issue in batch:
         single_verdicts, single_exc = _request_verdicts(
@@ -264,7 +264,6 @@ def verify_errors_with_llm(
     if not to_verify:
         return errors
 
-    from openai import OpenAI
     import src.config as cfg
 
     timeout_sec = getattr(cfg, "SELF_VERIFY_TIMEOUT_SEC", getattr(cfg, "LLM_TIMEOUT_NORMAL", 90))

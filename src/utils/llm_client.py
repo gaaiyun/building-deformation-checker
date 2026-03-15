@@ -44,7 +44,8 @@ def call_chat_completion(
     retries = max_retries if max_retries is not None else getattr(cfg, "LLM_MAX_RETRIES", 2)
     backoff_sec = getattr(cfg, "LLM_RETRY_BACKOFF_SEC", 10)
 
-    client = OpenAI(api_key=cfg.LLM_API_KEY, base_url=cfg.LLM_BASE_URL)
+    # 统一关闭 SDK 隐式重试，避免与本模块显式重试叠加导致长时间阻塞。
+    client = OpenAI(api_key=cfg.LLM_API_KEY, base_url=cfg.LLM_BASE_URL, max_retries=0)
 
     last_exc = None
     for attempt in range(1 + retries):

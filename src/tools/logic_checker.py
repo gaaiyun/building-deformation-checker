@@ -84,7 +84,7 @@ def _build_semantic_maps(report: MonitoringReport) -> None:
     timeout_sec = getattr(cfg, "LLM_TIMEOUT_NORMAL", 90)
     max_retries = getattr(cfg, "LLM_MAX_RETRIES", 2)
     backoff_sec = getattr(cfg, "LLM_RETRY_BACKOFF_SEC", 10)
-    client = OpenAI(api_key=cfg.LLM_API_KEY, base_url=cfg.LLM_BASE_URL)
+    client = OpenAI(api_key=cfg.LLM_API_KEY, base_url=cfg.LLM_BASE_URL, max_retries=0)
 
     for attempt in range(1 + max_retries):
         try:
@@ -293,14 +293,36 @@ def check_summary_consistency(report: MonitoringReport, issues: list[CheckIssue]
 
         if summary_pos is not None:
             if not pos_vals:
-                issues.append(CheckIssue(
-                    severity="error", table_name="简报汇总",
-                    point_id=si.monitoring_item, field_name="正方向最大",
-                    expected_value="-",
-                    actual_value=f"{si.positive_max_id}={si.positive_max}",
-                    message="分表中不存在正值，汇总表正方向最大应为空",
-                    suspected_source="report",
-                ))
+                # 行业惯例：所有值同为负时，"正方向最大"可能填绝对值最小的负值
+                if neg_vals:
+                    closest_id, closest_val = max(neg_vals, key=lambda x: x[1])
+                    if abs(closest_val - summary_pos) <= tol:
+                        issues.append(CheckIssue(
+                            severity="info", table_name="简报汇总",
+                            point_id=si.monitoring_item, field_name="正方向最大",
+                            expected_value="无正值",
+                            actual_value=f"{si.positive_max_id}={si.positive_max}",
+                            message=f"分表中不存在正值，汇总表正方向最大填写了绝对值最小的负值（行业惯例）",
+                            suspected_source="report",
+                        ))
+                    else:
+                        issues.append(CheckIssue(
+                            severity="warning", table_name="简报汇总",
+                            point_id=si.monitoring_item, field_name="正方向最大",
+                            expected_value=f"无正值，最接近0: {closest_id}={_fmt(closest_val)}",
+                            actual_value=f"{si.positive_max_id}={si.positive_max}",
+                            message="分表中不存在正值，汇总表正方向最大与最接近0的负值不一致",
+                            suspected_source="report",
+                        ))
+                else:
+                    issues.append(CheckIssue(
+                        severity="warning", table_name="简报汇总",
+                        point_id=si.monitoring_item, field_name="正方向最大",
+                        expected_value="-",
+                        actual_value=f"{si.positive_max_id}={si.positive_max}",
+                        message="分表中无数据，汇总表正方向最大应为空",
+                        suspected_source="report",
+                    ))
             else:
                 actual_pos_id, actual_pos = max(pos_vals, key=lambda x: x[1])
                 if abs(actual_pos - summary_pos) > tol:
@@ -315,14 +337,36 @@ def check_summary_consistency(report: MonitoringReport, issues: list[CheckIssue]
 
         if summary_neg is not None:
             if not neg_vals:
-                issues.append(CheckIssue(
-                    severity="error", table_name="简报汇总",
-                    point_id=si.monitoring_item, field_name="负方向最大",
-                    expected_value="-",
-                    actual_value=f"{si.negative_max_id}={si.negative_max}",
-                    message="分表中不存在负值，汇总表负方向最大应为空",
-                    suspected_source="report",
-                ))
+                # 行业惯例：所有值同为正时，"负方向最大"可能填最小正值
+                if pos_vals:
+                    closest_id, closest_val = min(pos_vals, key=lambda x: x[1])
+                    if abs(closest_val - summary_neg) <= tol:
+                        issues.append(CheckIssue(
+                            severity="info", table_name="简报汇总",
+                            point_id=si.monitoring_item, field_name="负方向最大",
+                            expected_value="无负值",
+                            actual_value=f"{si.negative_max_id}={si.negative_max}",
+                            message=f"分表中不存在负值，汇总表负方向最大填写了最小正值（行业惯例）",
+                            suspected_source="report",
+                        ))
+                    else:
+                        issues.append(CheckIssue(
+                            severity="warning", table_name="简报汇总",
+                            point_id=si.monitoring_item, field_name="负方向最大",
+                            expected_value=f"无负值，最小正值: {closest_id}={_fmt(closest_val)}",
+                            actual_value=f"{si.negative_max_id}={si.negative_max}",
+                            message="分表中不存在负值，汇总表负方向最大与最小正值不一致",
+                            suspected_source="report",
+                        ))
+                else:
+                    issues.append(CheckIssue(
+                        severity="warning", table_name="简报汇总",
+                        point_id=si.monitoring_item, field_name="负方向最大",
+                        expected_value="-",
+                        actual_value=f"{si.negative_max_id}={si.negative_max}",
+                        message="分表中无数据，汇总表负方向最大应为空",
+                        suspected_source="report",
+                    ))
             else:
                 actual_neg_id, actual_neg = min(neg_vals, key=lambda x: x[1])
                 if abs(actual_neg - summary_neg) > tol:

@@ -409,7 +409,8 @@ def enrich_configs_with_llm(report: MonitoringReport) -> None:
     from openai import OpenAI
     import src.config as cfg
 
-    client = OpenAI(api_key=cfg.LLM_API_KEY, base_url=cfg.LLM_BASE_URL)
+    # 关闭 SDK 隐式重试，避免配置增强步骤在网络抖动时长时间卡住主流程。
+    client = OpenAI(api_key=cfg.LLM_API_KEY, base_url=cfg.LLM_BASE_URL, max_retries=0)
 
     table_summaries = []
     for idx in tables_needing_review:

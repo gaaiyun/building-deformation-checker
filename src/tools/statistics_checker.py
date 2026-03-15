@@ -219,17 +219,45 @@ def check_table_statistics(
                 )
             if not cross_ref:
                 if not pos_vals:
-                    issues.append(CheckIssue(
-                        severity="error", table_name=table_label,
-                        point_id=stats.positive_max_id or "N/A",
-                        field_name="正方向最大统计",
-                        expected_value="无正值，应为'-'",
-                        actual_value=f"{stats.positive_max_id}={_fmt(stats.positive_max_value, 2)}",
-                        message=(
-                            f"所有累计变化量均为非正值，正方向最大统计应为'-'，"
-                            f"但报告显示 {stats.positive_max_id}={_fmt(stats.positive_max_value, 2)}"
-                        ),
-                    ))
+                    # 行业惯例：所有值同为负时，"正方向最大"可能填绝对值最小的负值（最接近0）
+                    if neg_vals:
+                        closest_id, closest_val = max(neg_vals, key=lambda x: x[1])
+                        if _close(closest_val, stats.positive_max_value, tol):
+                            issues.append(CheckIssue(
+                                severity="info", table_name=table_label,
+                                point_id=stats.positive_max_id or "N/A",
+                                field_name="正方向最大统计",
+                                expected_value="无正值",
+                                actual_value=f"{stats.positive_max_id}={_fmt(stats.positive_max_value, 2)}",
+                                message=(
+                                    f"所有累计变化量均为负值，报告正方向最大填写了绝对值最小的负值 "
+                                    f"{stats.positive_max_id}={_fmt(stats.positive_max_value, 2)}（行业惯例）"
+                                ),
+                            ))
+                        else:
+                            issues.append(CheckIssue(
+                                severity="warning", table_name=table_label,
+                                point_id=stats.positive_max_id or "N/A",
+                                field_name="正方向最大统计",
+                                expected_value=f"无正值，最接近0: {closest_id}={_fmt(closest_val, 2)}",
+                                actual_value=f"{stats.positive_max_id}={_fmt(stats.positive_max_value, 2)}",
+                                message=(
+                                    f"所有累计变化量均为负值，正方向最大统计应为'-'或绝对值最小的负值，"
+                                    f"但报告显示 {stats.positive_max_id}={_fmt(stats.positive_max_value, 2)}"
+                                ),
+                            ))
+                    else:
+                        issues.append(CheckIssue(
+                            severity="warning", table_name=table_label,
+                            point_id=stats.positive_max_id or "N/A",
+                            field_name="正方向最大统计",
+                            expected_value="无数据",
+                            actual_value=f"{stats.positive_max_id}={_fmt(stats.positive_max_value, 2)}",
+                            message=(
+                                f"无累计变化量数据，正方向最大统计应为'-'，"
+                                f"但报告显示 {stats.positive_max_id}={_fmt(stats.positive_max_value, 2)}"
+                            ),
+                        ))
                 else:
                     actual_pos_id, actual_pos_val = max(pos_vals, key=lambda x: x[1])
                     if not _close(actual_pos_val, stats.positive_max_value, tol):
@@ -251,17 +279,45 @@ def check_table_statistics(
                 )
             if not cross_ref:
                 if not neg_vals:
-                    issues.append(CheckIssue(
-                        severity="error", table_name=table_label,
-                        point_id=stats.negative_max_id or "N/A",
-                        field_name="负方向最大统计",
-                        expected_value="无负值，应为'-'",
-                        actual_value=f"{stats.negative_max_id}={_fmt(stats.negative_max_value, 2)}",
-                        message=(
-                            f"所有累计变化量均为非负值，负方向最大统计应为'-'，"
-                            f"但报告显示 {stats.negative_max_id}={_fmt(stats.negative_max_value, 2)}"
-                        ),
-                    ))
+                    # 行业惯例：所有值同为正时，"负方向最大"可能填最小正值（最接近0）
+                    if pos_vals:
+                        closest_id, closest_val = min(pos_vals, key=lambda x: x[1])
+                        if _close(closest_val, stats.negative_max_value, tol):
+                            issues.append(CheckIssue(
+                                severity="info", table_name=table_label,
+                                point_id=stats.negative_max_id or "N/A",
+                                field_name="负方向最大统计",
+                                expected_value="无负值",
+                                actual_value=f"{stats.negative_max_id}={_fmt(stats.negative_max_value, 2)}",
+                                message=(
+                                    f"所有累计变化量均为正值，报告负方向最大填写了最小正值 "
+                                    f"{stats.negative_max_id}={_fmt(stats.negative_max_value, 2)}（行业惯例）"
+                                ),
+                            ))
+                        else:
+                            issues.append(CheckIssue(
+                                severity="warning", table_name=table_label,
+                                point_id=stats.negative_max_id or "N/A",
+                                field_name="负方向最大统计",
+                                expected_value=f"无负值，最小正值: {closest_id}={_fmt(closest_val, 2)}",
+                                actual_value=f"{stats.negative_max_id}={_fmt(stats.negative_max_value, 2)}",
+                                message=(
+                                    f"所有累计变化量均为正值，负方向最大统计应为'-'或最小正值，"
+                                    f"但报告显示 {stats.negative_max_id}={_fmt(stats.negative_max_value, 2)}"
+                                ),
+                            ))
+                    else:
+                        issues.append(CheckIssue(
+                            severity="warning", table_name=table_label,
+                            point_id=stats.negative_max_id or "N/A",
+                            field_name="负方向最大统计",
+                            expected_value="无数据",
+                            actual_value=f"{stats.negative_max_id}={_fmt(stats.negative_max_value, 2)}",
+                            message=(
+                                f"无累计变化量数据，负方向最大统计应为'-'，"
+                                f"但报告显示 {stats.negative_max_id}={_fmt(stats.negative_max_value, 2)}"
+                            ),
+                        ))
                 else:
                     actual_neg_id, actual_neg_val = min(neg_vals, key=lambda x: x[1])
                     if not _close(actual_neg_val, stats.negative_max_value, tol):

@@ -43,6 +43,9 @@ SYSTEM_PROMPT = """\
 - 只有当表头明确出现“变化速率 / mm/d”等速率列时，才填写 change_rate
 - 如果统计块写的是“最大变化位移”，填入 statistics.max_change_id / max_change_value
 - 不要把“本期变化”误填到 change_rate，也不要把“最大变化位移”误填到 max_rate_value
+- **极其重要**：如果深层位移表没有明确的“数据统计”区域，statistics所有字段设null/空，不要把最后一行数据当成统计
+- 深层位移表的statistics中，positive_max_id/negative_max_id应该是深度值（如“3.5”），不要填成整数行号
+- 如果深层位移表只有3列（上次累计/本次累计/变化速率），current_change设null
 
 ## 关于正负号(极其重要)
 - 正负号代表**方向**不代表大小！
@@ -341,10 +344,15 @@ def verify_report_with_llm(
 ) -> str:
     preview_chars = getattr(cfg, "FINAL_REVIEW_PREVIEW_CHARS", 3000)
     text_preview = raw_text[:preview_chars]
+    # 截断 report_md 防止 token 溢出
+    max_report_chars = getattr(cfg, "FINAL_REVIEW_MAX_REPORT_CHARS", 8000)
+    report_preview = report_md[:max_report_chars]
+    if len(report_md) > max_report_chars:
+        report_preview += f"\n\n... (报告共 {len(report_md)} 字符，已截取前 {max_report_chars} 字符)"
     msg = (
         "以下是监测报告自动检查结果和原始文本。请审核是否有遗漏或误判。"
         "注意正负号代表方向不代表大小。\n\n"
-        f"## 检查报告\n{report_md}\n\n"
+        f"## 检查报告\n{report_preview}\n\n"
         f"## 原始文本(前{preview_chars}字)\n```\n{text_preview}\n```\n\n请给出审核意见。"
     )
     timeout_sec = getattr(cfg, "FINAL_REVIEW_TIMEOUT_SEC", getattr(cfg, "LLM_TIMEOUT_NORMAL", 90))

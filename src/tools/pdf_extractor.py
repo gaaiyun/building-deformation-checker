@@ -428,7 +428,13 @@ def _call_paddle_ocr(pdf_path: str, profile: dict) -> dict:
     logger.info("正在调用 PaddleOCR API 解析 %s ...", pdf_path)
     response = requests.post(PADDLE_OCR_URL, json=payload, headers=headers, timeout=300)
     response.raise_for_status()
-    return response.json()["result"]
+    body = response.json()
+    if "result" not in body:
+        raise ValueError(f"PaddleOCR API 返回格式异常，缺少 'result' 字段: {list(body.keys())}")
+    result = body["result"]
+    if "layoutParsingResults" not in result:
+        raise ValueError(f"PaddleOCR API 返回格式异常，缺少 'layoutParsingResults': {list(result.keys())}")
+    return result
 
 
 def _extract_with_paddle_profile(
@@ -564,8 +570,14 @@ def extract_pdf(
 
         logger.warning("PaddleOCR 不可用或质量不足，回退 pdfplumber")
         text = extract_text_with_pdfplumber(pdf_path)
+        page_count = text.count("--- 第 ")
+        # 按页拆分，保持与 OCR 路径一致
+        page_list = re.split(r"(?=--- 第 \d+ 页)", text)
+        page_list = [p.strip() for p in page_list if p.strip()]
+        if not page_list:
+            page_list = [text]
         diagnostics = {
-            "page_count": text.count("--- 第 "),
+            "page_count": page_count or len(page_list),
             "raw_chars": len(text),
             "clean_chars": len(text),
             "plain_chars": len(text),
@@ -578,7 +590,7 @@ def extract_pdf(
         }
         result = PDFExtractionResult(
             text=text,
-            pages=[text],
+            pages=page_list,
             method="pdfplumber",
             selected_profile="pdfplumber",
             diagnostics=diagnostics,
@@ -621,7 +633,7 @@ def extract_pdf(
 
     result = PDFExtractionResult(
         text=text,
-        pages=[text],
+        pages=re.split(r"(?=--- 第 \d+ 页)", text) if "--- 第 " in text else [text],
         method="pdfplumber",
         selected_profile="pdfplumber",
         diagnostics={
