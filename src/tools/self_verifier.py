@@ -216,7 +216,7 @@ def _verify_batch_task(
             single_client,
             cfg,
             _build_prompt([single_issue], raw_text, context_chars),
-            timeout_sec=max(20, min(timeout_sec, 30)),
+            timeout_sec=max(30, timeout_sec),
             max_retries=0,
             backoff_sec=1,
             max_tokens=1200,
