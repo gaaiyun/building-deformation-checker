@@ -3,10 +3,7 @@
 import os
 
 # ── LLM 配置 ──────────────────────────────────────────────
-LLM_API_KEY = os.getenv(
-    "LLM_API_KEY",
-    "sk-sp-0b28da8e3f404df182c05d3fd45787a5",
-)
+LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 LLM_BASE_URL = os.getenv(
     "LLM_BASE_URL",
     "https://coding.dashscope.aliyuncs.com/v1",
@@ -31,7 +28,7 @@ def set_model(model_name: str):
 
 # ── PaddleOCR 版式分析（扫描件备选方案）────────────────────
 PADDLE_OCR_URL = os.getenv("PADDLE_OCR_URL", "https://ucyduai2gcx8e403.aistudio-app.com/layout-parsing")
-PADDLE_OCR_TOKEN = os.getenv("PADDLE_OCR_TOKEN", "1002254afa7100a68da7ebfae37bf3504bf2cd7f")
+PADDLE_OCR_TOKEN = os.getenv("PADDLE_OCR_TOKEN", "")
 
 # ── LLM 超时与重试配置 ────────────────────────────────────
 LLM_TIMEOUT_NORMAL = int(os.getenv("LLM_TIMEOUT_NORMAL", "120"))  # 常规请求超时（秒）
