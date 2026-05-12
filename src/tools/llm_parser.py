@@ -123,6 +123,10 @@ def _sid(v) -> str:
     return str(v) if v and str(v).lower() not in ("none", "null") else ""
 
 
+def _text(v) -> str:
+    return "" if v is None else str(v)
+
+
 def _cat(s: str) -> MonitoringCategory:
     mapping = {
         "水平位移": MonitoringCategory.HORIZONTAL_DISP,
@@ -172,14 +176,14 @@ def _build_report(data: dict) -> MonitoringReport:
 
     for tb in data.get("tables", []):
         t = MonitoringTable(
-            monitoring_item=tb.get("monitoring_item", ""),
+            monitoring_item=_text(tb.get("monitoring_item")),
             category=_cat(tb.get("category", "")),
-            monitor_date=tb.get("monitor_date", ""),
-            monitor_count=tb.get("monitor_count", ""),
+            monitor_date=_text(tb.get("monitor_date")),
+            monitor_count=_text(tb.get("monitor_count")),
             point_count=tb.get("point_count", 0),
-            equipment_type=tb.get("equipment_type", ""),
-            equipment_model=tb.get("equipment_model", ""),
-            borehole_id=tb.get("borehole_id", ""),
+            equipment_type=_text(tb.get("equipment_type")),
+            equipment_model=_text(tb.get("equipment_model")),
+            borehole_id=_sid(tb.get("borehole_id")),
             borehole_depth=_sf(tb.get("borehole_depth")),
         )
         for pt in tb.get("points", []):

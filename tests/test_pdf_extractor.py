@@ -1,6 +1,29 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
-from src.tools.pdf_extractor import _clean_ocr_markdown
+import src.config as config
+import src.tools.pdf_extractor as pdf_extractor
+
+_clean_ocr_markdown = pdf_extractor._clean_ocr_markdown
+
+
+class FakeResponse:
+    def __init__(self, payload=None, text="", status_code=200):
+        self._payload = payload
+        self.text = text
+        self.status_code = status_code
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("no json")
+        return self._payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
 
 
 class PdfExtractorTests(unittest.TestCase):
@@ -58,6 +81,102 @@ class PdfExtractorTests(unittest.TestCase):
         self.assertIn("| S7 | 13.2 | 0.82 |", clean_text)
         self.assertEqual(stats["table_count"], 1)
         self.assertEqual(stats["dropped_table_count"], 1)
+
+    def test_paddle_async_payload_is_whitelisted_and_jsonl_is_collected(self):
+        post_calls = []
+
+        def fake_post(url, headers=None, data=None, files=None, timeout=None):
+            post_calls.append({
+                "url": url,
+                "headers": headers,
+                "data": data,
+                "files": files,
+                "timeout": timeout,
+            })
+            return FakeResponse({"code": 0, "data": {"jobId": "ocrjob-1"}})
+
+        jsonl_text = "\n".join([
+            json.dumps({
+                "result": {
+                    "layoutParsingResults": [
+                        {"markdown": {"text": "<table><tr><td>A</td></tr></table>"}}
+                    ]
+                }
+            }),
+            json.dumps({
+                "result": {
+                    "layoutParsingResults": [
+                        {"markdown": {"text": "plain page", "images": {"x": "url"}}}
+                    ]
+                }
+            }),
+        ])
+
+        def fake_get(url, headers=None, timeout=None):
+            if url == "https://example.test/jobs/ocrjob-1":
+                return FakeResponse({
+                    "code": 0,
+                    "data": {
+                        "state": "done",
+                        "extractProgress": {"totalPages": 2, "extractedPages": 2},
+                        "resultUrl": {"jsonUrl": "https://example.test/result.jsonl"},
+                    },
+                })
+            if url == "https://example.test/result.jsonl":
+                return FakeResponse(text=jsonl_text)
+            raise AssertionError(f"unexpected GET {url}")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pdf_path = Path(tmp_dir) / "sample.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n")
+            with (
+                patch.object(pdf_extractor, "PADDLE_OCR_TOKEN", "test-token"),
+                patch.object(pdf_extractor, "PADDLE_OCR_ASYNC_JOB_URL", "https://example.test/jobs"),
+                patch.object(pdf_extractor, "PADDLE_OCR_MODEL", "PaddleOCR-VL-1.5"),
+                patch.object(pdf_extractor, "PADDLE_OCR_POLL_INTERVAL_SEC", 0),
+                patch.object(pdf_extractor, "PADDLE_OCR_POLL_TIMEOUT_SEC", 5),
+                patch.object(pdf_extractor.requests, "post", side_effect=fake_post),
+                patch.object(pdf_extractor.requests, "get", side_effect=fake_get),
+            ):
+                result = pdf_extractor._call_paddle_ocr_async(
+                    str(pdf_path),
+                    {
+                        "useDocOrientationClassify": False,
+                        "useDocUnwarping": False,
+                        "useChartRecognition": False,
+                        "useSealRecognition": True,
+                    },
+                )
+
+        self.assertEqual(post_calls[0]["url"], "https://example.test/jobs")
+        self.assertEqual(post_calls[0]["headers"]["Authorization"], "bearer test-token")
+        self.assertEqual(post_calls[0]["data"]["model"], "PaddleOCR-VL-1.5")
+        self.assertEqual(
+            json.loads(post_calls[0]["data"]["optionalPayload"]),
+            {
+                "useDocOrientationClassify": False,
+                "useDocUnwarping": False,
+                "useChartRecognition": False,
+            },
+        )
+        self.assertEqual(len(result["layoutParsingResults"]), 2)
+        self.assertEqual(result["layoutParsingResults"][0]["outputImages"], {})
+        self.assertEqual(result["_metadata"]["api"], "async")
+        self.assertEqual(result["_metadata"]["jobId"], "ocrjob-1")
+
+    def test_paddle_async_failure_can_fall_back_to_legacy(self):
+        legacy_result = {"layoutParsingResults": [{"markdown": {"text": "legacy"}}]}
+        with (
+            patch.object(pdf_extractor, "PADDLE_OCR_USE_ASYNC", True),
+            patch.object(pdf_extractor, "PADDLE_OCR_ENABLE_LEGACY_FALLBACK", True),
+            patch.object(pdf_extractor, "_call_paddle_ocr_async", side_effect=RuntimeError("async down")),
+            patch.object(pdf_extractor, "_call_paddle_ocr_legacy", return_value=legacy_result),
+        ):
+            self.assertIs(pdf_extractor._call_paddle_ocr("x.pdf", {}), legacy_result)
+
+    def test_minimax_models_are_available(self):
+        self.assertIn("MiniMax-M2.7", config.AVAILABLE_MODELS)
+        self.assertIn("MiniMax-M2.7-highspeed", config.AVAILABLE_MODELS)
 
 
 if __name__ == "__main__":

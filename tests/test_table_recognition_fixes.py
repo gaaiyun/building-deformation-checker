@@ -3,6 +3,7 @@
 用真实数据结构模拟 LLM 解析结果，验证下游检查器的修复效果。
 """
 import unittest
+from unittest.mock import patch
 from src.models.data_models import (
     CheckIssue, DeepDisplacementPoint, MeasurementPoint,
     MonitoringCategory, MonitoringReport, MonitoringTable,
@@ -11,6 +12,7 @@ from src.models.data_models import (
 from src.tools.statistics_checker import run_statistics_checks
 from src.tools.logic_checker import check_summary_consistency
 from src.tools.extraction_quality import analyze_extraction_quality
+from src.tools.table_analyzer import build_verification_config, enrich_configs_with_llm
 
 
 def _make_config(**overrides):
@@ -191,6 +193,45 @@ class TestAnchorForceTable(unittest.TestCase):
         rate_flags = [f for f in flags if "change_rate" in f]
         self.assertEqual(len(rate_flags), 0,
                          f"锚索表缺少 change_rate 不应标记异常: {rate_flags}")
+
+
+class TestElevationUnitPreservation(unittest.TestCase):
+    """Ensure LLM config enrichment cannot downgrade data-proven elevation conversion."""
+
+    def test_llm_enrichment_preserves_meter_to_mm_conversion(self):
+        table = MonitoringTable(
+            monitoring_item="pipeline settlement",
+            category=MonitoringCategory.SETTLEMENT,
+            points=[
+                MeasurementPoint(
+                    point_id="G1",
+                    initial_value=9.63398,
+                    current_value=9.60495,
+                    cumulative_change=-29.03,
+                )
+            ],
+        )
+        table.verification_config = build_verification_config(table, table_unit="mm", initial_reliable=True)
+        report = MonitoringReport(tables=[table])
+
+        class FakeCompletions:
+            def create(self, **kwargs):
+                content = '[{"table_idx":0,"unit":"mm","initial_reliable":true,"severity":"error"}]'
+                message = type("Message", (), {"content": content})()
+                choice = type("Choice", (), {"message": message})()
+                return type("Response", (), {"choices": [choice]})()
+
+        class FakeOpenAI:
+            def __init__(self, **kwargs):
+                self.chat = type("Chat", (), {"completions": FakeCompletions()})()
+
+        with patch("openai.OpenAI", FakeOpenAI):
+            enrich_configs_with_llm(report)
+
+        self.assertEqual(table.verification_config.unit, "m")
+        self.assertEqual(table.verification_config.unit_conversion, 1000.0)
+        self.assertEqual(table.verification_config.severity_for_cumulative, "warning")
+        self.assertTrue(table.verification_config.initial_value_reliable)
 
 
 class TestLogicCheckerSameSign(unittest.TestCase):

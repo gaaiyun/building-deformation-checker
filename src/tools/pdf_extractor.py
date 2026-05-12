@@ -12,6 +12,7 @@ import html
 import json
 import logging
 import re
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
@@ -19,11 +20,25 @@ from typing import Optional
 import pdfplumber
 import requests
 
-from src.config import PADDLE_OCR_TOKEN, PADDLE_OCR_URL
+from src.config import (
+    PADDLE_OCR_ASYNC_JOB_URL,
+    PADDLE_OCR_ENABLE_LEGACY_FALLBACK,
+    PADDLE_OCR_MODEL,
+    PADDLE_OCR_POLL_INTERVAL_SEC,
+    PADDLE_OCR_POLL_TIMEOUT_SEC,
+    PADDLE_OCR_TOKEN,
+    PADDLE_OCR_URL,
+    PADDLE_OCR_USE_ASYNC,
+)
 
 logger = logging.getLogger(__name__)
 
 MIN_CHARS_PER_PAGE = 50
+ASYNC_OPTIONAL_PAYLOAD_KEYS = {
+    "useDocOrientationClassify",
+    "useDocUnwarping",
+    "useChartRecognition",
+}
 PADDLE_TABLE_PROFILE = {
     "markdownIgnoreLabels": [
         "header",
@@ -418,7 +433,150 @@ def extract_tables_with_pdfplumber(pdf_path: str) -> list[dict]:
     return results
 
 
-def _call_paddle_ocr(pdf_path: str, profile: dict) -> dict:
+def _decode_paddle_response(
+    response: requests.Response,
+    operation: str,
+    allow_failed_job: bool = False,
+) -> dict:
+    if response.status_code != 200:
+        raise ValueError(f"PaddleOCR {operation} HTTP {response.status_code}: {response.text[:500]}")
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise ValueError(f"PaddleOCR {operation} returned non-JSON response") from exc
+
+    code = body.get("code")
+    if code not in (None, 0):
+        data = body.get("data") or {}
+        state = data.get("state")
+        if allow_failed_job and state == "failed":
+            return body
+        msg = data.get("errorMsg") or body.get("msg") or "unknown error"
+        raise ValueError(f"PaddleOCR {operation} failed with code {code}: {msg}")
+    return body
+
+
+def _async_optional_payload(profile: dict) -> dict:
+    return {
+        key: profile[key]
+        for key in ASYNC_OPTIONAL_PAYLOAD_KEYS
+        if key in profile
+    }
+
+
+def _normalize_layout_page(page_result: dict) -> dict:
+    markdown = page_result.get("markdown") or {}
+    return {
+        **page_result,
+        "markdown": {
+            **markdown,
+            "text": markdown.get("text", ""),
+            "images": markdown.get("images") or {},
+        },
+        "outputImages": page_result.get("outputImages") or {},
+    }
+
+
+def _collect_layout_results_from_jsonl(jsonl_text: str) -> list[dict]:
+    layout_results: list[dict] = []
+    for line_num, raw_line in enumerate(jsonl_text.splitlines(), 1):
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"PaddleOCR jsonl line {line_num} is invalid JSON") from exc
+        result = entry.get("result") or {}
+        for page_result in result.get("layoutParsingResults") or []:
+            layout_results.append(_normalize_layout_page(page_result))
+    return layout_results
+
+
+def _call_paddle_ocr_async(pdf_path: str, profile: dict) -> dict:
+    if not PADDLE_OCR_TOKEN:
+        raise ValueError("PADDLE_OCR_TOKEN is required for PaddleOCR async API")
+
+    headers = {"Authorization": f"bearer {PADDLE_OCR_TOKEN}"}
+    data = {
+        "model": PADDLE_OCR_MODEL,
+        "optionalPayload": json.dumps(_async_optional_payload(profile), ensure_ascii=False),
+    }
+
+    logger.info("Submitting PaddleOCR async job for %s ...", pdf_path)
+    with open(pdf_path, "rb") as file_obj:
+        response = requests.post(
+            PADDLE_OCR_ASYNC_JOB_URL,
+            headers=headers,
+            data=data,
+            files={"file": file_obj},
+            timeout=300,
+        )
+    body = _decode_paddle_response(response, "job submit")
+    job_id = (body.get("data") or {}).get("jobId")
+    if not job_id:
+        raise ValueError(f"PaddleOCR job submit response missing jobId: {list(body.keys())}")
+
+    deadline = time.monotonic() + PADDLE_OCR_POLL_TIMEOUT_SEC
+    job_data: dict = {}
+    while True:
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"PaddleOCR job {job_id} timed out after {PADDLE_OCR_POLL_TIMEOUT_SEC:g}s")
+
+        poll_response = requests.get(
+            f"{PADDLE_OCR_ASYNC_JOB_URL}/{job_id}",
+            headers=headers,
+            timeout=60,
+        )
+        poll_body = _decode_paddle_response(poll_response, "job poll", allow_failed_job=True)
+        job_data = poll_body.get("data") or {}
+        state = job_data.get("state")
+
+        if state == "done":
+            break
+        if state == "failed":
+            raise ValueError(f"PaddleOCR job {job_id} failed: {job_data.get('errorMsg') or 'unknown error'}")
+        if state not in {"pending", "running"}:
+            raise ValueError(f"PaddleOCR job {job_id} returned unknown state: {state}")
+
+        progress = job_data.get("extractProgress") or {}
+        if progress:
+            logger.info(
+                "PaddleOCR job %s %s: %s/%s pages",
+                job_id,
+                state,
+                progress.get("extractedPages", "?"),
+                progress.get("totalPages", "?"),
+            )
+        else:
+            logger.info("PaddleOCR job %s %s", job_id, state)
+
+        if PADDLE_OCR_POLL_INTERVAL_SEC > 0:
+            time.sleep(PADDLE_OCR_POLL_INTERVAL_SEC)
+
+    result_url = job_data.get("resultUrl") or {}
+    jsonl_url = result_url.get("jsonUrl")
+    if not jsonl_url:
+        raise ValueError(f"PaddleOCR job {job_id} completed without jsonUrl")
+
+    jsonl_response = requests.get(jsonl_url, timeout=300)
+    jsonl_response.raise_for_status()
+    layout_results = _collect_layout_results_from_jsonl(jsonl_response.text)
+    if not layout_results:
+        raise ValueError(f"PaddleOCR job {job_id} returned no layoutParsingResults")
+
+    return {
+        "layoutParsingResults": layout_results,
+        "_metadata": {
+            "api": "async",
+            "jobId": job_id,
+            "model": PADDLE_OCR_MODEL,
+            "extractProgress": job_data.get("extractProgress") or {},
+        },
+    }
+
+
+def _call_paddle_ocr_legacy(pdf_path: str, profile: dict) -> dict:
     file_data = base64.b64encode(Path(pdf_path).read_bytes()).decode("ascii")
     payload = {"file": file_data, "fileType": 0, **profile}
     headers = {
@@ -437,6 +595,17 @@ def _call_paddle_ocr(pdf_path: str, profile: dict) -> dict:
     return result
 
 
+def _call_paddle_ocr(pdf_path: str, profile: dict) -> dict:
+    if PADDLE_OCR_USE_ASYNC:
+        try:
+            return _call_paddle_ocr_async(pdf_path, profile)
+        except Exception:
+            if not PADDLE_OCR_ENABLE_LEGACY_FALLBACK:
+                raise
+            logger.warning("PaddleOCR async API failed; falling back to legacy API", exc_info=True)
+    return _call_paddle_ocr_legacy(pdf_path, profile)
+
+
 def _extract_with_paddle_profile(
     pdf_path: str,
     profile_name: str,
@@ -444,19 +613,21 @@ def _extract_with_paddle_profile(
     debug_output_dir: Optional[str] = None,
 ) -> PDFExtractionResult:
     result = _call_paddle_ocr(pdf_path, profile)
+    metadata = result.get("_metadata") or {}
     raw_pages: list[str] = []
     clean_pages: list[str] = []
     page_stats: list[dict] = []
 
     for page_index, page_result in enumerate(result["layoutParsingResults"], 1):
-        raw_markdown = page_result["markdown"]["text"]
+        markdown = page_result.get("markdown") or {}
+        raw_markdown = markdown.get("text", "")
         clean_text, stats = _clean_ocr_markdown(raw_markdown)
         raw_pages.append(raw_markdown)
         clean_pages.append(clean_text)
         page_stats.append({
             "page": page_index,
             **stats,
-            "markdown_images": len(page_result["markdown"].get("images", {})),
+            "markdown_images": len(markdown.get("images", {})),
             "output_images": len(page_result.get("outputImages") or {}),
         })
 
@@ -472,6 +643,9 @@ def _extract_with_paddle_profile(
         "plain_chars": sum(item["plain_chars"] for item in page_stats),
         "high_markup_pages": [item["page"] for item in page_stats if item["markup_ratio"] >= 0.9],
         "identical_page_pairs": _compute_identical_page_pairs(clean_pages),
+        "paddle_api": metadata.get("api", "legacy"),
+        "paddle_model": metadata.get("model", ""),
+        "paddle_job_id": metadata.get("jobId", ""),
     }
     diagnostics["compression_ratio"] = round(
         diagnostics["clean_chars"] / diagnostics["raw_chars"], 4
@@ -483,7 +657,12 @@ def _extract_with_paddle_profile(
             raw_pages,
             clean_pages,
             page_stats,
-            {"selected_profile": profile_name, "profile": profile},
+            {
+                "selected_profile": profile_name,
+                "profile": profile,
+                "paddle_api": diagnostics["paddle_api"],
+                "paddle_model": diagnostics["paddle_model"],
+            },
             profile_name,
         )
 

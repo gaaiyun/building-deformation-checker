@@ -108,6 +108,15 @@ def build_verification_config(
     return cfg
 
 
+def _looks_like_elevation_data(table: MonitoringTable) -> bool:
+    for pt in table.points[:5]:
+        if pt.initial_value is None or pt.current_value is None or pt.cumulative_change is None:
+            continue
+        if abs(pt.initial_value) < 100 and abs(pt.current_value) < 100 and abs(pt.cumulative_change) > 1:
+            return True
+    return False
+
+
 def _detect_elevation_from_data(table: MonitoringTable, cfg: TableVerificationConfig):
     """
     启发式检测：如果初始值/本次值看起来像高程（绝对值小于100的数值），
@@ -121,15 +130,19 @@ def _detect_elevation_from_data(table: MonitoringTable, cfg: TableVerificationCo
         → 说明初始值可能不是真正的项目初始基准
         → 标记为 warning 而非 error
     """
-    for pt in table.points[:3]:
-        if pt.initial_value is not None and abs(pt.initial_value) < 100:
-            if pt.cumulative_change is not None and abs(pt.cumulative_change) > 1:
-                cfg.unit = "m"
-                cfg.unit_conversion = 1000.0
-                cfg.cumulative_tolerance = max(FLOAT_TOLERANCE * 5, 1.0)
-                cfg.severity_for_cumulative = "warning"
-                cfg.initial_value_reliable = False
-                break
+    if _looks_like_elevation_data(table):
+        cfg.unit = "m"
+        cfg.unit_conversion = 1000.0
+        cfg.cumulative_tolerance = max(FLOAT_TOLERANCE * 5, 1.0)
+        cfg.severity_for_cumulative = "warning"
+        cfg.initial_value_reliable = False
+
+
+def _normalize_severity(value: object) -> str | None:
+    if value is None:
+        return None
+    severity = str(value).strip().lower()
+    return severity if severity in {"error", "warning", "info"} else None
 
 
 def generate_analysis_plan(report: MonitoringReport) -> list[dict]:
@@ -460,14 +473,31 @@ def enrich_configs_with_llm(report: MonitoringReport) -> None:
                 for item in results:
                     idx = item.get("table_idx")
                     if idx is not None and 0 <= idx < len(report.tables):
-                        tbl_cfg = report.tables[idx].verification_config
+                        table = report.tables[idx]
+                        tbl_cfg = table.verification_config
+                        preserve_elevation = (
+                            tbl_cfg.unit_conversion == 1000.0
+                            or (
+                                table.category in (MonitoringCategory.VERTICAL_DISP, MonitoringCategory.SETTLEMENT)
+                                and _looks_like_elevation_data(table)
+                            )
+                        )
                         if item.get("unit"):
-                            tbl_cfg.unit = item["unit"]
-                            tbl_cfg.unit_conversion = 1000.0 if item["unit"] == "m" else 1.0
+                            if preserve_elevation and item["unit"] != "kN":
+                                tbl_cfg.unit = "m"
+                                tbl_cfg.unit_conversion = 1000.0
+                                tbl_cfg.cumulative_tolerance = max(tbl_cfg.cumulative_tolerance, 1.0)
+                            else:
+                                tbl_cfg.unit = item["unit"]
+                                tbl_cfg.unit_conversion = 1000.0 if item["unit"] == "m" else 1.0
                         if "initial_reliable" in item:
                             tbl_cfg.initial_value_reliable = item["initial_reliable"]
-                        if item.get("severity"):
-                            tbl_cfg.severity_for_cumulative = item["severity"]
+                        severity = _normalize_severity(item.get("severity"))
+                        if severity:
+                            if preserve_elevation and severity == "error":
+                                tbl_cfg.severity_for_cumulative = "warning"
+                            else:
+                                tbl_cfg.severity_for_cumulative = severity
                 logger.info("LLM 增强了 %d 张表的验证配置", len(results))
             return
         except Exception as e:

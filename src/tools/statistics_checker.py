@@ -79,7 +79,9 @@ def _get_table_point_ids(table: MonitoringTable) -> set[str]:
 
 def _get_group_key(table: MonitoringTable) -> tuple[str, str]:
     """同一监测项多页表按 monitoring_item + borehole_id 归组。"""
-    return table.monitoring_item.strip(), table.borehole_id.strip()
+    monitoring_item = str(table.monitoring_item or "").strip()
+    borehole_id = str(table.borehole_id or "").strip()
+    return monitoring_item, borehole_id
 
 
 def _build_allowed_point_ids_map(report: MonitoringReport) -> dict[tuple[str, str], set[str]]:
@@ -338,6 +340,24 @@ def check_table_statistics(
                 table_point_ids, table_label, issues,
             )
         if not cross_ref:
+            pos_rates = [(pid, v) for pid, v in rate_vals if v > 0]
+            neg_rates = [(pid, v) for pid, v in rate_vals if v < 0]
+            if neg_rates and not pos_rates:
+                closest_id, closest_val = max(neg_rates, key=lambda x: x[1])
+                if _close(closest_val, stats.max_rate_value, RATE_TOLERANCE):
+                    issues.append(CheckIssue(
+                        severity="info",
+                        table_name=table_label,
+                        point_id=stats.max_rate_id or "N/A",
+                        field_name="鏈€澶ч€熺巼缁熻",
+                        expected_value=f"负值数值最大: {closest_id}={_fmt(closest_val)}",
+                        actual_value=f"{stats.max_rate_id}={_fmt(stats.max_rate_value)}",
+                        message=(
+                            f"所有变化速率均为负值，报告最大速率疑似按数值最大（最接近0）统计: "
+                            f"{stats.max_rate_id}={_fmt(stats.max_rate_value)}（行业口径）"
+                        ),
+                    ))
+                    return
             actual_rate_id, actual_rate_val = max(rate_vals, key=lambda x: abs(x[1]))
             if not _close(abs(actual_rate_val), abs(stats.max_rate_value), RATE_TOLERANCE):
                 issues.append(CheckIssue(

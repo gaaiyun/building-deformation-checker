@@ -13,6 +13,8 @@ LLM_MODEL = os.getenv("LLM_MODEL", "qwen3.5-plus")
 # 可切换的模型列表（Coding Plan 支持的模型）
 AVAILABLE_MODELS = [
     "qwen3.5-plus",
+    "MiniMax-M2.7",
+    "MiniMax-M2.7-highspeed",
     "kimi-k2.5",
     "glm-5",
     "MiniMax-M2.5",
@@ -29,6 +31,15 @@ def set_model(model_name: str):
 # ── PaddleOCR 版式分析（扫描件备选方案）────────────────────
 PADDLE_OCR_URL = os.getenv("PADDLE_OCR_URL", "https://ucyduai2gcx8e403.aistudio-app.com/layout-parsing")
 PADDLE_OCR_TOKEN = os.getenv("PADDLE_OCR_TOKEN", "")
+PADDLE_OCR_ASYNC_JOB_URL = os.getenv(
+    "PADDLE_OCR_ASYNC_JOB_URL",
+    "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs",
+)
+PADDLE_OCR_MODEL = os.getenv("PADDLE_OCR_MODEL", "PaddleOCR-VL-1.5")
+PADDLE_OCR_USE_ASYNC = os.getenv("PADDLE_OCR_USE_ASYNC", "1").lower() not in {"0", "false", "no", "off"}
+PADDLE_OCR_ENABLE_LEGACY_FALLBACK = os.getenv("PADDLE_OCR_ENABLE_LEGACY_FALLBACK", "1").lower() not in {"0", "false", "no", "off"}
+PADDLE_OCR_POLL_INTERVAL_SEC = float(os.getenv("PADDLE_OCR_POLL_INTERVAL_SEC", "5"))
+PADDLE_OCR_POLL_TIMEOUT_SEC = float(os.getenv("PADDLE_OCR_POLL_TIMEOUT_SEC", "900"))
 
 # ── LLM 超时与重试配置 ────────────────────────────────────
 LLM_TIMEOUT_NORMAL = int(os.getenv("LLM_TIMEOUT_NORMAL", "120"))  # 常规请求超时（秒）
