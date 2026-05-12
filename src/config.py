@@ -40,6 +40,7 @@ PADDLE_OCR_USE_ASYNC = os.getenv("PADDLE_OCR_USE_ASYNC", "1").lower() not in {"0
 PADDLE_OCR_ENABLE_LEGACY_FALLBACK = os.getenv("PADDLE_OCR_ENABLE_LEGACY_FALLBACK", "1").lower() not in {"0", "false", "no", "off"}
 PADDLE_OCR_POLL_INTERVAL_SEC = float(os.getenv("PADDLE_OCR_POLL_INTERVAL_SEC", "5"))
 PADDLE_OCR_POLL_TIMEOUT_SEC = float(os.getenv("PADDLE_OCR_POLL_TIMEOUT_SEC", "900"))
+PADDLE_OCR_USE_CACHE = os.getenv("PADDLE_OCR_USE_CACHE", "1").lower() not in {"0", "false", "no", "off"}
 
 # ── LLM 超时与重试配置 ────────────────────────────────────
 LLM_TIMEOUT_NORMAL = int(os.getenv("LLM_TIMEOUT_NORMAL", "120"))  # 常规请求超时（秒）
@@ -47,6 +48,9 @@ LLM_TIMEOUT_LARGE = int(os.getenv("LLM_TIMEOUT_LARGE", "240"))   # 大 prompt �
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "2"))         # 应用层重试次数
 LLM_RETRY_BACKOFF_SEC = int(os.getenv("LLM_RETRY_BACKOFF_SEC", "10"))  # 首次重试等待秒数
 LLM_STEP_DELAY_SEC = int(os.getenv("LLM_STEP_DELAY_SEC", "0"))   # 步骤间延迟（0=禁用）
+LLM_PARSE_CHUNK_CHARS = int(os.getenv("LLM_PARSE_CHUNK_CHARS", "18000"))
+LLM_PARSE_MAX_TOKENS = int(os.getenv("LLM_PARSE_MAX_TOKENS", "24000"))
+LLM_PARSE_TIMEOUT_SEC = int(os.getenv("LLM_PARSE_TIMEOUT_SEC", "300"))
 
 # ── 自验证配置 ────────────────────────────────────────────
 SELF_VERIFY_TIMEOUT_SEC = int(os.getenv("SELF_VERIFY_TIMEOUT_SEC", "120"))   # 单次LLM请求超时

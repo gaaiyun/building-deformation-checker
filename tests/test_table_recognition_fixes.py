@@ -231,7 +231,7 @@ class TestElevationUnitPreservation(unittest.TestCase):
         self.assertEqual(table.verification_config.unit, "m")
         self.assertEqual(table.verification_config.unit_conversion, 1000.0)
         self.assertEqual(table.verification_config.severity_for_cumulative, "warning")
-        self.assertTrue(table.verification_config.initial_value_reliable)
+        self.assertFalse(table.verification_config.initial_value_reliable)
 
 
 class TestLogicCheckerSameSign(unittest.TestCase):

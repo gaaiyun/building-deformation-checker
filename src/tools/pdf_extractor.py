@@ -8,6 +8,7 @@ PDF 数据提取工具。
 from __future__ import annotations
 
 import base64
+import hashlib
 import html
 import json
 import logging
@@ -28,6 +29,7 @@ from src.config import (
     PADDLE_OCR_POLL_TIMEOUT_SEC,
     PADDLE_OCR_TOKEN,
     PADDLE_OCR_URL,
+    PADDLE_OCR_USE_CACHE,
     PADDLE_OCR_USE_ASYNC,
 )
 
@@ -39,6 +41,7 @@ ASYNC_OPTIONAL_PAYLOAD_KEYS = {
     "useDocUnwarping",
     "useChartRecognition",
 }
+OCR_CLEANER_VERSION = "2026-05-13-v1"
 PADDLE_TABLE_PROFILE = {
     "markdownIgnoreLabels": [
         "header",
@@ -379,6 +382,29 @@ def _compute_identical_page_pairs(pages: list[str]) -> list[tuple[int, int]]:
     return identical_pairs
 
 
+def _pdf_fingerprint(pdf_path: str) -> dict:
+    path = Path(pdf_path)
+    digest = hashlib.sha256()
+    with path.open("rb") as file_obj:
+        for chunk in iter(lambda: file_obj.read(1024 * 1024), b""):
+            digest.update(chunk)
+    stat = path.stat()
+    return {
+        "size": stat.st_size,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def _profile_fingerprint(profile: dict) -> str:
+    payload = {
+        "profile": profile,
+        "model": PADDLE_OCR_MODEL,
+        "cleaner_version": OCR_CLEANER_VERSION,
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _write_debug_artifacts(
     debug_output_dir: str,
     raw_pages: list[str],
@@ -410,6 +436,52 @@ def _write_debug_artifacts(
         json.dumps(request_profile, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def _load_cached_debug_artifacts(
+    pdf_path: str,
+    debug_output_dir: str,
+    profile_name: str,
+    profile: dict,
+) -> tuple[list[str], list[str], list[dict], dict] | None:
+    debug_dir = Path(debug_output_dir)
+    stats_path = debug_dir / "stats.json"
+    profile_path = debug_dir / "request_profile.json"
+    raw_dir = debug_dir / "raw"
+    clean_dir = debug_dir / "clean"
+    if not (stats_path.exists() and profile_path.exists() and raw_dir.exists() and clean_dir.exists()):
+        return None
+
+    try:
+        request_profile = json.loads(profile_path.read_text(encoding="utf-8"))
+        stats = json.loads(stats_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    if request_profile.get("selected_profile") != profile_name:
+        return None
+    if request_profile.get("profile_fingerprint") != _profile_fingerprint(profile):
+        return None
+    if request_profile.get("ocr_cleaner_version") != OCR_CLEANER_VERSION:
+        return None
+    if request_profile.get("pdf_fingerprint") != _pdf_fingerprint(pdf_path):
+        return None
+
+    raw_files = sorted(raw_dir.glob("page_*.md"))
+    clean_files = sorted(clean_dir.glob("page_*.txt"))
+    page_stats = stats.get("pages") or []
+    if not raw_files or len(raw_files) != len(clean_files) or len(raw_files) != len(page_stats):
+        return None
+
+    raw_pages = [path.read_text(encoding="utf-8") for path in raw_files]
+    clean_pages = [path.read_text(encoding="utf-8") for path in clean_files]
+    metadata = {
+        "api": request_profile.get("paddle_api", "cache"),
+        "model": request_profile.get("paddle_model", ""),
+        "jobId": request_profile.get("paddle_job_id", ""),
+        "cache_hit": True,
+    }
+    return raw_pages, clean_pages, page_stats, metadata
 
 
 def extract_text_with_pdfplumber(pdf_path: str) -> str:
@@ -612,24 +684,32 @@ def _extract_with_paddle_profile(
     profile: dict,
     debug_output_dir: Optional[str] = None,
 ) -> PDFExtractionResult:
-    result = _call_paddle_ocr(pdf_path, profile)
-    metadata = result.get("_metadata") or {}
-    raw_pages: list[str] = []
-    clean_pages: list[str] = []
-    page_stats: list[dict] = []
+    cache_data = None
+    if debug_output_dir and PADDLE_OCR_USE_CACHE:
+        cache_data = _load_cached_debug_artifacts(pdf_path, debug_output_dir, profile_name, profile)
 
-    for page_index, page_result in enumerate(result["layoutParsingResults"], 1):
-        markdown = page_result.get("markdown") or {}
-        raw_markdown = markdown.get("text", "")
-        clean_text, stats = _clean_ocr_markdown(raw_markdown)
-        raw_pages.append(raw_markdown)
-        clean_pages.append(clean_text)
-        page_stats.append({
-            "page": page_index,
-            **stats,
-            "markdown_images": len(markdown.get("images", {})),
-            "output_images": len(page_result.get("outputImages") or {}),
-        })
+    if cache_data:
+        raw_pages, clean_pages, page_stats, metadata = cache_data
+        logger.info("Loaded PaddleOCR cache from %s", debug_output_dir)
+    else:
+        result = _call_paddle_ocr(pdf_path, profile)
+        metadata = result.get("_metadata") or {}
+        raw_pages = []
+        clean_pages = []
+        page_stats = []
+
+        for page_index, page_result in enumerate(result["layoutParsingResults"], 1):
+            markdown = page_result.get("markdown") or {}
+            raw_markdown = markdown.get("text", "")
+            clean_text, stats = _clean_ocr_markdown(raw_markdown)
+            raw_pages.append(raw_markdown)
+            clean_pages.append(clean_text)
+            page_stats.append({
+                "page": page_index,
+                **stats,
+                "markdown_images": len(markdown.get("images", {})),
+                "output_images": len(page_result.get("outputImages") or {}),
+            })
 
     joined_text = "\n\n".join(
         f"--- 第 {page_index} 页 ---\n{page_text}"
@@ -646,12 +726,13 @@ def _extract_with_paddle_profile(
         "paddle_api": metadata.get("api", "legacy"),
         "paddle_model": metadata.get("model", ""),
         "paddle_job_id": metadata.get("jobId", ""),
+        "ocr_cache_hit": bool(metadata.get("cache_hit")),
     }
     diagnostics["compression_ratio"] = round(
         diagnostics["clean_chars"] / diagnostics["raw_chars"], 4
     ) if diagnostics["raw_chars"] else 0.0
 
-    if debug_output_dir:
+    if debug_output_dir and not metadata.get("cache_hit"):
         _write_debug_artifacts(
             debug_output_dir,
             raw_pages,
@@ -660,8 +741,12 @@ def _extract_with_paddle_profile(
             {
                 "selected_profile": profile_name,
                 "profile": profile,
+                "profile_fingerprint": _profile_fingerprint(profile),
+                "ocr_cleaner_version": OCR_CLEANER_VERSION,
                 "paddle_api": diagnostics["paddle_api"],
                 "paddle_model": diagnostics["paddle_model"],
+                "paddle_job_id": diagnostics["paddle_job_id"],
+                "pdf_fingerprint": _pdf_fingerprint(pdf_path),
             },
             profile_name,
         )

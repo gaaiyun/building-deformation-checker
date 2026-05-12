@@ -349,7 +349,7 @@ def check_table_statistics(
                         severity="info",
                         table_name=table_label,
                         point_id=stats.max_rate_id or "N/A",
-                        field_name="鏈€澶ч€熺巼缁熻",
+                        field_name="最大速率统计",
                         expected_value=f"负值数值最大: {closest_id}={_fmt(closest_val)}",
                         actual_value=f"{stats.max_rate_id}={_fmt(stats.max_rate_value)}",
                         message=(

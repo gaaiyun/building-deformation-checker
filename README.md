@@ -150,11 +150,17 @@ markdown>=3.5.0      # Markdown 转 HTML
 
 | 配置项 | 说明 | 默认值 | 环境变量 |
 |--------|------|--------|----------|
-| `LLM_API_KEY` | DashScope API 密钥 | 建议通过环境变量注入 | `LLM_API_KEY` |
-| `LLM_BASE_URL` | LLM API 基础 URL | `https://coding.dashscope.aliyuncs.com/v1` | `LLM_BASE_URL` |
-| `LLM_MODEL` | 模型名称 | `qwen3.5-plus` | `LLM_MODEL` |
-| `PADDLE_OCR_URL` | PaddleOCR 版式分析 API 地址 | 建议在 `src/config.py` 或环境中配置 | - |
-| `PADDLE_OCR_TOKEN` | PaddleOCR 认证 Token | 建议在 `src/config.py` 或环境中配置 | - |
+| `LLM_API_KEY` | OpenAI 兼容 API 密钥 | 建议通过环境变量注入 | `LLM_API_KEY` |
+| `LLM_BASE_URL` | OpenAI 兼容 API 基础 URL | `https://coding.dashscope.aliyuncs.com/v1` | `LLM_BASE_URL` |
+| `LLM_MODEL` | 模型名称 | `qwen3.5-plus`，可切换 `MiniMax-M2.7-highspeed` | `LLM_MODEL` |
+| `LLM_PARSE_CHUNK_CHARS` | LLM 结构化解析单块最大字符数 | `18000` | `LLM_PARSE_CHUNK_CHARS` |
+| `LLM_PARSE_MAX_TOKENS` | LLM 结构化解析最大输出 token | `24000` | `LLM_PARSE_MAX_TOKENS` |
+| `PADDLE_OCR_ASYNC_JOB_URL` | PaddleOCR 异步任务 API | `https://paddleocr.aistudio-app.com/api/v2/ocr/jobs` | `PADDLE_OCR_ASYNC_JOB_URL` |
+| `PADDLE_OCR_MODEL` | PaddleOCR 模型名 | `PaddleOCR-VL-1.5` | `PADDLE_OCR_MODEL` |
+| `PADDLE_OCR_TOKEN` | PaddleOCR 认证 Token | 建议通过环境变量注入 | `PADDLE_OCR_TOKEN` |
+| `PADDLE_OCR_USE_ASYNC` | 是否优先使用异步 OCR API | `1` | `PADDLE_OCR_USE_ASYNC` |
+| `PADDLE_OCR_USE_CACHE` | 是否复用 OCR debug/cache 结果 | `1` | `PADDLE_OCR_USE_CACHE` |
+| `PADDLE_OCR_ENABLE_LEGACY_FALLBACK` | 异步 OCR 失败时是否回退 legacy API | `1` | `PADDLE_OCR_ENABLE_LEGACY_FALLBACK` |
 | `FLOAT_TOLERANCE` | 浮点数容差 (mm) | `0.15` | - |
 | `RATE_TOLERANCE` | 速率容差 (mm/d) | `0.05` | - |
 
@@ -200,6 +206,11 @@ python main.py "报告.pdf" --no-self-verify
 
 # 指定输出路径
 python main.py "报告.pdf" -o output/my_report.md
+
+# 使用 MiniMax Token Plan 的 OpenAI 兼容端点
+set LLM_BASE_URL=https://api.minimaxi.com/v1
+set LLM_API_KEY=sk-cp-...
+python main.py "报告.pdf" --model MiniMax-M2.7-highspeed --no-self-verify --no-ai-review
 ```
 
 ---
@@ -275,7 +286,7 @@ python main.py "报告.pdf" -o output/my_report.md
 
 #### 当前默认提取链路
 
-当前默认策略为“pdfplumber 优先，按需回退 OCR”：
+当前默认策略为“pdfplumber 优先，按需回退 OCR”。`--ocr` 会优先使用 PaddleOCR 异步任务接口，`--no-ocr` 仅使用文本层，适合快速基线和批量回归：
 
 ```
 if --ocr:
@@ -295,11 +306,13 @@ else:
 
 #### PaddleOCR API 调用细节
 
-- **端点**：`PADDLE_OCR_URL`（PaddingPaddle AI Studio 部署）
-- **认证**：`Authorization: token <TOKEN>`
-- **输入**：PDF 文件 Base64 编码
-- **输出**：每页的 Markdown / HTML 混合文本 + 表格结构
-- **超时**：300 秒
+- **优先端点**：`PADDLE_OCR_ASYNC_JOB_URL`，默认 `https://paddleocr.aistudio-app.com/api/v2/ocr/jobs`
+- **模型**：`PADDLE_OCR_MODEL`，默认 `PaddleOCR-VL-1.5`
+- **认证**：`Authorization: bearer <TOKEN>`
+- **输入**：本地 PDF 通过 multipart 上传；URL 文件通过 JSON `fileUrl` 提交
+- **输出**：任务完成后下载 `jsonUrl`，读取 `layoutParsingResults[].markdown.text`
+- **轮询**：`PADDLE_OCR_POLL_INTERVAL_SEC` / `PADDLE_OCR_POLL_TIMEOUT_SEC`
+- **legacy 回退**：异步 API 失败且 `PADDLE_OCR_ENABLE_LEGACY_FALLBACK=1` 时，才调用旧版 `PADDLE_OCR_URL`
 - **table profile 关键参数**：
   - `markdownIgnoreLabels=["header","header_image","footer","footer_image","number","footnote","aside_text"]`
   - `useLayoutDetection=True`
@@ -323,7 +336,9 @@ Paddle / MinerU 这类服务返回的 `markdown.text` 往往仍然包含大量 H
 - `raw/page_XXX.md`：OCR 原始页内容
 - `clean/page_XXX.txt`：清洗后的页文本
 - `stats.json`：字符数、压缩率、表格数、异常页等指标
-- `request_profile.json`：实际请求 profile 参数
+- `request_profile.json`：实际请求 profile 参数、PDF SHA256 指纹、Paddle 模型、profile 指纹和 OCR 清洗器版本
+
+默认开启 `PADDLE_OCR_USE_CACHE=1`。如果 debug 目录中的 PDF 指纹、Paddle 模型、profile 指纹和清洗器版本都一致，系统会直接复用 `raw/clean/stats`，跳过远程 OCR 调用；任一条件变化都会自动失效，避免旧缓存污染新实验。
 
 #### 注意事项
 
@@ -346,11 +361,11 @@ Paddle / MinerU 这类服务返回的 `markdown.text` 往往仍然包含大量 H
 
 | 策略 | 触发条件 | 分块方式 | 优先级 |
 |------|---------|---------|--------|
-| 按页标记分割 | 文本包含 `--- 第 N 页` | 按页标记拆分，合并到 ≤28000 字符 | 最高 |
-| 按表边界分割 | 文本包含 `【xxx】监测` | 按表标题拆分，合并到 ≤28000 字符 | 中 |
-| 字符数回退分割 | 以上策略都不适用 | 每 28000 字符切割，500 字符重叠 | 最低 |
+| 按页标记分割 | 文本包含 `--- 第 N 页` | 按页标记拆分，合并到 ≤`LLM_PARSE_CHUNK_CHARS` 字符 | 最高 |
+| 按表边界分割 | 文本包含 `【xxx】监测` | 按表标题拆分，合并到 ≤`LLM_PARSE_CHUNK_CHARS` 字符 | 中 |
+| 字符数回退分割 | 以上策略都不适用，或单页/单表超长 | 每 `LLM_PARSE_CHUNK_CHARS` 字符切割，500 字符重叠 | 最低 |
 
-**设计决策**：`max_chars=28000` 而非更大，是因为 LLM 需要输出同等长度的 JSON 结构化数据，总 token 数（输入+输出）需控制在模型限制内。
+**设计决策**：当前默认 `LLM_PARSE_CHUNK_CHARS=18000`。此前大文档使用 28000 字符分块时，输出 JSON 更容易超长或被截断；降低分块尺寸后，大 PDF 会多发几次请求，但单块结构化更稳定。即使单页 OCR 文本超过上限，也会被二次切分，不再把超长单页原样送入 LLM。
 
 #### SYSTEM_PROMPT 设计
 
@@ -369,8 +384,8 @@ Paddle / MinerU 这类服务返回的 `markdown.text` 往往仍然包含大量 H
 
 ```
 第1块: 提取元数据（project_name, thresholds, summary_items）+ tables
-第2..N块: 只提取 tables（如果有新的 thresholds/summary 且第1块没有，才合并）
-最终: 所有块的 tables 合并为一个列表
+第2..N块: 提取本块 tables；如出现新的 thresholds/summary_items，按 item_name/monitoring_item 去重合并
+最终: 所有块的 tables 合并为一个列表；报告诊断中记录 LLM 分块总数、成功数和解析失败数
 ```
 
 #### JSON 解析容错 (`_extract_json_from_response`)
@@ -573,6 +588,16 @@ if abs(pt.cumulative_change) > 10:
 
 ### 6. 逻辑检查 (logic_checker.py)
 
+#### 可核对性防线 (`check_report_extractability`)
+
+如果 LLM 解析后 `report.tables` 为空，系统会新增一条 `warning`，字段为“数据表识别”。这类报告不能因为“0 个计算错误”而判定通过，常见原因包括：
+
+- PDF 不是监测报告，例如设计说明、汇报材料或规范文档
+- 文本层/OCR 没有提取到可计算的监测数据表
+- LLM 分块解析失败或表格列映射失败
+
+报告结论会显示“需复核”，并把疑似来源标为 `extraction`。
+
 #### LLM 语义匹配 (`_build_semantic_maps`)
 
 这是解决"不同公司表述不同"的核心方案。
@@ -655,13 +680,21 @@ if 报告标"报警" but 应为"正常" → warning（过严不算大错）
 # 建筑变形监测报告检查报告
 - 生成时间、项目名称、监测单位、报告编号、监测日期
 ## 检查结果统计 (错误/警告/提示表格)
-## 数据提取摘要 (阈值/汇总/数据表列表)
+## 数据提取摘要 (阈值/汇总/数据表列表、OCR/LLM 分块诊断)
 ## 计算验证结果 (错误/警告/提示分组)
 ## 统计验证结果
 ## 逻辑检查结果
 ## 补充审核意见 (可选)
 ## 结论
 ```
+
+报告结论区分三种状态：
+
+- `0 error + 0 warning`：自动检查通过
+- `0 error + warning/info`：未发现硬错误，但结果为“需复核”，不能直接判定完全通过
+- `error > 0`：发现计算/统计/逻辑错误，建议复核
+
+Markdown 表格单元格会转义 `|` 并把换行替换为 `<br>`，避免 OCR 文本中的符号破坏报告表格。
 
 #### 多格式导出 (app.py)
 
@@ -920,7 +953,7 @@ class StreamlitLogHandler(logging.Handler):
    - 使用多轮对话让 LLM 自检提取结果
 3. **批量处理能力**：支持一次上传多个 PDF，批量检查并汇总结果
 4. **持久化存储**：当前检查结果只保存为文件，应支持数据库存储，方便历史对比
-5. **单元测试覆盖**：当前缺少自动化测试，应为每个 checker 编写单元测试
+5. **黄金样本集**：当前已有单元测试和根目录 PDF 回归，但仍需沉淀更多带人工标注的 golden JSON/Markdown 结果，便于量化准确率
 
 ### 中优先级
 
@@ -936,7 +969,7 @@ class StreamlitLogHandler(logging.Handler):
 12. **多语言支持**：目前仅支持中文报告
 13. **Web API 化**：提供 REST API 接口，方便集成到其他系统
 14. **权限管理**：多用户场景下的权限控制
-15. **缓存机制**：对相同 PDF 的重复检查使用缓存，避免重复 LLM 调用
+15. **结果看板**：批量任务的耗时、错误数、警告数和可核对性结论可进一步做成 Web 端汇总看板
 
 ### 性能优化
 
@@ -952,41 +985,36 @@ class StreamlitLogHandler(logging.Handler):
 
 | PDF 文件 | 页数 | 特点 | 已测试 |
 |---------|------|------|--------|
-| 监测报告检查（测试）.pdf | 19 | 文字版，含人工植入的错误，有对比基准（docx） | ✅ |
-| 恒大中心基坑支护工程地铁监测报告第209期 | ~60 | 大文档(138K字符)，需要分块处理 | ✅ |
-| 红土创新广场项目基坑监测报告第133期 | ~50 | 大量深层位移表，曾触发大量误报 | ✅ |
+| 监测报告检查（测试）.pdf | 19 | 文字版，含人工植入的错误，有对比基准（docx） | 已回归 |
+| 【监测2023011-017】鱼珠乐天智能科技创新中心(1).pdf | 19 | 常规基坑监测报告，含多类位移/水位/内力表 | 已回归 |
+| 恒大中心基坑支护工程地铁监测报告第209期（第3616次）.pdf | 99 | 大文档(约 136K 字符)，需要稳定分块处理 | 已回归 |
+| 红土创新广场项目基坑监测报告第133期-hb.pdf | 22 | 深层位移/支撑轴力等复合表格 | 已回归 |
+| 设计的完整说明1.pdf | 23 | 非监测报告负样本，用于验证“0 表不能通过”防线 | 已回归 |
 
-### 最近一次测试结果（监测报告检查（测试）.pdf）
+### 最近一次批量回归（2026-05-13）
 
-```
-项目名称: 智能科技创新中心
-数据表: 12 张
-阈值: 11 项
-汇总: 7 项
+命令基线：`python main.py <pdf> --no-ocr --no-self-verify --no-ai-review --model MiniMax-M2.7-highspeed`，输出目录 `output/batch_fast_after_refactor_20260513/`。
 
-检查结果:
-- 错误: 8 个
-- 警告: 26 个
-- 提示: 0 个
+| PDF | 识别表数 | error | warning | info | 耗时(s) | 结论 |
+|-----|---------:|------:|--------:|-----:|--------:|------|
+| 【监测2023011-017】鱼珠乐天智能科技创新中心(1).pdf | 12 | 0 | 4 | 11 | 135.2 | 需复核 |
+| 恒大中心基坑支护工程地铁监测报告第209期（第3616次）.pdf | 15 | 0 | 28 | 0 | 1425.2 | 需复核 |
+| 红土创新广场项目基坑监测报告第133期-hb.pdf | 12 | 1 | 8 | 0 | 228.3 | 发现错误 |
+| 监测报告检查（测试）.pdf | 11 | 0 | 3 | 9 | 198.8 | 需复核 |
+| 设计的完整说明1.pdf | 0 | 0 | 1 | 0 | 18.2 | 负样本防线生效 |
 
-发现的错误:
-1. [竖向位移] S7 负方向最大统计：所有累计值均为非负值，但报告有负方向最大
-2. [周边地面沉降] D2 正方向最大统计：所有累计值均为非正值，但报告有正方向最大
-3. [周边地面沉降] D5 最大速率统计：实际最大速率测点为 D5，但报告写 D2
-4. [管线沉降] G2 正方向最大统计：同上
-5. [管线沉降] G5 最大速率统计：同上
-6-8. [深层位移] C1/C11/C5 负方向最大统计：方向性统计不一致
-```
+说明：`设计的完整说明1.pdf` 是非监测报告，系统应报告“未识别到可计算核对的监测数据表”，不能因为没有计算错误而判定通过。
 
 ### OCR 功能测试
 
 | 测试项 | 结果 | 说明 |
 |--------|------|------|
-| pdfplumber 提取文字版 PDF | ✅ 通过 | 9985 字符，提取完整 |
-| PaddleOCR table profile 调用 | ✅ 通过 | 19 页，已压缩为清洗后 Markdown 文本 |
-| OCR 清洗与图表去噪 | ✅ 通过 | 坐标轴行、图片行、重复曲线噪声可被剔除 |
-| 多页统计合并 | ✅ 通过 | 同监测项跨页统计按组内合并后判定 |
-| LLM 超时容错 | ✅ 通过 | 配置增强/自验证超时不影响主流程 |
+| pdfplumber 提取文字版 PDF | 通过 | 5 个根目录 PDF 均可完成 fast 回归 |
+| PaddleOCR 异步 API | 通过 | 鱼珠 19 页实测成功，任务轮询完成，106651 原始字符清洗为 11632 字符 |
+| OCR debug/cache | 通过 | 缓存键包含 PDF SHA256、Paddle 模型、profile 指纹和清洗器版本；同一 PDF 二次提取 `ocr_cache_hit=True` |
+| OCR 清洗与图表去噪 | 通过 | 坐标轴行、图片行、重复曲线噪声可被剔除 |
+| 多页统计合并 | 通过 | 同监测项跨页统计按组内合并后判定 |
+| LLM 分块容错 | 通过 | 默认 18000 字符分块，超长单页会二次切分，并在报告中记录分块成功/失败数 |
 
 ---
 

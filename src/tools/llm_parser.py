@@ -128,18 +128,19 @@ def _text(v) -> str:
 
 
 def _cat(s: str) -> MonitoringCategory:
-    mapping = {
-        "水平位移": MonitoringCategory.HORIZONTAL_DISP,
-        "竖向位移": MonitoringCategory.VERTICAL_DISP,
-        "沉降": MonitoringCategory.SETTLEMENT,
-        "水位": MonitoringCategory.WATER_LEVEL,
-        "锚索拉力": MonitoringCategory.ANCHOR_FORCE,
-        "支撑轴力": MonitoringCategory.STRUT_FORCE,
-        "深层水平位移": MonitoringCategory.DEEP_HORIZONTAL,
-        "测斜": MonitoringCategory.PILE_INCLINE,
-        "裂缝": MonitoringCategory.CRACK,
-    }
-    for k, v in mapping.items():
+    mapping = [
+        ("深层水平位移", MonitoringCategory.DEEP_HORIZONTAL),
+        ("支护桩测斜", MonitoringCategory.PILE_INCLINE),
+        ("锚索拉力", MonitoringCategory.ANCHOR_FORCE),
+        ("支撑轴力", MonitoringCategory.STRUT_FORCE),
+        ("水平位移", MonitoringCategory.HORIZONTAL_DISP),
+        ("竖向位移", MonitoringCategory.VERTICAL_DISP),
+        ("沉降", MonitoringCategory.SETTLEMENT),
+        ("水位", MonitoringCategory.WATER_LEVEL),
+        ("测斜", MonitoringCategory.PILE_INCLINE),
+        ("裂缝", MonitoringCategory.CRACK),
+    ]
+    for k, v in mapping:
         if k in s:
             return v
     return MonitoringCategory.OTHER
@@ -231,59 +232,90 @@ def _build_report(data: dict) -> MonitoringReport:
     return r
 
 
-def _split_chunks(text: str, max_chars: int = 28000) -> list[str]:
+def _split_long_text(text: str, max_chars: int, overlap: int = 500) -> list[str]:
+    if len(text) <= max_chars:
+        return [text]
+
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = min(start + max_chars, len(text))
+        if end < len(text):
+            break_point = text.rfind("\n", start + max_chars - min(2000, max_chars // 3), end)
+            if break_point > start:
+                end = break_point
+        chunks.append(text[start:end])
+        if end >= len(text):
+            break
+        start = max(end - overlap, start + 1)
+    return chunks
+
+
+def _pack_segments(segments: list[str], max_chars: int) -> list[str]:
+    chunks, cur = [], ""
+    for segment in segments:
+        if len(segment) > max_chars:
+            if cur:
+                chunks.append(cur)
+                cur = ""
+            chunks.extend(_split_long_text(segment, max_chars))
+            continue
+        if len(cur) + len(segment) > max_chars and cur:
+            chunks.append(cur)
+            cur = segment
+        else:
+            cur += segment
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
+def _split_chunks(text: str, max_chars: int | None = None) -> list[str]:
     """
     Multi-strategy text splitting:
     1. Try page markers (--- 第 N 页)
     2. Try table boundaries (【xxx】监测数据)
     3. Fallback: character-count split with overlap
     """
+    max_chars = max_chars or getattr(cfg, "LLM_PARSE_CHUNK_CHARS", 18000)
+
     pages = re.split(r"(?=--- 第 \d+ 页)", text)
     pages = [p for p in pages if p.strip()]
 
     if len(pages) > 1:
-        chunks, cur = [], ""
-        for p in pages:
-            if len(cur) + len(p) > max_chars and cur:
-                chunks.append(cur)
-                cur = p
-            else:
-                cur += p
-        if cur:
-            chunks.append(cur)
+        chunks = _pack_segments(pages, max_chars)
         if chunks:
             return chunks
 
     table_sections = re.split(r"(?=【[^】]+】.*?(?:监测|成果|数据))", text)
     table_sections = [s for s in table_sections if s.strip()]
     if len(table_sections) > 1:
-        chunks, cur = [], ""
-        for s in table_sections:
-            if len(cur) + len(s) > max_chars and cur:
-                chunks.append(cur)
-                cur = s
-            else:
-                cur += s
-        if cur:
-            chunks.append(cur)
+        chunks = _pack_segments(table_sections, max_chars)
         if chunks:
             return chunks
 
-    if len(text) <= max_chars:
-        return [text]
+    return _split_long_text(text, max_chars) or [text]
 
-    overlap = 500
-    chunks = []
-    start = 0
-    while start < len(text):
-        end = start + max_chars
-        if end < len(text):
-            break_point = text.rfind("\n", start + max_chars - 2000, end)
-            if break_point > start:
-                end = break_point
-        chunks.append(text[start:end])
-        start = end - overlap
-    return chunks if chunks else [text]
+
+def _record_key(item: dict, key_fields: tuple[str, ...]) -> str:
+    values = [str(item.get(field, "")).strip() for field in key_fields]
+    if any(values):
+        return "|".join(values)
+    return json.dumps(item, ensure_ascii=False, sort_keys=True)
+
+
+def _merge_records(existing: list[dict], new_items: list[dict], key_fields: tuple[str, ...]) -> list[dict]:
+    merged = list(existing or [])
+    seen = {_record_key(item, key_fields) for item in merged if isinstance(item, dict)}
+    for item in new_items or []:
+        if not isinstance(item, dict):
+            continue
+        key = _record_key(item, key_fields)
+        if key in seen:
+            continue
+        merged.append(item)
+        seen.add(key)
+    return merged
 
 
 def parse_report_with_llm(raw_text: str) -> MonitoringReport:
@@ -291,6 +323,7 @@ def parse_report_with_llm(raw_text: str) -> MonitoringReport:
     logger.info("文本分为 %d 个片段发送给 LLM", len(chunks))
     all_tables, first = [], {}
     success_count = 0
+    parse_failures = 0
     for i, chunk in enumerate(chunks):
         logger.info("正在处理第 %d/%d 段 (%d字符)...", i + 1, len(chunks), len(chunk))
         msg = (
@@ -302,18 +335,20 @@ def parse_report_with_llm(raw_text: str) -> MonitoringReport:
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": msg},
             ],
-            timeout=300,
-            max_tokens=32000,
+            timeout=getattr(cfg, "LLM_PARSE_TIMEOUT_SEC", 300),
+            max_tokens=getattr(cfg, "LLM_PARSE_MAX_TOKENS", 24000),
             max_retries=getattr(cfg, "LLM_MAX_RETRIES", 2),
             temperature=0.1,
         )
         if raw is None:
             logger.error("第%d段LLM调用失败: 所有重试均未成功", i + 1)
+            parse_failures += 1
             continue
         try:
             parsed = _extract_json_from_response(raw)
         except (json.JSONDecodeError, ValueError) as e:
             logger.error("第%d段JSON解析失败: %s", i + 1, e)
+            parse_failures += 1
             continue
         success_count += 1
         if not first:
@@ -323,8 +358,10 @@ def parse_report_with_llm(raw_text: str) -> MonitoringReport:
                 existing = first.get(key, [])
                 new_items = parsed.get(key, [])
                 if key in ("thresholds", "summary_items"):
-                    if new_items and not existing:
-                        first[key] = new_items
+                    if key == "thresholds":
+                        first[key] = _merge_records(existing, new_items, ("item_name",))
+                    else:
+                        first[key] = _merge_records(existing, new_items, ("monitoring_item",))
                 elif new_items and not existing:
                     first[key] = new_items
         all_tables.extend(parsed.get("tables", []))
@@ -333,6 +370,9 @@ def parse_report_with_llm(raw_text: str) -> MonitoringReport:
     first["tables"] = all_tables
     report = _build_report(first)
     report.raw_text = raw_text
+    report.extraction_diagnostics["llm_chunk_count"] = len(chunks)
+    report.extraction_diagnostics["llm_chunk_success_count"] = success_count
+    report.extraction_diagnostics["llm_chunk_parse_failures"] = parse_failures
     logger.info(
         "解析完成: %s, %d张表, %d阈值, %d汇总",
         report.project_name, len(report.tables),

@@ -18,6 +18,19 @@ from src.tools.self_verifier import verify_errors_with_llm
 
 
 class LogicCheckerTests(unittest.TestCase):
+    def test_no_tables_is_reported_as_extraction_warning(self):
+        report = MonitoringReport(
+            raw_text="这是一份说明性 PDF，不包含监测数据表。",
+            extraction_diagnostics={"method": "pdfplumber", "clean_chars": 32},
+        )
+
+        issues = run_logic_checks(report)
+
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0].severity, "warning")
+        self.assertEqual(issues[0].field_name, "数据表识别")
+        self.assertEqual(issues[0].suspected_source, "extraction")
+
     def test_summary_consistency_respects_positive_negative_direction(self):
         table = MonitoringTable(
             monitoring_item="支护结构顶部水平位移",

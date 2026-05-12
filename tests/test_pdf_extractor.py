@@ -174,6 +174,60 @@ class PdfExtractorTests(unittest.TestCase):
         ):
             self.assertIs(pdf_extractor._call_paddle_ocr("x.pdf", {}), legacy_result)
 
+    def test_paddle_debug_cache_skips_remote_call_when_fingerprint_matches(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pdf_path = Path(tmp_dir) / "sample.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n")
+            cache_dir = Path(tmp_dir) / "ocr_debug"
+            page_stats = [{
+                "page": 1,
+                "raw_chars": 12,
+                "clean_chars": 11,
+                "plain_chars": 11,
+                "markup_chars": 1,
+                "markup_ratio": 0.1,
+                "line_count": 1,
+                "table_count": 0,
+                "dropped_table_count": 0,
+                "table_rows": 0,
+                "table_cells": 0,
+                "chart_noise_lines_removed": 0,
+                "markdown_images": 0,
+                "output_images": 0,
+            }]
+            pdf_extractor._write_debug_artifacts(
+                str(cache_dir),
+                raw_pages=["raw markdown"],
+                clean_pages=["clean page"],
+                page_stats=page_stats,
+                request_profile={
+                    "selected_profile": "table",
+                    "profile_fingerprint": pdf_extractor._profile_fingerprint(
+                        pdf_extractor.PADDLE_TABLE_PROFILE
+                    ),
+                    "ocr_cleaner_version": pdf_extractor.OCR_CLEANER_VERSION,
+                    "paddle_api": "async",
+                    "paddle_model": "PaddleOCR-VL-1.5",
+                    "pdf_fingerprint": pdf_extractor._pdf_fingerprint(str(pdf_path)),
+                },
+                selected_profile="table",
+            )
+
+            with (
+                patch.object(pdf_extractor, "PADDLE_OCR_USE_CACHE", True),
+                patch.object(pdf_extractor, "_call_paddle_ocr", side_effect=AssertionError("remote call")),
+            ):
+                result = pdf_extractor._extract_with_paddle_profile(
+                    str(pdf_path),
+                    "table",
+                    pdf_extractor.PADDLE_TABLE_PROFILE,
+                    str(cache_dir),
+                )
+
+        self.assertEqual(result.pages, ["clean page"])
+        self.assertTrue(result.diagnostics["ocr_cache_hit"])
+        self.assertEqual(result.diagnostics["page_count"], 1)
+
     def test_minimax_models_are_available(self):
         self.assertIn("MiniMax-M2.7", config.AVAILABLE_MODELS)
         self.assertIn("MiniMax-M2.7-highspeed", config.AVAILABLE_MODELS)

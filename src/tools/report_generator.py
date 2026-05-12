@@ -58,6 +58,11 @@ def generate_report_md(
 
     if error_count == 0 and warning_count == 0:
         lines.append("> 检查通过，未发现错误或警告。\n")
+    elif error_count == 0:
+        lines.append(
+            f"> 未发现计算错误，但发现 **{warning_count}** 个警告和 "
+            f"**{info_count}** 个提示，建议复核后再判定通过。\n"
+        )
     elif error_count > 0:
         lines.append(f"> 发现 **{error_count}** 个计算错误，请重点关注。\n")
     if source_counter:
@@ -108,6 +113,13 @@ def generate_report_md(
             lines.append(f"- HTML 过肥页: {page_text}{suffix}")
         if abnormal_table_count:
             lines.append(f"- 疑似提取异常表: {abnormal_table_count} 张")
+        llm_chunk_count = diagnostics.get("llm_chunk_count")
+        if llm_chunk_count is not None:
+            success_count = diagnostics.get("llm_chunk_success_count", 0)
+            failures = diagnostics.get("llm_chunk_parse_failures", 0)
+            lines.append(
+                f"- LLM 解析分块: {success_count}/{llm_chunk_count} 成功，失败 {failures} 段"
+            )
         if debug_dir:
             lines.append(f"- OCR 调试目录: `{debug_dir}`")
     lines.append("")
@@ -120,7 +132,10 @@ def generate_report_md(
             if t.borehole_id:
                 name += f" ({t.borehole_id})"
             pts = len(t.points) if t.points else len(t.deep_points)
-            lines.append(f"| {i} | {name} | {t.category.value} | {pts} | {t.monitor_date} |")
+            lines.append(
+                f"| {i} | {_md_cell(name)} | {_md_cell(t.category.value)} | "
+                f"{pts} | {_md_cell(t.monitor_date)} |"
+            )
         lines.append("")
         if report.table_extraction_flags:
             lines.append("### 提取质量提示\n")
@@ -185,8 +200,13 @@ def generate_report_md(
     if report.conclusion:
         lines.append(f"**报告原文结论**: {report.conclusion}\n")
 
-    if error_count == 0:
+    if error_count == 0 and warning_count == 0:
         lines.append("**自动检查结论**: 监测报告数据计算与统计结果验证通过。\n")
+    elif error_count == 0:
+        lines.append(
+            f"**自动检查结论**: 未发现计算错误，但存在 {warning_count} 处警告和 "
+            f"{info_count} 处提示；当前结果应视为“需复核”，不能直接判定为完全通过。\n"
+        )
     else:
         lines.append(
             f"**自动检查结论**: 发现 {error_count} 处计算错误和 "
@@ -216,8 +236,8 @@ def _section(lines: list[str], title: str, issues: list[CheckIssue]) -> None:
         lines.append("|---|------|------|------|------|")
         for idx, issue in enumerate(errors, 1):
             lines.append(
-                f"| {idx} | {issue.table_name} | {issue.point_id} | "
-                f"{issue.field_name} | {_issue_message(issue)} |"
+                f"| {idx} | {_md_cell(issue.table_name)} | {_md_cell(issue.point_id)} | "
+                f"{_md_cell(issue.field_name)} | {_md_cell(_issue_message(issue))} |"
             )
         lines.append("")
 
@@ -227,8 +247,8 @@ def _section(lines: list[str], title: str, issues: list[CheckIssue]) -> None:
         lines.append("|---|------|------|------|------|")
         for idx, issue in enumerate(warnings, 1):
             lines.append(
-                f"| {idx} | {issue.table_name} | {issue.point_id} | "
-                f"{issue.field_name} | {_issue_message(issue)} |"
+                f"| {idx} | {_md_cell(issue.table_name)} | {_md_cell(issue.point_id)} | "
+                f"{_md_cell(issue.field_name)} | {_md_cell(_issue_message(issue))} |"
             )
         lines.append("")
 
@@ -241,6 +261,11 @@ def _section(lines: list[str], title: str, issues: list[CheckIssue]) -> None:
 
 def _issue_message(issue: CheckIssue) -> str:
     return append_issue_source_hint(issue.message, issue.suspected_source)
+
+
+def _md_cell(value: object) -> str:
+    text = "" if value is None else str(value)
+    return text.replace("\r", "").replace("\n", "<br>").replace("|", "\\|")
 
 
 def save_report(md_content: str, output_path: str) -> str:

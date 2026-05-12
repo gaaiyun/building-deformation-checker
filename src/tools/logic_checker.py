@@ -183,6 +183,37 @@ def _find_matched_tables(report: MonitoringReport, summary_item_name: str) -> li
 
 # ── Check Functions ──────────────────────────────────────────
 
+def check_report_extractability(report: MonitoringReport, issues: list[CheckIssue]) -> None:
+    """Flag reports where extraction produced no verifiable monitoring table."""
+    if report.tables:
+        return
+
+    diagnostics = report.extraction_diagnostics or {}
+    method = diagnostics.get("method", "unknown")
+    selected_profile = diagnostics.get("selected_profile", "")
+    detail = f"提取方式: {method}"
+    if selected_profile:
+        detail += f" ({selected_profile})"
+    if diagnostics.get("clean_chars") is not None:
+        detail += f"，清洗后文本 {diagnostics.get('clean_chars')} 字符"
+    if diagnostics.get("llm_chunk_parse_failures"):
+        detail += f"，LLM 分块解析失败 {diagnostics.get('llm_chunk_parse_failures')} 段"
+
+    issues.append(CheckIssue(
+        severity="warning",
+        table_name="报告整体",
+        point_id="ALL",
+        field_name="数据表识别",
+        expected_value="至少 1 张可核对的监测数据表",
+        actual_value="0 张",
+        message=(
+            "未识别到可计算核对的监测数据表，不能将“0 个错误”等同于报告通过。"
+            f"请确认 PDF 是否为监测报告、是否需要启用 OCR，或检查提取调试目录。{detail}"
+        ),
+        suspected_source="extraction",
+    ))
+
+
 def check_safety_status(report: MonitoringReport, issues: list[CheckIssue]) -> None:
     for table_index, table in enumerate(report.tables):
         threshold = _find_threshold_semantic(report, table.monitoring_item)
@@ -401,6 +432,10 @@ def check_point_count(report: MonitoringReport, issues: list[CheckIssue]) -> Non
 
 def run_logic_checks(report: MonitoringReport) -> list[CheckIssue]:
     issues: list[CheckIssue] = []
+
+    check_report_extractability(report, issues)
+    if not report.tables:
+        return issues
 
     logger.info("=== 语义匹配 ===")
     _build_semantic_maps(report)

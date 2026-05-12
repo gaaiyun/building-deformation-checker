@@ -405,6 +405,10 @@ def enrich_configs_with_llm(report: MonitoringReport) -> None:
             continue
         if not table.points:
             continue
+        cfg = table.verification_config
+        if cfg.unit_conversion == 1000.0 or not cfg.initial_value_reliable:
+            logger.info("表 [%s] 异常已由本地单位/基准规则解释，跳过 LLM 配置增强", table.monitoring_item)
+            continue
         sample = table.points[0]
         has_initial = sample.initial_value is not None
         has_cumulative = sample.cumulative_change is not None

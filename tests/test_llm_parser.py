@@ -1,10 +1,73 @@
+import json
 import unittest
 from unittest.mock import patch
 
-from src.tools.llm_parser import parse_report_with_llm
+from src.models.data_models import MonitoringCategory
+from src.tools.llm_parser import _split_chunks, parse_report_with_llm
 
 
 class LlmParserTests(unittest.TestCase):
+    def test_split_chunks_never_returns_oversized_single_page(self):
+        raw_text = "--- 第 1 页 ---\n" + ("A" * 23000) + "\n--- 第 2 页 ---\nB"
+
+        chunks = _split_chunks(raw_text, max_chars=8000)
+
+        self.assertGreater(len(chunks), 2)
+        self.assertTrue(all(len(chunk) <= 8000 for chunk in chunks))
+
+    def test_parse_report_merges_thresholds_and_summary_across_chunks(self):
+        first_chunk = {
+            "project_name": "项目A",
+            "monitoring_company": "",
+            "report_number": "",
+            "monitoring_period": "",
+            "monitoring_date": "",
+            "interval_days": None,
+            "thresholds": [{"item_name": "水平位移", "warning_value": 10, "control_value": 20, "rate_limit": 2}],
+            "summary_items": [{"monitoring_item": "水平位移", "negative_max": "", "negative_max_id": "", "positive_max": "", "positive_max_id": "", "max_rate": "", "max_rate_id": "", "safety_status": ""}],
+            "tables": [],
+            "conclusion": "",
+        }
+        second_chunk = {
+            **first_chunk,
+            "thresholds": [{"item_name": "深层水平位移", "warning_value": 15, "control_value": 25, "rate_limit": 3}],
+            "summary_items": [{"monitoring_item": "深层水平位移", "negative_max": "", "negative_max_id": "", "positive_max": "", "positive_max_id": "", "max_rate": "", "max_rate_id": "", "safety_status": ""}],
+            "tables": [
+                {
+                    "monitoring_item": "测斜孔",
+                    "category": "深层水平位移",
+                    "monitor_date": "",
+                    "monitor_count": "",
+                    "point_count": 1,
+                    "equipment_type": "",
+                    "equipment_model": "",
+                    "borehole_id": "CX1",
+                    "borehole_depth": None,
+                    "table_unit": "mm",
+                    "initial_value_reliable": True,
+                    "points": [],
+                    "deep_points": [{"depth": 1, "previous_cumulative": 0, "current_cumulative": 1, "current_change": 1, "change_rate": None}],
+                    "statistics": {},
+                }
+            ],
+        }
+
+        with (
+            patch("src.tools.llm_parser._split_chunks", return_value=["chunk-1", "chunk-2"]),
+            patch(
+                "src.tools.llm_parser.call_chat_completion",
+                side_effect=[
+                    json.dumps(first_chunk, ensure_ascii=False),
+                    json.dumps(second_chunk, ensure_ascii=False),
+                ],
+            ),
+        ):
+            report = parse_report_with_llm("ignored")
+
+        self.assertEqual(len(report.thresholds), 2)
+        self.assertEqual(len(report.summary_items), 2)
+        self.assertEqual(report.tables[0].category, MonitoringCategory.DEEP_HORIZONTAL)
+
     def test_parse_report_with_llm_builds_report_from_successful_chunk(self):
         raw_text = "【支护结构顶部水平位移】监测数据成果表\nS1 0.0 1.0 1.0 0.1"
         llm_json = """
