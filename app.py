@@ -11,6 +11,7 @@
 import io
 import inspect
 import logging
+import os
 import tempfile
 import time
 from collections import defaultdict
@@ -31,14 +32,85 @@ class StreamlitLogHandler(logging.Handler):
 
 
 handler = StreamlitLogHandler()
+handler._streamlit_ui_handler = True
 handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S"))
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.INFO)
+for existing_handler in list(root_logger.handlers):
+    if getattr(existing_handler, "_streamlit_ui_handler", False):
+        root_logger.removeHandler(existing_handler)
 root_logger.addHandler(handler)
 logger = logging.getLogger("app")
 
 
 # ── 辅助函数（必须在 Streamlit UI 逻辑之前定义）─────────
+
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.lower() not in {"0", "false", "no", "off"}
+
+
+def _model_choices(current_model: str, available_models: list[str]) -> list[str]:
+    choices = list(dict.fromkeys([
+        current_model,
+        "MiniMax-M2.7-highspeed",
+        "MiniMax-M2.7",
+        *available_models,
+        "自定义模型",
+    ]))
+    return [choice for choice in choices if choice]
+
+
+def _apply_runtime_config(runtime: dict) -> None:
+    """把 Web UI 输入同步到 config 模块和环境变量，兼容已加载模块。"""
+    import src.config as cfg
+
+    cfg.LLM_API_KEY = runtime["llm_api_key"]
+    cfg.LLM_BASE_URL = runtime["llm_base_url"].rstrip("/")
+    cfg.LLM_MODEL = runtime["llm_model"]
+    cfg.LLM_PARSE_CHUNK_CHARS = int(runtime["llm_parse_chunk_chars"])
+    cfg.LLM_PARSE_MAX_TOKENS = int(runtime["llm_parse_max_tokens"])
+    cfg.LLM_PARSE_TIMEOUT_SEC = int(runtime["llm_parse_timeout_sec"])
+    cfg.LLM_TIMEOUT_NORMAL = int(runtime["llm_timeout_normal"])
+    cfg.PADDLE_OCR_TOKEN = runtime["paddle_ocr_token"]
+    cfg.PADDLE_OCR_MODEL = runtime["paddle_ocr_model"]
+    cfg.PADDLE_OCR_USE_ASYNC = bool(runtime["paddle_ocr_use_async"])
+    cfg.PADDLE_OCR_USE_CACHE = bool(runtime["paddle_ocr_use_cache"])
+    cfg.PADDLE_OCR_ENABLE_LEGACY_FALLBACK = bool(runtime["paddle_ocr_enable_legacy_fallback"])
+    cfg.PADDLE_OCR_POLL_TIMEOUT_SEC = float(runtime["paddle_ocr_poll_timeout_sec"])
+
+    os.environ["LLM_API_KEY"] = cfg.LLM_API_KEY
+    os.environ["LLM_BASE_URL"] = cfg.LLM_BASE_URL
+    os.environ["LLM_MODEL"] = cfg.LLM_MODEL
+    os.environ["PADDLE_OCR_TOKEN"] = cfg.PADDLE_OCR_TOKEN
+
+
+def _sync_pdf_extractor_runtime(pdf_extractor_module, runtime: dict) -> None:
+    """pdf_extractor 使用 from-config 常量导入，热更新时需要显式同步。"""
+    pdf_extractor_module.PADDLE_OCR_TOKEN = runtime["paddle_ocr_token"]
+    pdf_extractor_module.PADDLE_OCR_MODEL = runtime["paddle_ocr_model"]
+    pdf_extractor_module.PADDLE_OCR_USE_ASYNC = bool(runtime["paddle_ocr_use_async"])
+    pdf_extractor_module.PADDLE_OCR_USE_CACHE = bool(runtime["paddle_ocr_use_cache"])
+    pdf_extractor_module.PADDLE_OCR_ENABLE_LEGACY_FALLBACK = bool(runtime["paddle_ocr_enable_legacy_fallback"])
+    pdf_extractor_module.PADDLE_OCR_POLL_TIMEOUT_SEC = float(runtime["paddle_ocr_poll_timeout_sec"])
+
+
+def _render_log_tail(placeholder, max_lines: int = 12) -> None:
+    if not log_records:
+        placeholder.caption("等待运行日志...")
+        return
+    tail = "\n".join(log_records[-max_lines:])
+    placeholder.code(tail, language="text")
+
+
+def _result_state(errors: list, warnings: list, infos: list) -> tuple[str, str]:
+    if errors:
+        return "发现错误", "error"
+    if warnings or infos:
+        return "需复核", "warning"
+    return "通过", "success"
 
 def _call_with_optional_progress_callback(func, *args, progress_callback=None, **kwargs):
     """兼容旧签名：若目标函数不支持 progress_callback，则自动降级为无回调调用。"""
@@ -635,33 +707,124 @@ st.markdown("""
 
 # ── 侧边栏设置 ────────────────────────────────────────
 with st.sidebar:
+    import src.config as cfg
+
     st.header("运行设置")
 
+    with st.expander("LLM 兼容接口", expanded=True):
+        llm_base_url = st.text_input(
+            "Base URL",
+            value=os.getenv("LLM_BASE_URL", cfg.LLM_BASE_URL),
+            help="填写 OpenAI 兼容接口地址，例如 https://api.minimaxi.com/v1",
+        )
+        llm_api_key = st.text_input(
+            "API Key",
+            value=os.getenv("LLM_API_KEY", cfg.LLM_API_KEY),
+            type="password",
+            help="仅在本次 Streamlit 会话内使用，不会写入仓库。",
+        )
+        model_options = _model_choices(os.getenv("LLM_MODEL", cfg.LLM_MODEL), cfg.AVAILABLE_MODELS)
+        default_model = os.getenv("LLM_MODEL", cfg.LLM_MODEL)
+        model_index = model_options.index(default_model) if default_model in model_options else 0
+        model_choice = st.selectbox("模型", model_options, index=model_index)
+        custom_model = ""
+        if model_choice == "自定义模型":
+            custom_model = st.text_input("自定义模型 ID", value=default_model)
+        selected_model = custom_model.strip() or model_choice
+
+    with st.expander("解析性能", expanded=False):
+        llm_parse_chunk_chars = st.number_input(
+            "LLM 分块字符数",
+            min_value=6000,
+            max_value=40000,
+            value=int(getattr(cfg, "LLM_PARSE_CHUNK_CHARS", 18000)),
+            step=1000,
+            help="较小更稳，较大可能更快但更容易 JSON 截断。",
+        )
+        llm_parse_max_tokens = st.number_input(
+            "LLM 输出 token 上限",
+            min_value=4000,
+            max_value=64000,
+            value=int(getattr(cfg, "LLM_PARSE_MAX_TOKENS", 24000)),
+            step=1000,
+        )
+        llm_parse_timeout_sec = st.number_input(
+            "结构化解析超时(秒)",
+            min_value=60,
+            max_value=1200,
+            value=int(getattr(cfg, "LLM_PARSE_TIMEOUT_SEC", 300)),
+            step=30,
+        )
+        llm_timeout_normal = st.number_input(
+            "普通 LLM 调用超时(秒)",
+            min_value=30,
+            max_value=600,
+            value=int(getattr(cfg, "LLM_TIMEOUT_NORMAL", 120)),
+            step=30,
+        )
+
+    st.divider()
+    st.subheader("PDF 提取")
     ocr_mode = st.radio(
-        "PDF提取方式",
+        "提取方式",
         ["优先 pdfplumber", "优先 PaddleOCR（表格）", "强制 PaddleOCR"],
         index=0,
-        help="Web 默认先用 pdfplumber，文本质量不足时自动回退到 PaddleOCR；也可以显式优先或强制使用 OCR",
+        help="文字层 PDF 建议优先 pdfplumber；扫描件或错列严重时使用 PaddleOCR。",
     )
     use_ocr = ocr_mode == "强制 PaddleOCR"
     prefer_ocr = ocr_mode == "优先 PaddleOCR（表格）" or use_ocr
     auto_fallback = not use_ocr
 
-    st.divider()
-    st.subheader("模型")
-    from src.config import AVAILABLE_MODELS
-    selected_model = st.selectbox(
-        "结构化解析模型",
-        AVAILABLE_MODELS,
-        index=0,
-        help="不同模型在表格理解、语义匹配和复核速度上各有差异",
-    )
+    with st.expander("PaddleOCR 设置", expanded=prefer_ocr):
+        paddle_ocr_token = st.text_input(
+            "PaddleOCR Token",
+            value=os.getenv("PADDLE_OCR_TOKEN", cfg.PADDLE_OCR_TOKEN),
+            type="password",
+        )
+        paddle_ocr_model = st.selectbox(
+            "OCR 模型",
+            ["PaddleOCR-VL-1.5", "PaddleOCR-VL", "PP-StructureV3"],
+            index=["PaddleOCR-VL-1.5", "PaddleOCR-VL", "PP-StructureV3"].index(
+                os.getenv("PADDLE_OCR_MODEL", cfg.PADDLE_OCR_MODEL)
+                if os.getenv("PADDLE_OCR_MODEL", cfg.PADDLE_OCR_MODEL) in ["PaddleOCR-VL-1.5", "PaddleOCR-VL", "PP-StructureV3"]
+                else "PaddleOCR-VL-1.5"
+            ),
+        )
+        paddle_ocr_use_async = st.toggle("使用异步 OCR API", value=_bool_env("PADDLE_OCR_USE_ASYNC", cfg.PADDLE_OCR_USE_ASYNC))
+        paddle_ocr_use_cache = st.toggle("复用 OCR 调试缓存", value=_bool_env("PADDLE_OCR_USE_CACHE", getattr(cfg, "PADDLE_OCR_USE_CACHE", True)))
+        paddle_ocr_enable_legacy_fallback = st.toggle(
+            "异步失败时回退 legacy API",
+            value=_bool_env("PADDLE_OCR_ENABLE_LEGACY_FALLBACK", cfg.PADDLE_OCR_ENABLE_LEGACY_FALLBACK),
+        )
+        paddle_ocr_poll_timeout_sec = st.number_input(
+            "OCR 轮询超时(秒)",
+            min_value=60,
+            max_value=3600,
+            value=int(getattr(cfg, "PADDLE_OCR_POLL_TIMEOUT_SEC", 900)),
+            step=60,
+        )
 
     st.divider()
     st.subheader("可选复核")
-    do_self_verify = st.checkbox("LLM 复核错误项", value=False, help="按批次复核错误项，会显著增加等待时间")
-    do_ai_review = st.checkbox("LLM 最终审核", value=False, help="对整份报告做最终审阅，耗时最长")
-    st.caption("建议先查看确定性规则结果，必要时再开启复核。")
+    do_self_verify = st.checkbox("LLM 复核错误项", value=False, help="按批次复核 error 项，适合最终交付前开启。")
+    do_ai_review = st.checkbox("LLM 最终审核", value=False, help="对整份报告做最后审阅，耗时最长。")
+    st.caption("日常批量回归建议关闭两项复核，先看本地规则结论。")
+
+    runtime_config = {
+        "llm_base_url": llm_base_url,
+        "llm_api_key": llm_api_key,
+        "llm_model": selected_model,
+        "llm_parse_chunk_chars": int(llm_parse_chunk_chars),
+        "llm_parse_max_tokens": int(llm_parse_max_tokens),
+        "llm_parse_timeout_sec": int(llm_parse_timeout_sec),
+        "llm_timeout_normal": int(llm_timeout_normal),
+        "paddle_ocr_token": paddle_ocr_token,
+        "paddle_ocr_model": paddle_ocr_model,
+        "paddle_ocr_use_async": bool(paddle_ocr_use_async),
+        "paddle_ocr_use_cache": bool(paddle_ocr_use_cache),
+        "paddle_ocr_enable_legacy_fallback": bool(paddle_ocr_enable_legacy_fallback),
+        "paddle_ocr_poll_timeout_sec": int(paddle_ocr_poll_timeout_sec),
+    }
 
     st.divider()
     st.subheader("核心计算公式")
@@ -683,19 +846,34 @@ if uploaded is not None:
 
     pdf_name = Path(uploaded.name).stem
     st.success(f"已载入文件：**{uploaded.name}** ({uploaded.size / 1024:.0f} KB)")
+    can_run = all(
+        runtime_config[key].strip()
+        for key in ("llm_api_key", "llm_base_url", "llm_model")
+    )
+    if not can_run:
+        st.warning("请先在侧边栏填写 OpenAI 兼容 API Key、Base URL 和模型 ID。")
+    if prefer_ocr and not runtime_config["paddle_ocr_token"].strip():
+        st.warning("当前选择了 PaddleOCR，但尚未填写 PaddleOCR Token；如 OCR 调用失败会影响扫描件处理。")
 
-    if st.button("开始检查", type="primary", use_container_width=True):
+    if st.button(
+        "开始检查",
+        type="primary",
+        use_container_width=True,
+        disabled=not can_run,
+    ):
         log_records.clear()
 
-        # 运行时切换模型
-        from src.config import set_model
-        set_model(selected_model)
+        _apply_runtime_config(runtime_config)
 
         # ── 实时进度容器 ──────────────────────────────
         progress_bar = st.progress(0)
         phase_placeholder = st.empty()
-        status_container = st.status(f"正在处理（模型: {selected_model}）", expanded=True)
+        live_log_placeholder = st.empty()
+        status_container = st.status(f"正在处理（模型: {runtime_config['llm_model']}）", expanded=True)
         start_time = time.time()
+        with status_container:
+            st.write(f"LLM: {runtime_config['llm_model']} @ {runtime_config['llm_base_url']}")
+            st.write(f"PDF 提取: {ocr_mode}；OCR cache={'开启' if runtime_config['paddle_ocr_use_cache'] else '关闭'}")
 
         def update_phase(step_label: str, detail: str = "", progress: int | None = None) -> None:
             detail_html = f"<div class='phase-detail'>{detail}</div>" if detail else ""
@@ -705,6 +883,7 @@ if uploaded is not None:
             )
             if progress is not None:
                 progress_bar.progress(progress)
+            _render_log_tail(live_log_placeholder)
 
         try:
             # ━━ Step 1: PDF 提取 ━━━━━━━━━━━━━━━━━━━━━
@@ -712,8 +891,9 @@ if uploaded is not None:
             with status_container:
                 st.write("Step 1/8 · 提取 PDF 内容")
 
-            from src.tools.pdf_extractor import extract_pdf
-            extraction_result = extract_pdf(
+            from src.tools import pdf_extractor
+            _sync_pdf_extractor_runtime(pdf_extractor, runtime_config)
+            extraction_result = pdf_extractor.extract_pdf(
                 tmp_path,
                 use_ocr=use_ocr,
                 prefer_ocr=prefer_ocr,
@@ -982,12 +1162,20 @@ if uploaded is not None:
             errors = [i for i in all_issues if i.severity == "error"]
             warnings = [i for i in all_issues if i.severity == "warning"]
             infos = [i for i in all_issues if i.severity == "info"]
+            state_label, state_kind = _result_state(errors, warnings, infos)
 
             st.markdown("---")
             st.subheader("检查结果总览")
+            if state_kind == "error":
+                st.error(f"结论：{state_label}。发现 {len(errors)} 条 error，请优先复核。")
+            elif state_kind == "warning":
+                st.warning(f"结论：{state_label}。未发现 error，但存在 warning/info，不能直接判定完全通过。")
+            else:
+                st.success("结论：通过。未发现 error 或 warning。")
 
             # ── 指标卡片 ──────────────────────────────
-            c1, c2, c3, c4, c5 = st.columns(5)
+            c0, c1, c2, c3, c4, c5 = st.columns(6)
+            c0.metric("结论", state_label)
             c1.metric("数据表", f"{len(report.tables)} 张")
             c2.metric("错误", f"{len(errors)}", delta=f"-{len(errors)}" if errors else None, delta_color="inverse")
             c3.metric("警告", f"{len(warnings)}")
