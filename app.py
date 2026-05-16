@@ -19,6 +19,10 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
+# .env 加载必须在导入 src.* 之前，让全局配置读到环境变量
+from src.utils.dotenv_loader import load_dotenv  # noqa: E402
+load_dotenv()
+
 import streamlit as st
 
 from src.core import PipelineResult, RuntimeConfig, run_pipeline
