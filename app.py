@@ -1,150 +1,164 @@
-"""
-建筑变形监测报告检查智能体 — Streamlit Web UI
+"""建筑变形监测报告检查智能体 — Streamlit Web UI v2
 
-功能:
-- 上传PDF监测报告，自动提取数据并检查
-- 实时进度与日志显示
-- 多格式导出（Markdown / Word / HTML）
-- 分类展示检查结果
+重写要点（修复 v1 全部 3 个 bug）：
+1. 全状态走 st.session_state，浏览器 tab 切换 / 重连不丢
+2. 后台 threading.Thread 跑流水线，主脚本 rerun 不会杀任务
+3. st.download_button 触发 rerun 后界面保持完成态，可继续导出/换 PDF
 """
+
+from __future__ import annotations
 
 import io
-import inspect
 import logging
 import os
 import tempfile
+import threading
 import time
+import uuid
 from collections import defaultdict
-from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import streamlit as st
+
+from src.core import PipelineResult, RuntimeConfig, run_pipeline
+from src.tools.export_formats import generate_docx, generate_html
 from src.tools.extraction_quality import append_issue_source_hint
 
-# ── 日志配置：捕获到 StreamHandler 供界面显示 ──────────
-log_records: list[str] = []
 
+# ── 日志：通过 list 串接到 session_state ──────────────────────
+class _ListLogHandler(logging.Handler):
+    def __init__(self, target_list: list):
+        super().__init__()
+        self._target = target_list
 
-class StreamlitLogHandler(logging.Handler):
-    """把日志记录收集到列表，供 UI 实时展示"""
     def emit(self, record):
-        log_records.append(self.format(record))
+        try:
+            self._target.append(self.format(record))
+        except Exception:
+            self.handleError(record)
 
 
-handler = StreamlitLogHandler()
-handler._streamlit_ui_handler = True
-handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S"))
-root_logger = logging.getLogger()
-root_logger.setLevel(logging.INFO)
-for existing_handler in list(root_logger.handlers):
-    if getattr(existing_handler, "_streamlit_ui_handler", False):
-        root_logger.removeHandler(existing_handler)
-root_logger.addHandler(handler)
-logger = logging.getLogger("app")
+# ── 全局后台任务注册表（进程内单例，活在所有 rerun 之间）──────
+# 注意：Streamlit 1.55+ 的 rerun 会重新执行整个脚本，但模块级变量保留在内存中。
+# session_state 仍是首选，但 thread 句柄不能跨 session 共享，所以放在模块级 dict。
+_BACKGROUND_TASKS: dict[str, dict] = {}
+_TASKS_LOCK = threading.Lock()
 
 
-# ── 辅助函数（必须在 Streamlit UI 逻辑之前定义）─────────
-
-def _bool_env(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.lower() not in {"0", "false", "no", "off"}
+def _register_task(task_id: str, payload: dict) -> None:
+    with _TASKS_LOCK:
+        _BACKGROUND_TASKS[task_id] = payload
 
 
-def _model_choices(current_model: str, available_models: list[str]) -> list[str]:
-    choices = list(dict.fromkeys([
-        current_model,
-        "MiniMax-M2.7-highspeed",
-        "MiniMax-M2.7",
-        *available_models,
-        "自定义模型",
-    ]))
-    return [choice for choice in choices if choice]
+def _get_task(task_id: str) -> Optional[dict]:
+    with _TASKS_LOCK:
+        return _BACKGROUND_TASKS.get(task_id)
 
 
-def _apply_runtime_config(runtime: dict) -> None:
-    """把 Web UI 输入同步到 config 模块和环境变量，兼容已加载模块。"""
-    import src.config as cfg
-
-    cfg.LLM_API_KEY = runtime["llm_api_key"]
-    cfg.LLM_BASE_URL = runtime["llm_base_url"].rstrip("/")
-    cfg.LLM_MODEL = runtime["llm_model"]
-    cfg.LLM_PARSE_CHUNK_CHARS = int(runtime["llm_parse_chunk_chars"])
-    cfg.LLM_PARSE_MAX_TOKENS = int(runtime["llm_parse_max_tokens"])
-    cfg.LLM_PARSE_TIMEOUT_SEC = int(runtime["llm_parse_timeout_sec"])
-    cfg.LLM_TIMEOUT_NORMAL = int(runtime["llm_timeout_normal"])
-    cfg.PADDLE_OCR_TOKEN = runtime["paddle_ocr_token"]
-    cfg.PADDLE_OCR_MODEL = runtime["paddle_ocr_model"]
-    cfg.PADDLE_OCR_USE_ASYNC = bool(runtime["paddle_ocr_use_async"])
-    cfg.PADDLE_OCR_USE_CACHE = bool(runtime["paddle_ocr_use_cache"])
-    cfg.PADDLE_OCR_ENABLE_LEGACY_FALLBACK = bool(runtime["paddle_ocr_enable_legacy_fallback"])
-    cfg.PADDLE_OCR_POLL_TIMEOUT_SEC = float(runtime["paddle_ocr_poll_timeout_sec"])
-
-    os.environ["LLM_API_KEY"] = cfg.LLM_API_KEY
-    os.environ["LLM_BASE_URL"] = cfg.LLM_BASE_URL
-    os.environ["LLM_MODEL"] = cfg.LLM_MODEL
-    os.environ["PADDLE_OCR_TOKEN"] = cfg.PADDLE_OCR_TOKEN
+def _delete_task(task_id: str) -> None:
+    with _TASKS_LOCK:
+        _BACKGROUND_TASKS.pop(task_id, None)
 
 
-def _sync_pdf_extractor_runtime(pdf_extractor_module, runtime: dict) -> None:
-    """pdf_extractor 使用 from-config 常量导入，热更新时需要显式同步。"""
-    pdf_extractor_module.PADDLE_OCR_TOKEN = runtime["paddle_ocr_token"]
-    pdf_extractor_module.PADDLE_OCR_MODEL = runtime["paddle_ocr_model"]
-    pdf_extractor_module.PADDLE_OCR_USE_ASYNC = bool(runtime["paddle_ocr_use_async"])
-    pdf_extractor_module.PADDLE_OCR_USE_CACHE = bool(runtime["paddle_ocr_use_cache"])
-    pdf_extractor_module.PADDLE_OCR_ENABLE_LEGACY_FALLBACK = bool(runtime["paddle_ocr_enable_legacy_fallback"])
-    pdf_extractor_module.PADDLE_OCR_POLL_TIMEOUT_SEC = float(runtime["paddle_ocr_poll_timeout_sec"])
+# ── Session State 初始化 ─────────────────────────────────────
+def _init_state() -> None:
+    ss = st.session_state
+    if "task_id" not in ss:
+        ss.task_id = None
+    if "task_state" not in ss:
+        ss.task_state = "idle"  # idle / running / done / failed / cancelled
+    if "result" not in ss:
+        ss.result = None
+    if "pdf_path" not in ss:
+        ss.pdf_path = None
+    if "pdf_name" not in ss:
+        ss.pdf_name = None
+    if "log_lines" not in ss:
+        ss.log_lines = []
+    if "progress" not in ss:
+        ss.progress = {"step_id": "", "label": "", "percent": 0, "detail": ""}
 
 
-def _render_log_tail(placeholder, max_lines: int = 12) -> None:
-    if not log_records:
-        placeholder.caption("等待运行日志...")
+# ── 启动后台任务 ─────────────────────────────────────────────
+def _start_pipeline(cfg: RuntimeConfig) -> str:
+    task_id = uuid.uuid4().hex
+    progress_box = {"step_id": "init", "label": "排队中", "percent": 0, "detail": ""}
+    logs: list[str] = []
+    result_box: dict[str, Optional[PipelineResult]] = {"result": None}
+    cancel_event = threading.Event()
+
+    def progress_callback(step_id: str, label: str, percent: int, detail: str) -> None:
+        progress_box["step_id"] = step_id
+        progress_box["label"] = label
+        progress_box["percent"] = percent
+        progress_box["detail"] = detail
+
+    def worker():
+        log_handler = _ListLogHandler(logs)
+        log_handler.setLevel(logging.INFO)
+        log_handler.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S")
+        )
+        root = logging.getLogger()
+        root.addHandler(log_handler)
+        try:
+            result_box["result"] = run_pipeline(
+                cfg, progress_callback=progress_callback, cancel_event=cancel_event
+            )
+        except Exception as exc:
+            logging.getLogger(__name__).exception("后台流水线异常")
+            r = PipelineResult()
+            r.error_message = f"{type(exc).__name__}: {exc}"
+            result_box["result"] = r
+        finally:
+            root.removeHandler(log_handler)
+
+    thread = threading.Thread(target=worker, daemon=True, name=f"pipeline-{task_id[:8]}")
+    thread.start()
+
+    _register_task(task_id, {
+        "thread": thread,
+        "progress": progress_box,
+        "logs": logs,
+        "result_box": result_box,
+        "cancel_event": cancel_event,
+        "started_at": time.time(),
+    })
+    return task_id
+
+
+def _cancel_current_task() -> None:
+    tid = st.session_state.task_id
+    if not tid:
         return
-    tail = "\n".join(log_records[-max_lines:])
-    placeholder.code(tail, language="text")
+    task = _get_task(tid)
+    if task:
+        task["cancel_event"].set()
 
 
-def _result_state(errors: list, warnings: list, infos: list) -> tuple[str, str]:
-    if errors:
-        return "发现错误", "error"
-    if warnings or infos:
-        return "需复核", "warning"
-    return "通过", "success"
+# ── UI 辅助 ──────────────────────────────────────────────────
+def _render_log_tail(container, lines: list[str], max_lines: int = 12) -> None:
+    if not lines:
+        container.caption("等待运行日志...")
+        return
+    tail = "\n".join(lines[-max_lines:])
+    container.code(tail, language="text")
 
-def _call_with_optional_progress_callback(func, *args, progress_callback=None, **kwargs):
-    """兼容旧签名：若目标函数不支持 progress_callback，则自动降级为无回调调用。"""
-    if progress_callback is None:
-        return func(*args, **kwargs)
 
-    supports_progress = False
-    try:
-        supports_progress = "progress_callback" in inspect.signature(func).parameters
-    except (TypeError, ValueError):
-        supports_progress = False
-
-    if supports_progress:
-        return func(*args, progress_callback=progress_callback, **kwargs)
-
-    logger.warning("%s 不支持 progress_callback，已自动切换为兼容模式", getattr(func, "__name__", "callable"))
-    return func(*args, **kwargs)
-
-def _render_issues(title: str, issues: list) -> None:
-    """按表名分组展示检查问题"""
+def _render_issues_section(title: str, issues: list) -> None:
     if not issues:
-        st.success(f"{title}全部通过")
+        st.success(f"{title} - 全部通过")
         return
 
     errors = [i for i in issues if i.severity == "error"]
     warnings = [i for i in issues if i.severity == "warning"]
     infos = [i for i in issues if i.severity == "info"]
 
-    if errors:
-        st.error(f"发现 {len(errors)} 个错误")
-    if warnings:
-        st.warning(f"发现 {len(warnings)} 个警告")
-    if infos:
-        st.info(f"发现 {len(infos)} 个提示")
+    cols = st.columns(3)
+    cols[0].metric("错误", len(errors))
+    cols[1].metric("警告", len(warnings))
+    cols[2].metric("提示", len(infos))
 
     grouped = defaultdict(list)
     for issue in issues:
@@ -172,1137 +186,384 @@ def _render_issues(title: str, issues: list) -> None:
 
 
 def _render_extraction_diagnostics(report) -> None:
-    diagnostics = report.extraction_diagnostics or {}
+    diagnostics = getattr(report, "extraction_diagnostics", None) or {}
     if not diagnostics:
         return
-
     st.markdown("### 提取诊断")
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("原始字符", f"{diagnostics.get('raw_chars', 0):,}")
     c2.metric("清洗后字符", f"{diagnostics.get('clean_chars', 0):,}")
-    ratio = diagnostics.get("compression_ratio", 0.0)
-    c3.metric("压缩率", f"{ratio:.1%}")
+    c3.metric("压缩率", f"{diagnostics.get('compression_ratio', 0.0):.1%}")
     c4.metric("异常页", f"{len(diagnostics.get('high_markup_pages', []))}")
     c5.metric("异常表", f"{diagnostics.get('abnormal_table_count', 0)}")
-
     method = diagnostics.get("method", "unknown")
     profile = diagnostics.get("selected_profile", "")
-    label = f"{method} ({profile})" if profile else method
-    st.caption(f"提取方式: {label}")
-
-    attempts = diagnostics.get("attempts", [])
-    if attempts:
-        st.markdown("**提取尝试链路**")
-        for attempt in attempts:
-            if attempt.get("error"):
-                st.warning(f"{attempt['profile']}: {attempt['error']}")
-            else:
-                st.caption(
-                    f"{attempt['profile']}: clean={attempt.get('clean_chars', 0):,} chars, "
-                    f"pages={attempt.get('page_count', 0)}, "
-                    f"compression={attempt.get('compression_ratio', 0.0):.1%}"
-                )
-
-    high_markup_pages = diagnostics.get("high_markup_pages", [])
-    if high_markup_pages:
-        page_label = "，".join(str(page + 1) for page in high_markup_pages[:12])
-        suffix = " ..." if len(high_markup_pages) > 12 else ""
-        st.caption(f"高 markup 页: 第 {page_label} 页{suffix}")
-
-    debug_dir = diagnostics.get("debug_dir", "")
-    if debug_dir:
-        st.markdown("**OCR 调试目录**")
-        st.code(debug_dir, language=None)
-
-    flagged_tables = report.table_extraction_flags or {}
-    if flagged_tables:
-        st.markdown("**疑似提取异常表**")
-        for table_index, flags in sorted(flagged_tables.items()):
-            if table_index >= len(report.tables):
-                continue
-            table = report.tables[table_index]
-            table_name = table.monitoring_item
-            if table.borehole_id:
-                table_name += f" ({table.borehole_id})"
-            st.warning(f"{table_name}: {'；'.join(flags)}")
+    st.caption(f"提取方式: {method}" + (f" ({profile})" if profile else ""))
 
 
-def _render_analysis_plan(analysis_plan: list[dict]) -> None:
-    """ReAct 风格渲染每张表的分析计划：Thought → Observation → Action"""
-    if not analysis_plan:
+def _render_analysis_plan(plan: list[dict]) -> None:
+    if not plan:
         st.info("未生成分析计划")
         return
-
-    FIELD_LABELS = {
-        "initial_value": "初始值",
-        "previous_value": "上次值",
-        "current_value": "本次值",
-        "current_change": "本次变化",
-        "cumulative_change": "累计变化",
-        "change_rate": "速率",
-        "safety_status": "安全状态",
-        "depth": "深度",
-        "previous_cumulative": "上次累计",
-        "current_cumulative": "本次累计",
-    }
-
-    for plan in analysis_plan:
-        has_notes = bool(plan["special_notes"])
-        title_badge = " [需关注]" if has_notes else ""
-        expander_title = (
-            f"Table {plan['table_index']}: {plan['table_name']} "
-            f"({plan['category']} | {plan['point_count']}个测点){title_badge}"
-        )
-
-        with st.expander(expander_title, expanded=has_notes):
-            # ── Thought: 字段识别 ──────────────────────
-            st.markdown("**字段识别**")
-            fields = plan["fields_detected"]
-            if fields:
-                cols = st.columns(len(fields))
-                for i, (field_key, detected) in enumerate(fields.items()):
-                    label = FIELD_LABELS.get(field_key, field_key)
-                    status = "是" if detected else "否"
-                    cols[i].markdown(f"<div style='text-align:center'><b>{label}</b><br/>{status}</div>", unsafe_allow_html=True)
-            st.markdown("")
-
-            # ── Observation: 数据样本 ──────────────────
-            st.markdown("**数据样本**")
-            for sample in plan["data_sample"]:
-                st.code(sample, language=None)
-
-            # ── Observation: 单位与基准分析 ─────────────
-            st.markdown("**单位与基准分析**")
-            unit_text = f"单位: **{plan['unit']}**"
-            if plan["unit_conversion"] != 1.0:
-                unit_text += f" → mm (×{plan['unit_conversion']:.0f}转换)"
-            else:
-                unit_text += f" ({plan['conversion_note']})"
-            st.markdown(unit_text)
-
-            reliable_text = "可靠" if plan["initial_reliable"] else "需谨慎"
-            st.markdown(f"初始值: {reliable_text}，{plan['reliability_reason']}")
-
-            if plan["interval_days"]:
-                st.markdown(f"监测间隔: **{plan['interval_days']:.0f}天** ({plan['interval_source']})")
-            else:
-                st.markdown(f"监测间隔: {plan['interval_source']}")
-            st.markdown("")
-
-            # ── Action: 验证规则 ────────────────────────
-            st.markdown("**将执行的验证规则**")
-            for method in plan["verification_methods"]:
-                st.markdown(
-                    f"**{method['name']}** = `{method['formula']}`, "
-                    f"容差={method['tolerance']}, 级别={method['severity']}"
-                )
-
-            # ── 特殊说明 ────────────────────────────────
-            if plan["special_notes"]:
-                st.markdown("")
-                st.markdown("**特殊说明**")
-                for note in plan["special_notes"]:
-                    st.warning(note)
+    for p in plan:
+        notes = " ⚠️ " + "; ".join(p["special_notes"]) if p.get("special_notes") else ""
+        with st.expander(f"Table {p.get('table_index', '?')}: {p.get('table_name', '?')}{notes}",
+                         expanded=bool(p.get('special_notes'))):
+            cols = st.columns(3)
+            cols[0].markdown(f"**类别**: {p.get('category', '-')}")
+            cols[1].markdown(f"**测点**: {p.get('point_count', 0)}")
+            cols[2].markdown(f"**单位**: {p.get('unit', '-')}")
+            for m in p.get("verification_methods", []):
+                st.code(f"{m['name']}: {m['formula']}  (tol={m.get('tolerance', '-')}, severity={m.get('severity', '-')})",
+                        language=None)
 
 
-def _generate_docx(md_content: str, report, errors: list, warnings: list) -> bytes:
-    """生成 Word 文档"""
-    from docx import Document
-    from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.oxml import OxmlElement
-    from docx.oxml.ns import qn
-    from docx.shared import Cm, Pt, RGBColor
-
-    doc = Document()
-
-    def set_run_style(run, *, size: float = 10.5, bold: bool = False) -> None:
-        run.font.name = "Microsoft YaHei"
-        r_pr = run._element.get_or_add_rPr()
-        r_fonts = r_pr.rFonts
-        if r_fonts is None:
-            r_fonts = OxmlElement("w:rFonts")
-            r_pr.append(r_fonts)
-        r_fonts.set(qn("w:eastAsia"), "Microsoft YaHei")
-        run.font.size = Pt(size)
-        run.font.bold = bold
-        run.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
-
-    def style_paragraph(
-        paragraph,
-        *,
-        size: float = 10.5,
-        bold: bool = False,
-        align=WD_ALIGN_PARAGRAPH.LEFT,
-        space_before: float = 0,
-        space_after: float = 4,
-        line_spacing: float = 1.35,
-    ) -> None:
-        paragraph.alignment = align
-        paragraph.paragraph_format.space_before = Pt(space_before)
-        paragraph.paragraph_format.space_after = Pt(space_after)
-        paragraph.paragraph_format.line_spacing = line_spacing
-        if not paragraph.runs:
-            run = paragraph.add_run("")
-            set_run_style(run, size=size, bold=bold)
-        for run in paragraph.runs:
-            set_run_style(run, size=size, bold=bool(run.bold) or bold)
-
-    def shade_cell(cell, fill: str = "F3F4F6") -> None:
-        tc_pr = cell._tc.get_or_add_tcPr()
-        shd = OxmlElement("w:shd")
-        shd.set(qn("w:fill"), fill)
-        tc_pr.append(shd)
-
-    def set_cell_text(cell, text: str, *, bold: bool = False, align=WD_ALIGN_PARAGRAPH.LEFT, fill: str | None = None) -> None:
-        cell.text = ""
-        p = cell.paragraphs[0]
-        p.alignment = align
-        run = p.add_run(text if text else "-")
-        set_run_style(run, size=10.5, bold=bold)
-        p.paragraph_format.space_before = Pt(0)
-        p.paragraph_format.space_after = Pt(2)
-        p.paragraph_format.line_spacing = 1.2
-        cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
-        if fill:
-            shade_cell(cell, fill)
-
-    for section in doc.sections:
-        section.top_margin = Cm(2.2)
-        section.bottom_margin = Cm(2.2)
-        section.left_margin = Cm(2.4)
-        section.right_margin = Cm(2.4)
-
-    normal_style = doc.styles["Normal"]
-    normal_style.font.name = "Microsoft YaHei"
-    normal_rpr = normal_style._element.get_or_add_rPr()
-    normal_rfonts = normal_rpr.rFonts
-    if normal_rfonts is None:
-        normal_rfonts = OxmlElement("w:rFonts")
-        normal_rpr.append(normal_rfonts)
-    normal_rfonts.set(qn("w:eastAsia"), "Microsoft YaHei")
-    normal_style.font.size = Pt(10.5)
-    normal_style.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
-
-    title = doc.add_paragraph()
-    title_run = title.add_run("建筑变形监测报告检查报告")
-    set_run_style(title_run, size=18, bold=True)
-    style_paragraph(title, size=18, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, space_after=6)
-
-    subtitle = doc.add_paragraph()
-    subtitle_run = subtitle.add_run("自动核验输出文件")
-    set_run_style(subtitle_run, size=10.5)
-    style_paragraph(subtitle, size=10.5, align=WD_ALIGN_PARAGRAPH.CENTER, space_after=14)
-
-    overview_heading = doc.add_paragraph()
-    overview_run = overview_heading.add_run("一、报告概览")
-    set_run_style(overview_run, size=13, bold=True)
-    style_paragraph(overview_heading, size=13, bold=True, space_after=6)
-
-    overview = doc.add_table(rows=5, cols=2, style="Table Grid")
-    overview.alignment = WD_TABLE_ALIGNMENT.CENTER
-    overview_rows = [
-        ("项目名称", report.project_name or "-"),
-        ("监测单位", report.monitoring_company or "-"),
-        ("报告编号", report.report_number or "-"),
-        ("监测日期", report.monitoring_date or "-"),
-        ("生成时间", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
-    ]
-    for row_idx, (label, value) in enumerate(overview_rows):
-        set_cell_text(overview.cell(row_idx, 0), label, bold=True, fill="F3F4F6")
-        set_cell_text(overview.cell(row_idx, 1), str(value))
-
-    doc.add_paragraph("")
-
-    diagnostics = report.extraction_diagnostics or {}
-    extraction_label = diagnostics.get("method", "unknown")
-    if diagnostics.get("selected_profile"):
-        extraction_label += f" / {diagnostics['selected_profile']}"
-
-    summary_heading = doc.add_paragraph()
-    summary_run = summary_heading.add_run("二、检查摘要")
-    set_run_style(summary_run, size=13, bold=True)
-    style_paragraph(summary_heading, size=13, bold=True, space_after=6)
-
-    summary = doc.add_table(rows=5, cols=4, style="Table Grid")
-    summary.alignment = WD_TABLE_ALIGNMENT.CENTER
-    for idx, header in enumerate(["指标", "数值", "指标", "数值"]):
-        set_cell_text(summary.cell(0, idx), header, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, fill="EDEFF3")
-
-    summary_pairs = [
-        ("数据表", str(len(report.tables)), "错误", str(len(errors))),
-        ("警告", str(len(warnings)), "提取方式", extraction_label),
-        ("原始字符", f"{diagnostics.get('raw_chars', 0):,}", "清洗后字符", f"{diagnostics.get('clean_chars', 0):,}"),
-        ("压缩率", f"{diagnostics.get('compression_ratio', 0.0):.1%}", "疑似异常表", str(diagnostics.get("abnormal_table_count", 0))),
-    ]
-    for row_idx, values in enumerate(summary_pairs, start=1):
-        for col_idx, value in enumerate(values):
-            align = WD_ALIGN_PARAGRAPH.CENTER if col_idx % 2 else WD_ALIGN_PARAGRAPH.LEFT
-            set_cell_text(summary.cell(row_idx, col_idx), value, align=align)
-
-    if report.table_extraction_flags:
-        diag_note = doc.add_paragraph()
-        diag_run = diag_note.add_run(
-            "提取提示："
-            + "；".join(
-                f"{report.tables[idx].monitoring_item}{f' ({report.tables[idx].borehole_id})' if report.tables[idx].borehole_id else ''}：{'；'.join(flags)}"
-                for idx, flags in sorted(report.table_extraction_flags.items())
-                if idx < len(report.tables)
-            )
-        )
-        set_run_style(diag_run, size=10)
-        style_paragraph(diag_note, size=10, space_before=4, space_after=6)
-
-    doc.add_paragraph("")
-
-    issues_heading = doc.add_paragraph()
-    issues_run = issues_heading.add_run("三、问题清单")
-    set_run_style(issues_run, size=13, bold=True)
-    style_paragraph(issues_heading, size=13, bold=True, space_after=6)
-
-    def add_issue_table(title_text: str, issue_list: list) -> None:
-        title_p = doc.add_paragraph()
-        title_r = title_p.add_run(title_text)
-        set_run_style(title_r, size=11.5, bold=True)
-        style_paragraph(title_p, size=11.5, bold=True, space_before=2, space_after=4)
-        if not issue_list:
-            empty_p = doc.add_paragraph()
-            empty_r = empty_p.add_run("未发现需关注的问题。")
-            set_run_style(empty_r, size=10.5)
-            style_paragraph(empty_p, size=10.5, space_after=6)
-            return
-        table = doc.add_table(rows=1, cols=5, style="Table Grid")
-        table.alignment = WD_TABLE_ALIGNMENT.CENTER
-        headers = ["序号", "表名", "测点", "字段", "说明"]
-        for idx, header in enumerate(headers):
-            set_cell_text(table.cell(0, idx), header, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, fill="EDEFF3")
-        for idx, issue in enumerate(issue_list, start=1):
-            row = table.add_row().cells
-            set_cell_text(row[0], str(idx), align=WD_ALIGN_PARAGRAPH.CENTER)
-            set_cell_text(row[1], issue.table_name)
-            set_cell_text(row[2], issue.point_id or "-", align=WD_ALIGN_PARAGRAPH.CENTER)
-            set_cell_text(row[3], issue.field_name or "-", align=WD_ALIGN_PARAGRAPH.CENTER)
-            set_cell_text(row[4], append_issue_source_hint(issue.message, issue.suspected_source))
-        doc.add_paragraph("")
-
-    add_issue_table("3.1 错误项", errors)
-    add_issue_table("3.2 警告项", warnings)
-
-    conclusion_heading = doc.add_paragraph()
-    conclusion_run = conclusion_heading.add_run("四、结论")
-    set_run_style(conclusion_run, size=13, bold=True)
-    style_paragraph(conclusion_heading, size=13, bold=True, space_after=6)
-
-    if report.conclusion:
-        original_conclusion = doc.add_paragraph()
-        original_run = original_conclusion.add_run(f"报告原文结论：{report.conclusion}")
-        set_run_style(original_run, size=10.5)
-        style_paragraph(original_conclusion, size=10.5, space_after=4)
-
-    system_conclusion = doc.add_paragraph()
-    if errors:
-        result_text = f"自动检查结论：共发现 {len(errors)} 条错误、{len(warnings)} 条警告，建议结合原始报告进行人工复核。"
-    elif warnings:
-        result_text = f"自动检查结论：未发现错误，存在 {len(warnings)} 条警告，建议按需复核。"
-    else:
-        result_text = "自动检查结论：本次自动检查未发现错误或警告。"
-    result_run = system_conclusion.add_run(result_text)
-    set_run_style(result_run, size=10.5)
-    style_paragraph(system_conclusion, size=10.5, space_after=10)
-
-    footer = doc.add_paragraph()
-    footer_run = footer.add_run("本文件由建筑变形监测报告核验台自动生成。")
-    set_run_style(footer_run, size=9)
-    style_paragraph(footer, size=9, align=WD_ALIGN_PARAGRAPH.CENTER, space_before=8, space_after=0)
-
-    buf = io.BytesIO()
-    doc.save(buf)
-    return buf.getvalue()
-
-
-def _generate_html(md_content: str, project_name: str) -> str:
-    """生成可打印的 HTML 报告"""
-    import markdown
-
-    html_body = markdown.markdown(
-        md_content,
-        extensions=["tables", "fenced_code"],
-    )
-
-    return f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <title>{project_name} - 检查报告</title>
-    <style>
-        body {{ font-family: "Microsoft YaHei", "SimHei", sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; color: #333; }}
-        h1 {{ color: #1a5276; border-bottom: 3px solid #1a5276; padding-bottom: 10px; }}
-        h2 {{ color: #2c3e50; border-bottom: 1px solid #bdc3c7; padding-bottom: 6px; margin-top: 30px; }}
-        table {{ border-collapse: collapse; width: 100%; margin: 15px 0; }}
-        th, td {{ border: 1px solid #ddd; padding: 8px 12px; text-align: left; }}
-        th {{ background-color: #f2f2f2; font-weight: bold; }}
-        tr:nth-child(even) {{ background-color: #fafafa; }}
-        blockquote {{ border-left: 4px solid #3498db; margin: 15px 0; padding: 10px 20px; background: #ecf6fd; }}
-        code {{ background: #f4f4f4; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }}
-        hr {{ border: none; border-top: 1px solid #ddd; margin: 30px 0; }}
-        @media print {{
-            body {{ max-width: 100%; padding: 0; }}
-            h1 {{ page-break-before: avoid; }}
-            table {{ page-break-inside: avoid; }}
-        }}
-    </style>
-</head>
-<body>
-{html_body}
-</body>
-</html>"""
-
-
-# ── 页面配置 ──────────────────────────────────────────
+# ─── Streamlit 主流程 ────────────────────────────────────────
 st.set_page_config(
-    page_title="建筑变形监测报告核验台",
+    page_title="建筑变形监测报告核验台 v2",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ── 自定义样式 ────────────────────────────────────────
+_init_state()
+
 st.markdown("""
 <style>
-    :root {
-        --panel-border: #d8dee9;
-        --panel-bg: #ffffff;
-        --muted: #5b6472;
-        --heading: #162033;
-        --accent: #1f5eff;
-        --surface: #f5f7fb;
-    }
-    .stApp {
-        background: linear-gradient(180deg, #f4f7fb 0%, #eef3f8 100%);
-    }
-    section[data-testid="stSidebar"] {
-        background: #f7f9fc;
-        border-right: 1px solid var(--panel-border);
-    }
-    .app-hero {
-        background: linear-gradient(135deg, #ffffff 0%, #f4f8ff 100%);
-        border: 1px solid var(--panel-border);
-        border-radius: 18px;
-        padding: 22px 24px;
-        margin-bottom: 18px;
-        box-shadow: 0 10px 28px rgba(15, 23, 42, 0.05);
-    }
-    .app-hero-kicker {
-        font-size: 12px;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        color: var(--accent);
-        margin-bottom: 8px;
-        font-weight: 600;
-    }
-    .app-hero h1 {
-        margin: 0;
-        color: var(--heading);
-        font-size: 30px;
-        line-height: 1.15;
-        font-weight: 700;
-    }
-    .app-hero p {
-        margin: 10px 0 0 0;
-        color: var(--muted);
-        font-size: 14px;
-    }
-    .phase-card {
-        background: var(--panel-bg);
-        border: 1px solid var(--panel-border);
-        border-radius: 14px;
-        padding: 14px 16px;
-        margin: 10px 0 14px 0;
-        box-shadow: 0 6px 18px rgba(15, 23, 42, 0.04);
-    }
-    .phase-step {
-        font-size: 15px;
-        font-weight: 600;
-        color: var(--heading);
-    }
-    .phase-detail {
-        margin-top: 6px;
-        font-size: 13px;
-        color: var(--muted);
-    }
-    .stMetric > div {
-        border: 1px solid var(--panel-border);
-        border-radius: 14px;
-        padding: 14px;
-        background: #ffffff;
-        box-shadow: 0 6px 18px rgba(15, 23, 42, 0.04);
-    }
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        background: #edf2f7;
-        border-radius: 10px;
-        padding: 8px 14px;
-        color: #334155;
-    }
-    .stTabs [aria-selected="true"] {
-        background: #ffffff !important;
-        border: 1px solid var(--panel-border);
-        color: var(--heading) !important;
-    }
-    div[data-testid="stExpander"] details {
-        border: 1px solid var(--panel-border);
-        border-radius: 14px;
-        background: #ffffff;
-    }
-    div[data-testid="stExpander"] details summary p {
-        font-weight: 600;
-        color: var(--heading);
-    }
-    .stButton button, .stDownloadButton button {
-        border-radius: 12px;
-        border: 1px solid var(--panel-border);
-        min-height: 42px;
-    }
-    .welcome-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-        gap: 16px;
-        margin-top: 8px;
-    }
-    .info-card {
-        background: #ffffff;
-        border: 1px solid var(--panel-border);
-        border-radius: 16px;
-        padding: 18px 18px 16px 18px;
-        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.04);
-        height: 100%;
-    }
-    .info-card h3 {
-        margin: 0 0 10px 0;
-        color: var(--heading);
-        font-size: 16px;
-    }
-    .info-card p,
-    .info-card li {
-        color: var(--muted);
-        font-size: 14px;
-        line-height: 1.65;
-    }
-    .info-card ul,
-    .info-card ol {
-        margin: 0;
-        padding-left: 18px;
-    }
+.stApp { background: linear-gradient(180deg, #f4f7fb 0%, #eef3f8 100%); }
+.app-hero { background: linear-gradient(135deg, #ffffff 0%, #f4f8ff 100%);
+            border: 1px solid #d8dee9; border-radius: 18px; padding: 22px 24px;
+            margin-bottom: 16px; box-shadow: 0 10px 28px rgba(15, 23, 42, 0.05); }
+.app-hero h1 { margin: 0; font-size: 28px; }
+.app-hero p { margin: 6px 0 0 0; color: #5b6472; }
+.app-hero .badge { display:inline-block; background:#e0f2fe; color:#075985;
+                   padding:2px 8px; border-radius:6px; font-size:11px; margin-left:8px; }
 </style>
 """, unsafe_allow_html=True)
 
 st.markdown("""
 <div class="app-hero">
-  <div class="app-hero-kicker">Monitoring QA Console</div>
-  <h1>建筑变形监测报告核验台</h1>
-  <p>面向基坑监测报告的提取、结构化解析、计算校核、统计复核与审阅输出工作台。</p>
+  <h1>建筑变形监测报告核验台 <span class="badge">v2 修复版</span></h1>
+  <p>支持后台运行：切换 tab、下载报告、上传新 PDF 都不会中断或丢失结果。</p>
 </div>
 """, unsafe_allow_html=True)
 
-# ── 侧边栏设置 ────────────────────────────────────────
+
+# ── 侧边栏 ───────────────────────────────────────────────────
 with st.sidebar:
     import src.config as cfg
+    st.header("⚙ 运行设置")
 
-    st.header("运行设置")
-
-    with st.expander("LLM 兼容接口", expanded=True):
+    with st.expander("LLM 接口", expanded=True):
         llm_base_url = st.text_input(
             "Base URL",
-            value=os.getenv("LLM_BASE_URL", cfg.LLM_BASE_URL),
-            help="填写 OpenAI 兼容接口地址，例如 https://api.minimaxi.com/v1",
+            value=st.session_state.get("cfg_llm_base_url",
+                                       os.getenv("LLM_BASE_URL", cfg.LLM_BASE_URL)),
+            key="cfg_llm_base_url",
         )
         llm_api_key = st.text_input(
             "API Key",
-            value=os.getenv("LLM_API_KEY", cfg.LLM_API_KEY),
+            value=st.session_state.get("cfg_llm_api_key",
+                                       os.getenv("LLM_API_KEY", cfg.LLM_API_KEY)),
             type="password",
-            help="仅在本次 Streamlit 会话内使用，不会写入仓库。",
+            key="cfg_llm_api_key",
         )
-        model_options = _model_choices(os.getenv("LLM_MODEL", cfg.LLM_MODEL), cfg.AVAILABLE_MODELS)
-        default_model = os.getenv("LLM_MODEL", cfg.LLM_MODEL)
-        model_index = model_options.index(default_model) if default_model in model_options else 0
-        model_choice = st.selectbox("模型", model_options, index=model_index)
-        custom_model = ""
-        if model_choice == "自定义模型":
-            custom_model = st.text_input("自定义模型 ID", value=default_model)
-        selected_model = custom_model.strip() or model_choice
-
-    with st.expander("解析性能", expanded=False):
-        llm_parse_chunk_chars = st.number_input(
-            "LLM 分块字符数",
-            min_value=6000,
-            max_value=40000,
-            value=int(getattr(cfg, "LLM_PARSE_CHUNK_CHARS", 18000)),
-            step=1000,
-            help="较小更稳，较大可能更快但更容易 JSON 截断。",
-        )
-        llm_parse_max_tokens = st.number_input(
-            "LLM 输出 token 上限",
-            min_value=4000,
-            max_value=64000,
-            value=int(getattr(cfg, "LLM_PARSE_MAX_TOKENS", 24000)),
-            step=1000,
-        )
-        llm_parse_timeout_sec = st.number_input(
-            "结构化解析超时(秒)",
-            min_value=60,
-            max_value=1200,
-            value=int(getattr(cfg, "LLM_PARSE_TIMEOUT_SEC", 300)),
-            step=30,
-        )
-        llm_timeout_normal = st.number_input(
-            "普通 LLM 调用超时(秒)",
-            min_value=30,
-            max_value=600,
-            value=int(getattr(cfg, "LLM_TIMEOUT_NORMAL", 120)),
-            step=30,
+        llm_model = st.text_input(
+            "模型",
+            value=st.session_state.get("cfg_llm_model",
+                                       os.getenv("LLM_MODEL", "MiniMax-M2.7-highspeed")),
+            key="cfg_llm_model",
         )
 
-    st.divider()
-    st.subheader("PDF 提取")
-    ocr_mode = st.radio(
-        "提取方式",
-        ["优先 pdfplumber", "优先 PaddleOCR（表格）", "强制 PaddleOCR"],
-        index=0,
-        help="文字层 PDF 建议优先 pdfplumber；扫描件或错列严重时使用 PaddleOCR。",
-    )
-    use_ocr = ocr_mode == "强制 PaddleOCR"
-    prefer_ocr = ocr_mode == "优先 PaddleOCR（表格）" or use_ocr
-    auto_fallback = not use_ocr
-
-    with st.expander("PaddleOCR 设置", expanded=prefer_ocr):
+    with st.expander("PaddleOCR（可选）", expanded=False):
         paddle_ocr_token = st.text_input(
-            "PaddleOCR Token",
-            value=os.getenv("PADDLE_OCR_TOKEN", cfg.PADDLE_OCR_TOKEN),
+            "Token",
+            value=st.session_state.get("cfg_paddle_token",
+                                       os.getenv("PADDLE_OCR_TOKEN", cfg.PADDLE_OCR_TOKEN)),
             type="password",
+            key="cfg_paddle_token",
         )
-        paddle_ocr_model = st.selectbox(
-            "OCR 模型",
-            ["PaddleOCR-VL-1.5", "PaddleOCR-VL", "PP-StructureV3"],
-            index=["PaddleOCR-VL-1.5", "PaddleOCR-VL", "PP-StructureV3"].index(
-                os.getenv("PADDLE_OCR_MODEL", cfg.PADDLE_OCR_MODEL)
-                if os.getenv("PADDLE_OCR_MODEL", cfg.PADDLE_OCR_MODEL) in ["PaddleOCR-VL-1.5", "PaddleOCR-VL", "PP-StructureV3"]
-                else "PaddleOCR-VL-1.5"
-            ),
+        paddle_ocr_use_cache = st.toggle(
+            "复用 OCR 缓存", value=st.session_state.get("cfg_paddle_cache", True),
+            key="cfg_paddle_cache",
         )
-        paddle_ocr_use_async = st.toggle("使用异步 OCR API", value=_bool_env("PADDLE_OCR_USE_ASYNC", cfg.PADDLE_OCR_USE_ASYNC))
-        paddle_ocr_use_cache = st.toggle("复用 OCR 调试缓存", value=_bool_env("PADDLE_OCR_USE_CACHE", getattr(cfg, "PADDLE_OCR_USE_CACHE", True)))
-        paddle_ocr_enable_legacy_fallback = st.toggle(
-            "异步失败时回退 legacy API",
-            value=_bool_env("PADDLE_OCR_ENABLE_LEGACY_FALLBACK", cfg.PADDLE_OCR_ENABLE_LEGACY_FALLBACK),
-        )
-        paddle_ocr_poll_timeout_sec = st.number_input(
-            "OCR 轮询超时(秒)",
-            min_value=60,
-            max_value=3600,
-            value=int(getattr(cfg, "PADDLE_OCR_POLL_TIMEOUT_SEC", 900)),
-            step=60,
+        paddle_ocr_use_async = st.toggle(
+            "使用异步 API", value=st.session_state.get("cfg_paddle_async", True),
+            key="cfg_paddle_async",
         )
 
     st.divider()
-    st.subheader("可选复核")
-    do_self_verify = st.checkbox("LLM 复核错误项", value=False, help="按批次复核 error 项，适合最终交付前开启。")
-    do_ai_review = st.checkbox("LLM 最终审核", value=False, help="对整份报告做最后审阅，耗时最长。")
-    st.caption("日常批量回归建议关闭两项复核，先看本地规则结论。")
-
-    runtime_config = {
-        "llm_base_url": llm_base_url,
-        "llm_api_key": llm_api_key,
-        "llm_model": selected_model,
-        "llm_parse_chunk_chars": int(llm_parse_chunk_chars),
-        "llm_parse_max_tokens": int(llm_parse_max_tokens),
-        "llm_parse_timeout_sec": int(llm_parse_timeout_sec),
-        "llm_timeout_normal": int(llm_timeout_normal),
-        "paddle_ocr_token": paddle_ocr_token,
-        "paddle_ocr_model": paddle_ocr_model,
-        "paddle_ocr_use_async": bool(paddle_ocr_use_async),
-        "paddle_ocr_use_cache": bool(paddle_ocr_use_cache),
-        "paddle_ocr_enable_legacy_fallback": bool(paddle_ocr_enable_legacy_fallback),
-        "paddle_ocr_poll_timeout_sec": int(paddle_ocr_poll_timeout_sec),
-    }
+    ocr_mode = st.radio(
+        "PDF 提取方式",
+        ["优先 pdfplumber", "优先 PaddleOCR", "强制 PaddleOCR"],
+        index=0,
+        key="cfg_ocr_mode",
+    )
+    use_ocr_flag = ocr_mode == "强制 PaddleOCR"
+    prefer_ocr_flag = ocr_mode != "优先 pdfplumber"
+    auto_fallback_flag = not use_ocr_flag
 
     st.divider()
-    st.subheader("核心计算公式")
-    st.code("本次变化 = 本次测值 − 上次测值\n累计变化 = 本次测值 − 初始测值\n变化速率 = 本次变化 / 时间(天)", language=None)
-    st.caption("正负号表示方向，不表示绝对大小。")
+    skip_self_verify = st.checkbox(
+        "跳过 AI 自验证 (Step 6, 快 30%)",
+        value=st.session_state.get("cfg_skip_self_verify", False),
+        key="cfg_skip_self_verify",
+    )
+    skip_ai_review = st.checkbox(
+        "跳过 AI 最终审核 (Step 7)",
+        value=st.session_state.get("cfg_skip_ai_review", False),
+        key="cfg_skip_ai_review",
+    )
 
-# ── 文件上传区 ────────────────────────────────────────
+
+def _build_runtime_config(pdf_path: str) -> RuntimeConfig:
+    return RuntimeConfig(
+        pdf_path=pdf_path,
+        llm_api_key=llm_api_key,
+        llm_base_url=llm_base_url,
+        llm_model=llm_model,
+        paddle_ocr_token=paddle_ocr_token,
+        paddle_ocr_use_async=paddle_ocr_use_async,
+        paddle_ocr_use_cache=paddle_ocr_use_cache,
+        use_ocr=use_ocr_flag,
+        prefer_ocr=prefer_ocr_flag,
+        auto_fallback=auto_fallback_flag,
+        skip_self_verify=skip_self_verify,
+        skip_ai_review=skip_ai_review,
+    )
+
+
+# ── 任务态轮询：从后台 dict 同步到 session_state ─────────────
+def _sync_task_state() -> None:
+    tid = st.session_state.task_id
+    if not tid:
+        return
+    task = _get_task(tid)
+    if not task:
+        # 任务被清理（不应发生）
+        st.session_state.task_state = "failed"
+        return
+
+    # 同步进度
+    st.session_state.progress = dict(task["progress"])
+    # 同步日志（深拷贝避免线程竞争）
+    st.session_state.log_lines = list(task["logs"])
+
+    # 检查是否完成
+    if not task["thread"].is_alive():
+        result = task["result_box"]["result"]
+        st.session_state.result = result
+        if result is None:
+            st.session_state.task_state = "failed"
+        elif result.cancelled:
+            st.session_state.task_state = "cancelled"
+        elif result.success:
+            st.session_state.task_state = "done"
+        else:
+            st.session_state.task_state = "failed"
+        # 任务完成后保留少量时间窗口可访问，再删除
+        # 这里直接保留到 session_state，但移除 _BACKGROUND_TASKS 中的引用以释放线程对象
+        # （logs/result 已经拷贝到 session_state）
+
+
+# ── 主区 ────────────────────────────────────────────────────
 uploaded = st.file_uploader(
     "上传监测报告 PDF",
     type=["pdf"],
     accept_multiple_files=False,
-    help="支持文字版PDF和扫描件PDF",
+    key="pdf_uploader",
 )
 
-if uploaded is not None:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(uploaded.read())
-        tmp_path = tmp.name
+# Idle 态：显示 uploader & 开始按钮
+if st.session_state.task_state == "idle":
+    if uploaded is not None:
+        # 把上传的 PDF 写到临时文件并记到 session_state
+        if st.session_state.pdf_path is None or st.session_state.pdf_name != uploaded.name:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                tmp.write(uploaded.read())
+                st.session_state.pdf_path = tmp.name
+            st.session_state.pdf_name = uploaded.name
+        st.success(f"已载入：**{uploaded.name}** ({uploaded.size / 1024:.0f} KB)")
 
-    pdf_name = Path(uploaded.name).stem
-    st.success(f"已载入文件：**{uploaded.name}** ({uploaded.size / 1024:.0f} KB)")
-    can_run = all(
-        runtime_config[key].strip()
-        for key in ("llm_api_key", "llm_base_url", "llm_model")
+        can_run = bool(llm_api_key.strip() and llm_base_url.strip() and llm_model.strip())
+        if not can_run:
+            st.warning("请先在侧边栏填写 API Key / Base URL / 模型 ID")
+
+        if st.button("🚀 开始检查", type="primary", use_container_width=True,
+                     disabled=not can_run):
+            cfg = _build_runtime_config(st.session_state.pdf_path)
+            task_id = _start_pipeline(cfg)
+            st.session_state.task_id = task_id
+            st.session_state.task_state = "running"
+            st.session_state.result = None
+            st.session_state.progress = {"step_id": "init", "label": "启动", "percent": 0, "detail": ""}
+            st.session_state.log_lines = []
+            st.rerun()
+    else:
+        st.info("👆 请先上传 PDF 文件")
+
+
+# Running 态：进度面板 + 自动刷新
+elif st.session_state.task_state == "running":
+    _sync_task_state()
+
+    progress = st.session_state.progress
+    st.markdown(f"### {progress.get('label') or '正在处理...'}")
+    if detail := progress.get("detail"):
+        st.caption(detail)
+    st.progress(min(max(progress.get("percent", 0), 0), 100))
+
+    log_container = st.empty()
+    _render_log_tail(log_container, st.session_state.log_lines)
+
+    cancel_col, _, refresh_col = st.columns([1, 4, 1])
+    if cancel_col.button("取消", use_container_width=True):
+        _cancel_current_task()
+        st.info("已请求取消")
+
+    # 关键：使用 fragment 每秒自动刷新进度，不需要用户操作
+    @st.fragment(run_every=1.0)
+    def _auto_refresh():
+        _sync_task_state()
+        if st.session_state.task_state != "running":
+            st.rerun()  # 任务结束，立刻重跑切换到 done 视图
+
+    _auto_refresh()
+
+
+# Done 态：完整结果展示 + 可反复导出
+elif st.session_state.task_state == "done":
+    result: PipelineResult = st.session_state.result
+
+    # 关键修复：完成后所有结果都在 session_state，下载触发 rerun 不丢
+    # 同时可以再次上传 PDF（uploader 已显示在顶部）
+    if uploaded is not None and uploaded.name != st.session_state.pdf_name:
+        # 用户上传了新 PDF，提示重新运行
+        st.info(f"已检测到新文件：**{uploaded.name}** — 点击下方按钮处理新 PDF。")
+        if st.button("🔄 处理新 PDF", type="primary", use_container_width=True):
+            # 重置状态准备启动新任务
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                tmp.write(uploaded.read())
+                st.session_state.pdf_path = tmp.name
+            st.session_state.pdf_name = uploaded.name
+            st.session_state.task_state = "idle"
+            st.session_state.result = None
+            st.rerun()
+
+    # 主结果区
+    st.success(
+        f"✓ 完成 — 错误 {len(result.errors)} / 警告 {len(result.warnings)} / 提示 {len(result.infos)} "
+        f"·  用时 {result.duration_sec:.1f}s"
     )
-    if not can_run:
-        st.warning("请先在侧边栏填写 OpenAI 兼容 API Key、Base URL 和模型 ID。")
-    if prefer_ocr and not runtime_config["paddle_ocr_token"].strip():
-        st.warning("当前选择了 PaddleOCR，但尚未填写 PaddleOCR Token；如 OCR 调用失败会影响扫描件处理。")
 
-    if st.button(
-        "开始检查",
-        type="primary",
-        use_container_width=True,
-        disabled=not can_run,
-    ):
-        log_records.clear()
+    # Metrics
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("错误", len(result.errors))
+    m2.metric("警告", len(result.warnings))
+    m3.metric("提示", len(result.infos))
+    m4.metric("数据表", len(result.report.tables) if result.report else 0)
+    m5.metric("用时", f"{result.duration_sec:.0f}s")
 
-        _apply_runtime_config(runtime_config)
+    _render_extraction_diagnostics(result.report)
 
-        # ── 实时进度容器 ──────────────────────────────
-        progress_bar = st.progress(0)
-        phase_placeholder = st.empty()
-        live_log_placeholder = st.empty()
-        status_container = st.status(f"正在处理（模型: {runtime_config['llm_model']}）", expanded=True)
-        start_time = time.time()
-        with status_container:
-            st.write(f"LLM: {runtime_config['llm_model']} @ {runtime_config['llm_base_url']}")
-            st.write(f"PDF 提取: {ocr_mode}；OCR cache={'开启' if runtime_config['paddle_ocr_use_cache'] else '关闭'}")
+    # 8 个 tab
+    tab_calc, tab_stats, tab_logic, tab_plan, tab_ai, tab_md, tab_log = st.tabs(
+        ["计算验证", "统计验证", "逻辑检查", "分析计划 (ReAct)", "AI 最终审核", "Markdown 源", "运行日志"]
+    )
+    with tab_calc:
+        _render_issues_section("计算验证", result.calc_issues)
+    with tab_stats:
+        _render_issues_section("统计验证", result.stats_issues)
+    with tab_logic:
+        _render_issues_section("逻辑检查", result.logic_issues)
+    with tab_plan:
+        _render_analysis_plan(result.analysis_plan)
+    with tab_ai:
+        if result.ai_review:
+            st.markdown(result.ai_review)
+        else:
+            st.info("未启用或未生成 AI 最终审核")
+    with tab_md:
+        st.code(result.final_md, language="markdown")
+    with tab_log:
+        st.text("\n".join(st.session_state.log_lines) if st.session_state.log_lines else "无日志")
 
-        def update_phase(step_label: str, detail: str = "", progress: int | None = None) -> None:
-            detail_html = f"<div class='phase-detail'>{detail}</div>" if detail else ""
-            phase_placeholder.markdown(
-                f"<div class='phase-card'><div class='phase-step'>{step_label}</div>{detail_html}</div>",
-                unsafe_allow_html=True,
-            )
-            if progress is not None:
-                progress_bar.progress(progress)
-            _render_log_tail(live_log_placeholder)
+    # ── 导出（关键修复：rerun 时仍能保留这里） ─────────────────
+    st.markdown("---")
+    st.subheader("导出检查报告")
+    pdf_stem = Path(st.session_state.pdf_name or "report.pdf").stem
 
-        try:
-            # ━━ Step 1: PDF 提取 ━━━━━━━━━━━━━━━━━━━━━
-            update_phase("Step 1/8 · PDF 提取", "读取文本层，必要时回退 OCR。", 5)
-            with status_container:
-                st.write("Step 1/8 · 提取 PDF 内容")
+    @st.cache_data(show_spinner=False)
+    def _cache_docx(md: str, errors_count: int, warnings_count: int, report_signature: str) -> bytes:
+        # 缓存键基于 report.project_name 等不变量，避免每次 rerun 重生成
+        return generate_docx(md, result.report, result.errors, result.warnings)
 
-            from src.tools import pdf_extractor
-            _sync_pdf_extractor_runtime(pdf_extractor, runtime_config)
-            extraction_result = pdf_extractor.extract_pdf(
-                tmp_path,
-                use_ocr=use_ocr,
-                prefer_ocr=prefer_ocr,
-                auto_fallback=auto_fallback,
-                ocr_output_dir=f"output/{pdf_name}_ocr_debug",
-                return_details=True,
-            )
-            raw_text = extraction_result.text
-            extraction_result.diagnostics.setdefault("method", extraction_result.method)
-            extraction_result.diagnostics.setdefault("selected_profile", extraction_result.selected_profile)
-            extraction_result.diagnostics.setdefault("debug_dir", extraction_result.debug_output_dir)
+    docx_bytes = _cache_docx(
+        result.final_md,
+        len(result.errors),
+        len(result.warnings),
+        f"{getattr(result.report, 'project_name', '')}|{getattr(result.report, 'report_number', '')}",
+    )
 
-            update_phase(
-                "Step 1/8 · PDF 提取",
-                f"完成：{len(raw_text):,} 字符，方式 {extraction_result.method}/{extraction_result.selected_profile}",
-                10,
-            )
-            with status_container:
-                st.write(
-                    "完成："
-                    f"{len(raw_text):,} 字符 "
-                    f"({extraction_result.method}/{extraction_result.selected_profile}, "
-                    f"{extraction_result.diagnostics.get('raw_chars', 0):,} → "
-                    f"{extraction_result.diagnostics.get('clean_chars', 0):,})"
-                )
+    html_content = generate_html(
+        result.final_md,
+        getattr(result.report, "project_name", "") or "检查报告",
+    )
 
-            # ━━ Step 2: LLM 结构化解析 ━━━━━━━━━━━━━━━
-            update_phase("Step 2/8 · 结构化解析", "发送文本到 LLM，提取项目、阈值、汇总项和数据表。", 12)
-            with status_container:
-                st.write("Step 2/8 · 结构化解析")
+    dl1, dl2, dl3, _, dl_new = st.columns([1, 1, 1, 1, 1])
 
-            from src.tools.llm_parser import parse_report_with_llm
-            report = parse_report_with_llm(raw_text)
-            report.raw_text = raw_text
-            report.extraction_diagnostics = extraction_result.diagnostics
+    with dl1:
+        st.download_button(
+            "📄 Markdown",
+            data=result.final_md,
+            file_name=f"{pdf_stem}_检查报告.md",
+            mime="text/markdown",
+            use_container_width=True,
+            key="dl_md",
+        )
+    with dl2:
+        st.download_button(
+            "📝 Word",
+            data=docx_bytes,
+            file_name=f"{pdf_stem}_检查报告.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            use_container_width=True,
+            key="dl_docx",
+        )
+    with dl3:
+        st.download_button(
+            "🌐 HTML",
+            data=html_content,
+            file_name=f"{pdf_stem}_检查报告.html",
+            mime="text/html",
+            use_container_width=True,
+            key="dl_html",
+        )
+    with dl_new:
+        if st.button("🆕 新建任务", use_container_width=True, key="btn_new_task"):
+            st.session_state.task_state = "idle"
+            st.session_state.task_id = None
+            st.session_state.result = None
+            st.session_state.pdf_path = None
+            st.session_state.pdf_name = None
+            st.session_state.log_lines = []
+            st.rerun()
 
-            from src.tools.extraction_quality import analyze_extraction_quality
-            analyze_extraction_quality(report)
 
-            import src.config as cfg
-            step_delay = getattr(cfg, "LLM_STEP_DELAY_SEC", 0)
-            if step_delay > 0:
-                with status_container:
-                    st.write(f"等待 {step_delay} 秒以避免限流...")
-                time.sleep(step_delay)
+# Cancelled / Failed
+elif st.session_state.task_state in ("cancelled", "failed"):
+    if st.session_state.task_state == "cancelled":
+        st.warning("任务已取消")
+    else:
+        st.error("任务失败")
+        if st.session_state.result and st.session_state.result.error_message:
+            st.code(st.session_state.result.error_message, language=None)
 
-            from src.tools.table_analyzer import enrich_configs_with_llm
-            enrich_configs_with_llm(report)
+    if st.session_state.log_lines:
+        with st.expander("查看运行日志", expanded=False):
+            st.text("\n".join(st.session_state.log_lines))
 
-            update_phase(
-                "Step 2/8 · 结构化解析",
-                f"完成：{len(report.tables)} 张表，{len(report.thresholds)} 项阈值，{len(report.summary_items)} 项汇总。",
-                35,
-            )
-            with status_container:
-                st.write(f"完成：**{report.project_name}** — {len(report.tables)} 张表, "
-                         f"{len(report.thresholds)} 项阈值, {len(report.summary_items)} 项汇总")
-
-            # ━━ Step 2.5: 表格分析计划 ━━━━━━━━━━━━━━━━
-            update_phase("Step 3/8 · 分析计划", "生成每张表的字段识别、单位判断和验证策略。", 38)
-            with status_container:
-                st.write("Step 3/8 · 分析表格结构与验证策略")
-
-            from src.tools.table_analyzer import generate_analysis_plan
-            analysis_plan = generate_analysis_plan(report)
-
-            update_phase("Step 3/8 · 分析计划", f"完成：已生成 {len(analysis_plan)} 张表的验证策略。", 42)
-            with status_container:
-                st.write(f"完成：{len(analysis_plan)} 张表的验证策略已制定")
-
-            # ━━ Step 4: 计算验证 ━━━━━━━━━━━━━━━━━━━━━
-            update_phase("Step 4/8 · 计算验证", "逐条验证累计变化量、变化速率和深层位移变化。", 45)
-            with status_container:
-                st.write("Step 4/8 · 计算验证")
-
-            from src.tools.calculation_checker import run_calculation_checks
-            calc_issues = run_calculation_checks(report)
-
-            update_phase("Step 4/8 · 计算验证", f"完成：发现 {len(calc_issues)} 个问题。", 55)
-            with status_container:
-                st.write(f"完成：{len(calc_issues)} 个问题")
-
-            # ━━ Step 5: 统计验证 ━━━━━━━━━━━━━━━━━━━━━
-            update_phase("Step 5/8 · 统计验证", "核对方向极值、速率极值和多页汇总引用。", 58)
-            with status_container:
-                st.write("Step 5/8 · 统计验证")
-
-            from src.tools.statistics_checker import run_statistics_checks
-            stats_issues = run_statistics_checks(report)
-
-            update_phase("Step 5/8 · 统计验证", f"完成：发现 {len(stats_issues)} 个问题。", 63)
-            with status_container:
-                st.write(f"完成：{len(stats_issues)} 个问题")
-
-            # ━━ Step 6: 逻辑检查 ━━━━━━━━━━━━━━━━━━━━━
-            update_phase("Step 6/8 · 逻辑检查", "匹配阈值、汇总项与安全状态。", 66)
-            with status_container:
-                st.write("Step 6/8 · 逻辑检查")
-
-            from src.tools.logic_checker import run_logic_checks
-            logic_issues = run_logic_checks(report)
-
-            update_phase("Step 6/8 · 逻辑检查", f"完成：发现 {len(logic_issues)} 个问题。", 70)
-            with status_container:
-                st.write(f"完成：{len(logic_issues)} 个问题")
-
-            # ━━ Step 7: AI 自验证 ━━━━━━━━━━━━━━━━━━━━
-            all_issues = calc_issues + stats_issues + logic_issues
-            process_notes: list[str] = []
-            if do_self_verify:
-                errors_to_verify = [i for i in all_issues if i.severity == "error"]
-                if errors_to_verify:
-                    step_delay = getattr(cfg, "LLM_STEP_DELAY_SEC", 0)
-                    if step_delay > 0:
-                        with status_container:
-                            st.write(f"等待 {step_delay} 秒以避免限流...")
-                        time.sleep(step_delay)
-
-                    update_phase("Step 7/8 · 错误复核", f"待复核 {len(errors_to_verify)} 条错误。", 72)
-                    with status_container:
-                        st.write(f"Step 7/8 · 复核错误项（{len(errors_to_verify)} 条）")
-
-                    def _on_self_verify_progress(event: dict) -> None:
-                        stage = event.get("stage")
-                        total_batches = max(event.get("total_batches", 1), 1)
-                        batch_index = event.get("batch_index", 0)
-                        if stage == "batch_start":
-                            progress = 72 + int((batch_index - 1) / total_batches * 10)
-                            update_phase(
-                                "Step 7/8 · 错误复核",
-                                f"正在处理第 {batch_index}/{total_batches} 批，本批 {event.get('batch_size', 0)} 条。",
-                                progress,
-                            )
-                        elif stage == "batch_retry":
-                            update_phase(
-                                "Step 7/8 · 错误复核",
-                                f"第 {batch_index}/{total_batches} 批重试中：{event.get('error', '')}",
-                            )
-                        elif stage == "batch_split":
-                            update_phase(
-                                "Step 7/8 · 错误复核",
-                                f"第 {batch_index}/{total_batches} 批超时，已拆分为单条继续复核。",
-                            )
-                        elif stage == "batch_finish":
-                            progress = 72 + int(batch_index / total_batches * 10)
-                            update_phase(
-                                "Step 7/8 · 错误复核",
-                                f"已完成第 {batch_index}/{total_batches} 批，已降级 {event.get('downgraded', 0)}，已排除 {event.get('dismissed', 0)}。",
-                                progress,
-                            )
-                        elif stage == "batch_failed":
-                            update_phase(
-                                "Step 7/8 · 错误复核",
-                                f"第 {batch_index}/{total_batches} 批失败：{event.get('error', '')}",
-                            )
-                        elif stage == "truncated":
-                            update_phase(
-                                "Step 7/8 · 错误复核",
-                                f"错误项过多，已处理前 {event.get('processed_errors', 0)} 条，跳过 {event.get('skipped_errors', 0)} 条。",
-                            )
-                        elif stage == "deadline_reached":
-                            update_phase(
-                                "Step 7/8 · 错误复核",
-                                f"达到总耗时上限({event.get('max_total_sec', 0)}s)，已提前结束并继续后续步骤。",
-                                82,
-                            )
-                        elif stage == "done":
-                            update_phase(
-                                "Step 7/8 · 错误复核",
-                                f"完成：共处理 {event.get('total_errors', 0)} 条，降级 {event.get('downgraded', 0)}，排除 {event.get('dismissed', 0)}。",
-                                82,
-                            )
-
-                    from src.tools.self_verifier import verify_errors_with_llm
-                    try:
-                        all_issues = _call_with_optional_progress_callback(
-                            verify_errors_with_llm,
-                            report,
-                            all_issues,
-                            progress_callback=_on_self_verify_progress,
-                        )
-                        with status_container:
-                            st.write("完成：错误复核结束")
-                    except Exception as exc:
-                        logger.exception("Step 7 自验证失败，已跳过并继续生成结果")
-                        process_notes.append(f"错误复核未完成，已跳过。原因: {exc}")
-                        update_phase(
-                            "Step 7/8 · 错误复核",
-                            f"失败已跳过：{exc}",
-                            82,
-                        )
-                        with status_container:
-                            st.warning(f"错误复核失败，已跳过并继续生成报告：{exc}")
-                else:
-                    update_phase("Step 7/8 · 错误复核", "没有 error 级问题，跳过复核。", 82)
-                    process_notes.append("错误复核未执行：没有 error 级问题。")
-            else:
-                update_phase("Step 7/8 · 错误复核", "已关闭该步骤。", 82)
-                process_notes.append("错误复核未执行：用户关闭了该步骤。")
-
-            # ━━ Step 8: AI 最终审核 ━━━━━━━━━━━━━━━━━━
-            ai_review = ""
-            if do_ai_review:
-                update_phase("Step 8/8 · 最终审核", "整理检查报告并发送最终审阅请求。", 84)
-                with status_container:
-                    st.write("Step 8/8 · 最终审核")
-
-                from src.tools.report_generator import generate_report_md
-                from src.tools.llm_parser import verify_report_with_llm
-                prelim = generate_report_md(
-                    report,
-                    calc_issues,
-                    stats_issues,
-                    logic_issues,
-                    analysis_plan=analysis_plan,
-                    process_notes=process_notes,
-                )
-                try:
-                    ai_review = _call_with_optional_progress_callback(
-                        verify_report_with_llm,
-                        prelim,
-                        raw_text,
-                        progress_callback=lambda msg: update_phase("Step 8/8 · 最终审核", msg, 88),
-                    )
-                    update_phase("Step 8/8 · 最终审核", "完成：最终审核结果已返回。", 92)
-                    with status_container:
-                        st.write("完成：最终审核结束")
-                except Exception as exc:
-                    logger.exception("Step 8 最终审核失败，已跳过并继续生成结果")
-                    process_notes.append(f"最终审核未完成，已跳过。原因: {exc}")
-                    update_phase(
-                        "Step 8/8 · 最终审核",
-                        f"失败已跳过：{exc}",
-                        92,
-                    )
-                    with status_container:
-                        st.warning(f"最终审核失败，已跳过并继续生成报告：{exc}")
-            else:
-                update_phase("Step 8/8 · 最终审核", "已关闭该步骤，直接生成报告。", 92)
-                process_notes.append("最终审核未执行：用户关闭了该步骤。")
-
-            # ━━ 生成报告 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            update_phase("Step 8/8 · 生成报告", "整理最终报告与导出文件。", 94)
-            from src.tools.report_generator import generate_report_md, save_report
-            final_md = generate_report_md(
-                report,
-                calc_issues,
-                stats_issues,
-                logic_issues,
-                ai_review,
-                analysis_plan,
-                process_notes=process_notes,
-            )
-            output_path = f"output/{pdf_name}_检查报告.md"
-            save_report(final_md, output_path)
-
-            elapsed = time.time() - start_time
-            progress_bar.progress(100)
-            update_phase("处理完成", f"总耗时 {elapsed:.0f} 秒。", 100)
-            status_container.update(label=f"检查完成，耗时 {elapsed:.0f} 秒", state="complete", expanded=False)
-
-            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            # 结果展示区
-            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-            errors = [i for i in all_issues if i.severity == "error"]
-            warnings = [i for i in all_issues if i.severity == "warning"]
-            infos = [i for i in all_issues if i.severity == "info"]
-            state_label, state_kind = _result_state(errors, warnings, infos)
-
-            st.markdown("---")
-            st.subheader("检查结果总览")
-            if state_kind == "error":
-                st.error(f"结论：{state_label}。发现 {len(errors)} 条 error，请优先复核。")
-            elif state_kind == "warning":
-                st.warning(f"结论：{state_label}。未发现 error，但存在 warning/info，不能直接判定完全通过。")
-            else:
-                st.success("结论：通过。未发现 error 或 warning。")
-
-            # ── 指标卡片 ──────────────────────────────
-            c0, c1, c2, c3, c4, c5 = st.columns(6)
-            c0.metric("结论", state_label)
-            c1.metric("数据表", f"{len(report.tables)} 张")
-            c2.metric("错误", f"{len(errors)}", delta=f"-{len(errors)}" if errors else None, delta_color="inverse")
-            c3.metric("警告", f"{len(warnings)}")
-            c4.metric("提示", f"{len(infos)}")
-            c5.metric("耗时", f"{elapsed:.0f}s")
-            _render_extraction_diagnostics(report)
-
-            # ── 选项卡 ───────────────────────────────
-            tab_report, tab_extract, tab_plan, tab_calc, tab_stats, tab_logic, tab_ai, tab_log = st.tabs([
-                "检查报告", "提取诊断", "分析计划", "计算验证", "统计验证",
-                "逻辑检查", "最终审核", "运行日志",
-            ])
-
-            with tab_report:
-                st.markdown(final_md)
-
-            with tab_extract:
-                _render_extraction_diagnostics(report)
-
-            with tab_plan:
-                _render_analysis_plan(analysis_plan)
-
-            with tab_calc:
-                _render_issues("计算验证", calc_issues)
-
-            with tab_stats:
-                _render_issues("统计验证", stats_issues)
-
-            with tab_logic:
-                _render_issues("逻辑检查", logic_issues)
-
-            with tab_ai:
-                if ai_review:
-                    st.markdown(ai_review)
-                else:
-                    st.info("当前未启用最终审核。")
-
-            with tab_log:
-                st.text("\n".join(log_records) if log_records else "暂无日志")
-
-            # ── 导出按钮 ──────────────────────────────
-            st.markdown("---")
-            st.subheader("导出检查报告")
-
-            dl_col1, dl_col2, dl_col3 = st.columns(3)
-
-            with dl_col1:
-                st.download_button(
-                    label="下载 Markdown",
-                    data=final_md,
-                    file_name=f"{pdf_name}_检查报告.md",
-                    mime="text/markdown",
-                    use_container_width=True,
-                )
-
-            with dl_col2:
-                docx_bytes = _generate_docx(final_md, report, errors, warnings)
-                st.download_button(
-                    label="下载 Word (docx)",
-                    data=docx_bytes,
-                    file_name=f"{pdf_name}_检查报告.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    use_container_width=True,
-                )
-
-            with dl_col3:
-                html_content = _generate_html(final_md, report.project_name)
-                st.download_button(
-                    label="下载 HTML",
-                    data=html_content,
-                    file_name=f"{pdf_name}_检查报告.html",
-                    mime="text/html",
-                    use_container_width=True,
-                )
-
-        except Exception as e:
-            progress_bar.empty()
-            status_container.update(label="处理失败", state="error")
-            st.error(f"处理过程中出错: {e}")
-            logger.exception("处理失败")
-
-            with st.expander("查看运行日志"):
-                st.text("\n".join(log_records))
-
-else:
-    # ── 未上传文件时的欢迎页面 ────────────────────────
-    col_left, col_right = st.columns([2, 1])
-
-    with col_left:
-        st.markdown("""
-        <div class="info-card">
-          <h3>开始使用</h3>
-          <p>上传监测报告 PDF 后，系统将完成文本提取、结构化解析、规则校核与结果导出。</p>
-        </div>
-        """, unsafe_allow_html=True)
-        st.markdown("""
-        <div class="info-card">
-          <h3>处理流程</h3>
-          <ol>
-            <li>文本提取：默认优先读取 PDF 文本层，必要时自动切换到 PaddleOCR。</li>
-            <li>结构化解析：抽取项目、阈值、汇总项和监测数据表。</li>
-            <li>分析计划：识别字段、单位、基准与验证口径。</li>
-            <li>规则检查：执行计算验证、统计验证和逻辑检查。</li>
-            <li>复核与导出：按需启用错误复核和最终审核，输出 Markdown、Word 与 HTML。</li>
-          </ol>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with col_right:
-        st.markdown("""
-        <div class="welcome-grid">
-          <div class="info-card">
-            <h3>适用监测项</h3>
-            <ul>
-              <li>支护结构顶部水平位移、竖向位移</li>
-              <li>周边地面沉降、道路沉降、管线沉降</li>
-              <li>地下水位、锚索拉力、支撑轴力</li>
-              <li>深层水平位移、立柱位移、裂缝监测</li>
-            </ul>
-          </div>
-          <div class="info-card">
-            <h3>运行说明</h3>
-            <ul>
-              <li>默认关闭两类远程复核步骤，优先返回确定性检查结果。</li>
-              <li>第 7/8 步会显示批次、重试与完成状态，不再静默等待。</li>
-              <li>导出的 Word 文档采用统一黑色字体与正式排版。</li>
-            </ul>
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
+    if st.button("🔄 返回首页", type="primary"):
+        st.session_state.task_state = "idle"
+        st.session_state.task_id = None
+        st.session_state.result = None
+        st.rerun()

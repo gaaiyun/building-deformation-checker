@@ -8,6 +8,7 @@ test_data/
 .venv/
 .idea/
 .vscode/
+.cursor/
 docx_images/
 pack_project/
 pack_project.tar.gz
