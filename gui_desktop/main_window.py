@@ -1,12 +1,31 @@
-"""PySide6 主窗 - 建筑变形监测报告核验台桌面版
+"""PySide6 主窗 - 建筑变形监测报告核验台桌面版。
 
-设计要点：
-- QThread + Signal 跑后台流水线，主 UI 永远不卡
-- QStackedWidget 切换 idle / running / done 状态
-- 完成态保持所有结果，可反复导出，不会因下载操作"返回原始界面"
-- 拖拽 PDF 入窗口直接开始；也支持文件选择按钮
-- 配置持久化（~/AppData/.../settings.json）
-- 内嵌 PDF 预览（QPdfView，PySide6 6.5+ 自带）
+三态状态机 (QStackedWidget 切换)：
+    ┌──────┐  upload   ┌──────────┐  done   ┌──────────┐
+    │ Idle │──────────▶│ Running  │────────▶│ Results  │
+    │      │           │ (QThread)│         │ (8 tabs) │
+    └──────┘           └──────────┘         └─────┬────┘
+       ▲                    │                     │
+       └─── new task ───────┴─── cancel/fail ─────┘
+
+设计要点（修复 v1 Streamlit 长任务三大 bug）：
+    - QThread + Signal 跑后台流水线，主 UI 永远不卡，24 分钟长任务也稳
+    - 完成态保持所有结果在 ResultsPanel 内存中，反复导出不会丢失
+    - 拖拽 PDF 入窗口直接开始；也支持文件选择按钮 / 菜单栏 / 文件对话框
+    - 配置持久化到 keyring + JSON（敏感字段走系统密钥环）
+    - 内嵌 PDF 预览（QPdfView，PySide6 6.5+ 自带）
+
+模块组织：
+    - MainWindow: 主窗，挂载菜单、状态栏、三态切换
+    - ConfigPanel: 左侧配置面板（LLM/OCR/流水线开关）
+    - IdlePanel: 空闲态（拖拽提示 + 浏览按钮）
+    - RunningPanel: 运行态（进度条 + 步骤清单 + 实时日志 + 取消按钮）
+    - ResultsPanel: 完成态（8 个 tab + 导出按钮）
+
+依赖关系：
+    main_window → worker (QThread 包装)
+                → settings_store (持久化)
+                → src.core.run_pipeline (UI 无关核心)
 """
 
 from __future__ import annotations

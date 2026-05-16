@@ -21,14 +21,37 @@ from src.core import PipelineResult, RuntimeConfig, run_pipeline
 
 
 class PipelineWorker(QObject):
-    """QObject 上挂载 pyqtSignal，可被 moveToThread 到工作线程"""
+    """后台流水线工人，挂载 Qt 信号供跨线程通信。
 
-    # 进度上报: (step_id, label, percent, detail)
+    生命周期:
+        1. 主线程：``worker = PipelineWorker(cfg)``
+        2. 主线程：``thread = make_worker_thread(worker)``（自动 moveToThread）
+        3. 主线程连接信号：``worker.progress.connect(...)`` 等
+        4. 主线程：``thread.start()`` → 工作线程触发 ``worker.run()``
+        5. 工作线程：``run_pipeline()`` 执行 8 步流水线
+        6. 工作线程：发射 ``finished`` 信号 → Qt 队列 → 主线程处理
+
+    线程安全:
+        - 所有信号通过 Qt 的队列连接（QueuedConnection）传递，跨线程安全
+        - ``cancel()`` 写 ``threading.Event`` 是原子的，可从任意线程调用
+        - 不要直接访问 worker 的内部字段（如 ``_config``），仅通过信号交互
+    """
+
+    # ─── 信号定义 ──────────────────────────────────
     progress = Signal(str, str, int, str)
-    # 单行日志
+    """进度上报信号。
+    参数:
+        step_id (str): 步骤标识，如 ``"step1"``、``"step2.5"``、``"done"``
+        label (str): 显示给用户的步骤名，如 ``"Step 1/8 · PDF 提取"``
+        percent (int): 总进度百分比 0-100
+        detail (str): 当前步骤的详细描述（单行）
+    """
+
     log_line = Signal(str)
-    # 完成 (PipelineResult)
+    """单行日志信号（来自 Python logging 系统的格式化字符串）"""
+
     finished = Signal(object)
+    """完成信号，参数为 ``PipelineResult``。无论成功/失败/取消都会发射。"""
 
     def __init__(self, config: RuntimeConfig, parent: Optional[QObject] = None):
         super().__init__(parent)
@@ -36,12 +59,20 @@ class PipelineWorker(QObject):
         self._cancel_event = threading.Event()
 
     def cancel(self) -> None:
-        """从主线程调用以请求取消"""
+        """请求取消（线程安全）。
+
+        从主线程或任意线程调用都安全。流水线在下一个 ``_check_cancel``
+        检查点会抛出 ``CancelledError``，被 ``run_pipeline`` 捕获并写入
+        ``PipelineResult.cancelled = True``。
+        """
         self._cancel_event.set()
 
     def run(self) -> None:
-        """在工作线程里执行流水线"""
-        # 安装一个日志 handler 把所有 INFO 推到 log_line 信号
+        """在工作线程里执行流水线，捕获所有底层 logger 输出。"""
+        # 连接到 ROOT logger（而非 __name__ logger）是有意的：
+        # pdf_extractor / llm_parser / self_verifier 等所有下游模块的日志
+        # 都需要透出到 GUI 日志窗口。用 root logger 是 Python 推荐的"全局
+        # 接管"方式，比逐个 module 注册简单且不易漏。
         log_handler = _SignalLogHandler(self.log_line)
         log_handler.setLevel(logging.INFO)
         log_handler.setFormatter(
