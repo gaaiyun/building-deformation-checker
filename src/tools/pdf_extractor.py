@@ -176,8 +176,12 @@ class PDFExtractionResult:
 
 
 def _normalize_text(text: str) -> str:
+    from src.utils.text_normalize import normalize_numeric_text
+
     text = html.unescape(text)
     text = text.replace("\u00a0", " ")
+    # v2: \u7edf\u4e00\u5904\u7406 U+2212/\u5168\u89d2\u8d1f\u53f7/\u5168\u89d2\u6570\u5b57\u7b49 OCR \u9759\u9ed8 bug \u6e90
+    text = normalize_numeric_text(text)
     return WHITESPACE_RE.sub(" ", text).strip()
 
 
@@ -486,10 +490,14 @@ def _load_cached_debug_artifacts(
 
 def extract_text_with_pdfplumber(pdf_path: str) -> str:
     """用 pdfplumber 提取文字版 PDF 的全部文本（按页分隔）。"""
+    from src.utils.text_normalize import normalize_numeric_text
+
     pages_text: list[str] = []
     with pdfplumber.open(pdf_path) as pdf:
         for i, page in enumerate(pdf.pages, 1):
             text = page.extract_text() or ""
+            # v2: 文本层提取后立刻统一 Unicode（U+2212 minus、全角数字、特殊空格等）
+            text = normalize_numeric_text(text)
             pages_text.append(f"--- 第 {i} 页 / 共 {len(pdf.pages)} 页 ---\n{text}")
     return "\n\n".join(pages_text)
 
