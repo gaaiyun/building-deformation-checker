@@ -29,6 +29,17 @@ logger = logging.getLogger(__name__)
 # 进度回调签名: (step_id, step_label, percent, detail)
 ProgressCallback = Callable[[str, str, int, str], None]
 
+# 全局配置同步锁
+#
+# Why: RuntimeConfig.to_app_globals() 会写 src.config 模块属性、os.environ
+#      以及 src.tools.pdf_extractor 的导入常量。这些都是进程级共享状态，
+#      若两个流水线并发运行（如同一进程的两个桌面窗口、Streamlit 多 session）
+#      会出现配置互相覆盖的竞态条件。本锁把配置写入串行化以避免半改半读。
+#
+# How:  pipeline 内部所有"配置写入 + 立即使用"的临界区都用本锁保护。
+#       底层工具读取 src.config.XXX 时不需要持锁（最终一致即可）。
+_CONFIG_LOCK = threading.RLock()
+
 
 # ─── 配置 ───────────────────────────────────────────────────
 @dataclass
@@ -75,44 +86,55 @@ class RuntimeConfig:
     """显式输出 .md 路径；None 则自动生成"""
 
     def to_app_globals(self) -> None:
-        """把配置同步到 src.config 模块（兼容现有模块的全局读取）。
+        """同步本配置到 `src.config` 模块属性、`os.environ` 与 `pdf_extractor` 常量。
 
-        这是个临时桥接：旧代码读 src.config.XXX，新代码读 RuntimeConfig，
-        在彻底重构所有 tools 之前必须保持同步。
+        Why（为什么需要这个看上去很危险的全局变量写入）:
+            v1 设计是所有工具模块直接读 `src.config.XXX` 的进程级常量。彻底
+            重构成依赖注入会需要改动 8 个 tools 模块的全部 LLM/OCR 调用点，
+            v2 重构暂未做这件事。本方法作为**临时桥接**，把 RuntimeConfig
+            的字段反推到所有"读全局"的位置。
+
+        线程安全:
+            内部用 `_CONFIG_LOCK` 串行化所有写入，避免并发 run_pipeline()
+            互相覆盖配置。底层工具读这些值不需要持锁（最终一致即可）。
+
+        清理计划:
+            等所有 tools 都接受 RuntimeConfig 作为参数后即可删除此方法。
+            预计 2026 Q3 完成。
         """
         import os
 
         import src.config as cfg
-
-        cfg.LLM_API_KEY = self.llm_api_key
-        cfg.LLM_BASE_URL = self.llm_base_url.rstrip("/")
-        cfg.LLM_MODEL = self.llm_model
-        cfg.LLM_PARSE_CHUNK_CHARS = self.llm_parse_chunk_chars
-        cfg.LLM_PARSE_MAX_TOKENS = self.llm_parse_max_tokens
-        cfg.LLM_PARSE_TIMEOUT_SEC = self.llm_parse_timeout_sec
-        cfg.LLM_TIMEOUT_NORMAL = self.llm_timeout_normal
-        cfg.PADDLE_OCR_TOKEN = self.paddle_ocr_token
-        cfg.PADDLE_OCR_MODEL = self.paddle_ocr_model
-        cfg.PADDLE_OCR_USE_ASYNC = self.paddle_ocr_use_async
-        cfg.PADDLE_OCR_USE_CACHE = self.paddle_ocr_use_cache
-        cfg.PADDLE_OCR_ENABLE_LEGACY_FALLBACK = self.paddle_ocr_enable_legacy_fallback
-        cfg.PADDLE_OCR_POLL_TIMEOUT_SEC = self.paddle_ocr_poll_timeout_sec
-
-        # 环境变量同步（避免 OpenAI SDK 等 fork 出来读不到）
-        os.environ["LLM_API_KEY"] = self.llm_api_key
-        os.environ["LLM_BASE_URL"] = self.llm_base_url
-        os.environ["LLM_MODEL"] = self.llm_model
-        os.environ["PADDLE_OCR_TOKEN"] = self.paddle_ocr_token
-
-        # pdf_extractor 模块使用 from-config 导入常量，须显式同步
         from src.tools import pdf_extractor as pe
 
-        pe.PADDLE_OCR_TOKEN = self.paddle_ocr_token
-        pe.PADDLE_OCR_MODEL = self.paddle_ocr_model
-        pe.PADDLE_OCR_USE_ASYNC = self.paddle_ocr_use_async
-        pe.PADDLE_OCR_USE_CACHE = self.paddle_ocr_use_cache
-        pe.PADDLE_OCR_ENABLE_LEGACY_FALLBACK = self.paddle_ocr_enable_legacy_fallback
-        pe.PADDLE_OCR_POLL_TIMEOUT_SEC = self.paddle_ocr_poll_timeout_sec
+        with _CONFIG_LOCK:
+            cfg.LLM_API_KEY = self.llm_api_key
+            cfg.LLM_BASE_URL = self.llm_base_url.rstrip("/")
+            cfg.LLM_MODEL = self.llm_model
+            cfg.LLM_PARSE_CHUNK_CHARS = self.llm_parse_chunk_chars
+            cfg.LLM_PARSE_MAX_TOKENS = self.llm_parse_max_tokens
+            cfg.LLM_PARSE_TIMEOUT_SEC = self.llm_parse_timeout_sec
+            cfg.LLM_TIMEOUT_NORMAL = self.llm_timeout_normal
+            cfg.PADDLE_OCR_TOKEN = self.paddle_ocr_token
+            cfg.PADDLE_OCR_MODEL = self.paddle_ocr_model
+            cfg.PADDLE_OCR_USE_ASYNC = self.paddle_ocr_use_async
+            cfg.PADDLE_OCR_USE_CACHE = self.paddle_ocr_use_cache
+            cfg.PADDLE_OCR_ENABLE_LEGACY_FALLBACK = self.paddle_ocr_enable_legacy_fallback
+            cfg.PADDLE_OCR_POLL_TIMEOUT_SEC = self.paddle_ocr_poll_timeout_sec
+
+            # 环境变量同步（避免 OpenAI SDK 等 fork 出来读不到）
+            os.environ["LLM_API_KEY"] = self.llm_api_key
+            os.environ["LLM_BASE_URL"] = self.llm_base_url
+            os.environ["LLM_MODEL"] = self.llm_model
+            os.environ["PADDLE_OCR_TOKEN"] = self.paddle_ocr_token
+
+            # pdf_extractor 模块使用 from-config 导入常量，须显式同步
+            pe.PADDLE_OCR_TOKEN = self.paddle_ocr_token
+            pe.PADDLE_OCR_MODEL = self.paddle_ocr_model
+            pe.PADDLE_OCR_USE_ASYNC = self.paddle_ocr_use_async
+            pe.PADDLE_OCR_USE_CACHE = self.paddle_ocr_use_cache
+            pe.PADDLE_OCR_ENABLE_LEGACY_FALLBACK = self.paddle_ocr_enable_legacy_fallback
+            pe.PADDLE_OCR_POLL_TIMEOUT_SEC = self.paddle_ocr_poll_timeout_sec
 
 
 # ─── 结果 ───────────────────────────────────────────────────
@@ -164,7 +186,13 @@ class PipelineResult:
 
 # ─── 取消支持 ───────────────────────────────────────────────
 class CancelledError(Exception):
-    """流水线在某步骤被取消"""
+    """流水线被外部取消时抛出的异常。
+
+    触发条件：``_check_cancel(cancel_event)`` 检测到 ``cancel_event.is_set()``。
+
+    在 ``run_pipeline`` 内被捕获并转换为 ``PipelineResult(cancelled=True)``，
+    调用方应通过 ``result.cancelled`` 判断而非自己捕获本异常。
+    """
 
 
 def _noop_progress(step: str, label: str, pct: int, detail: str) -> None:
@@ -197,13 +225,15 @@ def run_pipeline(
     pipeline_start = time.time()
 
     try:
-        config.to_app_globals()
-
+        # 先校验输入；失败时不污染全局 config（避免半改半读的状态）
         pdf_path = config.pdf_path
         if not Path(pdf_path).exists():
             result.error_message = f"PDF 文件不存在: {pdf_path}"
             callback("error", "失败", 0, result.error_message)
             return result
+
+        # 输入校验通过后才同步全局配置（临时桥接，2026 Q3 后可移除）
+        config.to_app_globals()
 
         pdf_name = Path(pdf_path).stem
         output_path = config.output_path or str(
