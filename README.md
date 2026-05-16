@@ -1,1038 +1,524 @@
-# 建筑变形监测报告检查智能体
+# 建筑变形监测报告核验台 v2
 
-> 基于 LLM + 规则引擎的建筑变形监测报告自动审核系统，支持多种 PDF 格式，自动提取、理解、验证监测数据。
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![PySide6](https://img.shields.io/badge/PySide6-6.5%2B-41CD52?logo=qt&logoColor=white)](https://doc.qt.io/qtforpython-6/)
+[![Streamlit](https://img.shields.io/badge/Streamlit-1.30%2B-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io/)
+[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-138%20passing-brightgreen)](tests/)
 
----
-
-## 目录
-
-- [项目概述](#项目概述)
-- [系统架构](#系统架构)
-- [完整处理流程](#完整处理流程)
-- [安装与配置](#安装与配置)
-- [使用方式](#使用方式)
-- [项目结构](#项目结构)
-- [各模块详细说明](#各模块详细说明)
-  - [1. PDF 数据提取 (pdf_extractor.py)](#1-pdf-数据提取-pdf_extractorpy)
-  - [2. LLM 结构化解析 (llm_parser.py)](#2-llm-结构化解析-llm_parserpy)
-  - [3. 动态验证配置 (table_analyzer.py)](#3-动态验证配置-table_analyzerpy)
-  - [3.5 表格分析计划 (ReAct)](#35-表格分析计划-table_analyzerpy--generate_analysis_plan)
-  - [4. 计算验证 (calculation_checker.py)](#4-计算验证-calculation_checkerpy)
-  - [5. 统计验证 (statistics_checker.py)](#5-统计验证-statistics_checkerpy)
-  - [6. 逻辑检查 (logic_checker.py)](#6-逻辑检查-logic_checkerpy)
-  - [7. AI 自验证 (self_verifier.py)](#7-ai-自验证-self_verifierpy)
-  - [8. 报告生成 (report_generator.py)](#8-报告生成-report_generatorpy)
-- [数据模型](#数据模型)
-- [核心计算公式与正负号规则](#核心计算公式与正负号规则)
-- [支持的监测项](#支持的监测项)
-- [检查规则详解](#检查规则详解)
-- [关键技术决策与注意事项](#关键技术决策与注意事项)
-- [已知问题与踩坑记录](#已知问题与踩坑记录)
-- [待改进方向](#待改进方向)
-- [测试记录](#测试记录)
-- [许可证](#许可证)
+> 基于 LLM + 规则引擎的建筑变形监测报告自动审核系统。一份 PDF 进，一份带问题清单的检查报告出。
 
 ---
 
-## 项目概述
+## 这是什么
 
-本系统旨在自动化检查建筑变形监测报告中的：
+建筑变形监测报告（基坑、桥梁、隧道、深基坑支护等）由专业监测公司出具，**累计变化量、变化速率、最大/最小统计、安全状态判定**这些字段必须与原始测值自洽。但每家公司格式各异，单位混杂（mm / m / kN）、列序不同、初始值含义也不一样。
 
-- **计算结果**：累计变化量、变化速率是否与原始测值一致
-- **统计结果**：最大/最小值、最大速率统计是否正确
-- **逻辑关系**：安全状态判定、汇总表与分表数据一致性
-- **数据完整性**：测点数量、编号一致性
+本工具做的事：抽取 PDF → 让 LLM 理解每张数据表的语义 → 用规则引擎按表自适应地校验所有计算/统计/逻辑字段 → 由第二个 LLM 复核可疑错误（Two-LLM 误报治理） → 输出带证据的 Markdown / Word / HTML 报告。
 
-**核心挑战**：不同监测公司出具的报告格式差异极大（表头命名、列排布、数据单位、初始值含义等都不同），无法用硬编码规则覆盖。本系统采用 **LLM 语义理解 + 动态规则配置 + 双重验证** 架构来解决这一问题。
+适用对象：监测单位自查、第三方复核工程师、监理与建管单位。
 
 ---
 
-## 系统架构
+## 三种使用方式
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    用户输入 (PDF 文件)                      │
-└────────────────────────┬────────────────────────────────┘
-                         ▼
-┌────────────────────────────────────────────────────────┐
-│  Step 1: PDF 数据提取                                    │
-│  ┌──────────────────┐   质量评估/回退   ┌──────────────┐ │
-│  │  PaddleOCR API   │ ───────────────→ │ pdfplumber    │ │
-│  │  table→primary→  │                  │ 文字层基线     │ │
-│  │  fallback        │                  │ (--no-ocr)     │ │
-│  └──────────────────┘                  └──────────────┘ │
-└────────────────────────┬───────────────────────────────┘
-                         ▼
-┌────────────────────────────────────────────────────────┐
-│  Step 2: LLM 结构化解析                                  │
-│  - 多策略文本分块 (页标记 → 表边界 → 字符数)               │
-│  - 分块发送 LLM, 提取为标准化 JSON                        │
-│  - 合并元数据 + 所有表格                                  │
-│  - 动态生成 TableVerificationConfig                      │
-└────────────────────────┬───────────────────────────────┘
-                         ▼
-┌────────────────────────────────────────────────────────┐
-│  Step 2.5: 表格分析计划 (ReAct)                           │
-│  - Thought: 检测字段、识别数据类型                         │
-│  - Observation: 数据样本、单位/基准分析                    │
-│  - Action: 制定验证规则、容差、严重级别                    │
-│  - 透明展示 AI 理解过程，供用户审查                        │
-└────────────────────────┬───────────────────────────────┘
-                         ▼
-┌────────────────────────────────────────────────────────┐
-│  Step 3-5: 规则引擎验证                                   │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐              │
-│  │ 计算验证  │  │ 统计验证  │  │ 逻辑检查  │              │
-│  │ 累计变化  │  │ 最大/最小 │  │ 安全状态  │              │
-│  │ 变化速率  │  │ 跨表引用  │  │ 汇总一致  │              │
-│  │ 深层位移  │  │ 方向检查  │  │ 语义匹配  │              │
-│  └──────────┘  └──────────┘  └──────────┘              │
-└────────────────────────┬───────────────────────────────┘
-                         ▼
-┌────────────────────────────────────────────────────────┐
-│  Step 6: AI 自验证 (Two-LLM Pattern)                     │
-│  - 对检出的 error 级别问题进行二次确认                      │
-│  - confirm / downgrade / dismiss                        │
-└────────────────────────┬───────────────────────────────┘
-                         ▼
-┌────────────────────────────────────────────────────────┐
-│  Step 7: 报告生成 (Markdown / Word / HTML)                │
-└────────────────────────────────────────────────────────┘
+| 入口 | 适合谁 | 启动命令 | 特点 |
+|------|--------|----------|------|
+| **桌面 GUI**（推荐） | 工程师日常审核，**长任务最稳** | `python desktop.py` | PySide6 原生窗口、QThread 后台、24 分钟任务不卡 UI |
+| **Streamlit Web** | 团队共享部署、远程访问 | `streamlit run app.py` | 浏览器即开即用、tab 切换/下载不丢状态（v2 修复） |
+| **CLI** | 批处理、CI、脚本回归 | `python main.py <file.pdf>` | 无依赖 GUI、可被任意调度器调用 |
+
+三个入口共享同一个核心引擎（`src/core/pipeline.py`），结果完全一致。
+
+> **截图占位**
+> - `docs/screenshots/desktop_running.png` — 桌面版运行态（8 步进度条 + 实时日志）
+> - `docs/screenshots/desktop_done.png` — 桌面版完成态（8 个结果 Tab）
+> - `docs/screenshots/streamlit_done.png` — Streamlit 完成态
+
+---
+
+## 架构总览
+
+三层 UI 共用同一份核心引擎，引擎本身不依赖任何 UI 框架，可独立测试与嵌入其它系统。
+
+```mermaid
+flowchart TB
+    subgraph UI["UI 层 / 可任选其一"]
+        DESK["PySide6 桌面 GUI<br/>desktop.py + gui_desktop/"]
+        WEB["Streamlit Web<br/>app.py"]
+        CLI["命令行<br/>main.py"]
+    end
+
+    subgraph CORE["核心引擎 (UI 无关)"]
+        PIPE["src/core/pipeline.py<br/>RuntimeConfig + run_pipeline + PipelineResult"]
+        NORM["src/utils/text_normalize.py<br/>Unicode 数字归一化"]
+    end
+
+    subgraph TOOLS["src/tools/ · 8 步工具"]
+        T1["pdf_extractor<br/>PyMuPDF / pdfplumber / PaddleOCR"]
+        T2["llm_parser<br/>结构化 JSON 解析"]
+        T3["table_analyzer<br/>动态配置 + ReAct 计划"]
+        T4["calculation_checker"]
+        T5["statistics_checker"]
+        T6["logic_checker"]
+        T7["self_verifier<br/>Two-LLM 复核"]
+        T8["report_generator<br/>MD / DOCX / HTML"]
+    end
+
+    subgraph EXT["外部服务"]
+        LLM["LLM API<br/>DashScope / MiniMax / Kimi"]
+        OCR["PaddleOCR-VL"]
+    end
+
+    DESK -->|"RuntimeConfig + progress_callback"| PIPE
+    WEB --> PIPE
+    CLI --> PIPE
+    PIPE --> NORM
+    PIPE --> T1
+    PIPE --> T2
+    PIPE --> T3
+    PIPE --> T4
+    PIPE --> T5
+    PIPE --> T6
+    PIPE --> T7
+    PIPE --> T8
+    T1 -.->|可选| OCR
+    T2 --> LLM
+    T3 -.->|增强| LLM
+    T6 --> LLM
+    T7 --> LLM
 ```
 
----
+**关键设计**
 
-## 完整处理流程
-
-| 步骤 | 名称 | 工具/模块 | 耗时 | 说明 |
-|------|------|-----------|------|------|
-| 1 | PDF 提取 | pdfplumber / PaddleOCR | 5-30s | 智能选择提取方式 |
-| 2 | LLM 结构化解析 | DashScope qwen3.5-plus | 60-180s | 将文本转为标准化 JSON |
-| 2b | 动态配置增强 | LLM (可选) | 0-60s | 对异常表格请求 LLM 确认配置 |
-| 2.5 | 表格分析计划 | Python (ReAct) | <1s | 逐表分析字段/单位/验证策略，透明展示 |
-| 3 | 计算验证 | 规则引擎 | <1s | 验证累计变化量、变化速率 |
-| 4 | 统计验证 | 规则引擎 | <1s | 验证最大/最小值统计 |
-| 5 | 逻辑检查 | LLM + 规则 | 30-60s | 语义匹配 + 安全状态 + 汇总一致性 |
-| 6 | AI 自验证 | LLM | 30-120s | 对 error 级别做二次确认 |
-| 7 | 报告生成 | Python | <1s | 生成 Markdown/Word/HTML |
-
-**总耗时**：约 3-8 分钟（取决于 PDF 大小和 LLM 响应速度）
+- 核心引擎只暴露三样东西：`RuntimeConfig`（输入）、`run_pipeline()`（执行）、`PipelineResult`（输出）。
+- 进度通过回调 `(step_id, label, percent, detail)` 上报，由 UI 自行决定如何渲染。
+- 支持 `cancel_event` 协作式取消，单步失败可降级而非整体中断。
 
 ---
 
-## 安装与配置
+## 8 步流水线
+
+```mermaid
+flowchart LR
+    PDF[("PDF<br/>报告")] --> S1
+    S1["Step 1<br/>PDF 提取<br/>PyMuPDF/pdfplumber/OCR"] --> S2
+    S2["Step 2<br/>LLM 结构化解析<br/>文本 → JSON"] --> S25
+    S25["Step 2.5<br/>分析计划<br/>ReAct"] --> S3
+    S3["Step 3<br/>计算验证<br/>累计变化/速率"] --> S4
+    S4["Step 4<br/>统计验证<br/>最大/最小"] --> S5
+    S5["Step 5<br/>逻辑检查<br/>安全状态/汇总一致"] --> S6
+    S6["Step 6<br/>AI 自验证<br/>error 二次确认"] --> S7
+    S7["Step 7<br/>AI 最终审核<br/>整体复读"] --> S8
+    S8["Step 8<br/>报告生成<br/>MD/DOCX/HTML"] --> OUT[("检查报告")]
+
+    style S1 fill:#e0f2fe,stroke:#0284c7
+    style S2 fill:#fef3c7,stroke:#d97706
+    style S25 fill:#fef3c7,stroke:#d97706
+    style S6 fill:#fef3c7,stroke:#d97706
+    style S7 fill:#fef3c7,stroke:#d97706
+    style OUT fill:#dcfce7,stroke:#16a34a
+```
+
+> 黄色节点调用 LLM；蓝色节点可选调用 OCR；其余为纯 Python 规则。
+
+| Step | 名称 | 耗时 | 说明 |
+|------|------|------|------|
+| 1 | PDF 提取 | 5–30 s | PyMuPDF 文本层先判，质量不足回退 pdfplumber 再回退 PaddleOCR-VL。OCR 结果按 PDF SHA256 + profile 指纹缓存。 |
+| 2 | LLM 结构化解析 | 60–180 s | 多策略分块（页 / 表 / 字符），每块单独发 LLM，合并为统一 JSON。 |
+| 2.5 | 分析计划 (ReAct) | <1 s | 纯 Python，把对每张表的字段识别、单位推断、容差选择、将要执行的验证规则**显式输出**，供用户审查 AI 理解过程。 |
+| 3 | 计算验证 | <1 s | 累计变化 = 本次 − 初始；变化速率 = 本次变化 / 间隔天数。容差按表动态调整。 |
+| 4 | 统计验证 | <1 s | 正/负方向最大、最大速率、最大/最小内力；深层位移表豁免跨表引用。 |
+| 5 | 逻辑检查 | 30–60 s | 安全状态匹配（LLM 语义） + 简报与分表汇总一致性。 |
+| 6 | AI 自验证 | 30–120 s | 仅对 `error` 级问题发起 Two-LLM 复核：confirm / downgrade / dismiss，可关闭。 |
+| 7 | AI 最终审核 | 30–90 s | 把初步报告 + 原文交给 LLM 整体复读，可关闭。 |
+| 8 | 报告生成 | <1 s | 输出标准化 Markdown，可一键转 Word / HTML。 |
+
+**总耗时**：完整流水线 3–8 分钟；跳过 Step 6 + 7 后通常 60–120 秒。
+
+---
+
+## 快速开始
 
 ### 环境要求
 
-- Python 3.10+
-- 网络连接（需要访问 DashScope LLM API 和 PaddleOCR API）
+- Python **3.10+**
+- Windows / macOS / Linux
+- LLM API Key（DashScope / MiniMax 等任一 OpenAI 兼容端点）
+- 可选：PaddleOCR API Token（仅扫描件 / 复杂版式需要）
 
-### 安装依赖
+### 安装
 
 ```bash
+git clone https://github.com/gaaiyun/building-deformation-checker.git
+cd building-deformation-checker
+
+# 通用依赖
 pip install -r requirements.txt
+
+# 桌面版需额外安装
+pip install PySide6>=6.5
+
+# 文本层快速路由（推荐）
+pip install pymupdf
 ```
 
-`requirements.txt` 内容：
+`requirements.txt` 当前内容：
 
 ```
-openai>=1.0.0        # LLM 调用（OpenAI兼容协议）
+openai>=1.0.0        # LLM 调用（OpenAI 兼容协议）
 pdfplumber>=0.11.0   # 文字版 PDF 解析
 requests>=2.31.0     # PaddleOCR API 调用
-streamlit>=1.30.0    # Web 界面
-python-docx>=1.0.0   # Word 文档导出
-markdown>=3.5.0      # Markdown 转 HTML
+streamlit>=1.30.0    # Streamlit Web UI
+python-docx>=1.0.0   # Word 导出
+markdown>=3.5.0      # Markdown → HTML
 ```
 
-### 配置
+### 三种启动方式
 
-所有配置集中在 `src/config.py`：
+**1) 桌面 GUI（推荐）**
 
-| 配置项 | 说明 | 默认值 | 环境变量 |
-|--------|------|--------|----------|
-| `LLM_API_KEY` | OpenAI 兼容 API 密钥 | 建议通过环境变量注入 | `LLM_API_KEY` |
-| `LLM_BASE_URL` | OpenAI 兼容 API 基础 URL | `https://coding.dashscope.aliyuncs.com/v1` | `LLM_BASE_URL` |
-| `LLM_MODEL` | 模型名称 | `qwen3.5-plus`，可切换 `MiniMax-M2.7-highspeed` | `LLM_MODEL` |
-| `LLM_PARSE_CHUNK_CHARS` | LLM 结构化解析单块最大字符数 | `18000` | `LLM_PARSE_CHUNK_CHARS` |
-| `LLM_PARSE_MAX_TOKENS` | LLM 结构化解析最大输出 token | `24000` | `LLM_PARSE_MAX_TOKENS` |
-| `PADDLE_OCR_ASYNC_JOB_URL` | PaddleOCR 异步任务 API | `https://paddleocr.aistudio-app.com/api/v2/ocr/jobs` | `PADDLE_OCR_ASYNC_JOB_URL` |
-| `PADDLE_OCR_MODEL` | PaddleOCR 模型名 | `PaddleOCR-VL-1.5` | `PADDLE_OCR_MODEL` |
-| `PADDLE_OCR_TOKEN` | PaddleOCR 认证 Token | 建议通过环境变量注入 | `PADDLE_OCR_TOKEN` |
-| `PADDLE_OCR_USE_ASYNC` | 是否优先使用异步 OCR API | `1` | `PADDLE_OCR_USE_ASYNC` |
-| `PADDLE_OCR_USE_CACHE` | 是否复用 OCR debug/cache 结果 | `1` | `PADDLE_OCR_USE_CACHE` |
-| `PADDLE_OCR_ENABLE_LEGACY_FALLBACK` | 异步 OCR 失败时是否回退 legacy API | `1` | `PADDLE_OCR_ENABLE_LEGACY_FALLBACK` |
-| `FLOAT_TOLERANCE` | 浮点数容差 (mm) | `0.15` | - |
-| `RATE_TOLERANCE` | 速率容差 (mm/d) | `0.05` | - |
+```bash
+python desktop.py
+```
 
-> **注意**：`FLOAT_TOLERANCE` 和 `RATE_TOLERANCE` 是全局默认值。实际验证时，`table_analyzer.py` 会根据每张表的数据特征动态调整容差，见 [动态验证配置](#3-动态验证配置-table_analyzerpy)。
->
-> **安全建议**：不要把真实 API 密钥和 Token 提交到仓库，优先使用环境变量或本地未纳入版本控制的配置文件。
+拖入 PDF 即跑；首次启动会提示填写 API Key，配置自动持久化到 `~/AppData/.../settings.json`（Windows）。
 
----
-
-## 使用方式
-
-### Streamlit Web 界面（推荐）
+**2) Streamlit Web**
 
 ```bash
 streamlit run app.py
 ```
 
-界面功能：
-- **侧边栏**：可直接输入 OpenAI 兼容 `Base URL`、`API Key`、模型 ID，调整 LLM 分块/输出/超时参数，并配置 PaddleOCR token、模型、异步 API、缓存和 legacy 回退
-- **进度显示**：`st.status` 8 步实时显示进度，`st.progress` 进度条；页面同时显示当前阶段、状态流和运行日志尾部
-- **结果展示**：指标卡片（通过/需复核/发现错误、数据表数、错误数、警告数、提示数、耗时）+ 8 个选项卡（检查报告/提取诊断/分析计划/计算验证/统计验证/逻辑检查/最终审核/运行日志）
-- **提取诊断**：展示选中的 OCR profile、压缩率、高 markup 页、异常表、调试目录和提取尝试链路
-- **导出功能**：Markdown / Word (docx) / HTML（可打印为PDF）三种格式，其中 Word 导出采用统一黑色字体与正式文档排版
-- **运行日志**：实时捕获所有模块的日志输出，通过自定义 `StreamlitLogHandler` 实现
+浏览器打开 `http://localhost:8501`，侧边栏填配置，主界面上传 PDF。
 
-### 命令行
+**3) CLI**
 
 ```bash
-# 基本用法
+# 默认：pdfplumber 优先，必要时回退 OCR
 python main.py "监测报告.pdf"
 
-# 强制使用 PaddleOCR（适用于扫描件）
+# 扫描件：强制走 OCR
 python main.py "扫描件.pdf" --ocr
 
-# 仅使用 pdfplumber（适用于文字层 PDF，对比基线）
-python main.py "报告.pdf" --no-ocr
+# 提速：跳过 Step 6 + 7
+python main.py "报告.pdf" --no-ai-review --no-self-verify
 
-# 跳过 AI 最终审核（加速）
-python main.py "报告.pdf" --no-ai-review
-
-# 跳过 AI 自验证
-python main.py "报告.pdf" --no-self-verify
-
-# 指定输出路径
-python main.py "报告.pdf" -o output/my_report.md
-
-# 使用 MiniMax Token Plan 的 OpenAI 兼容端点
-set LLM_BASE_URL=https://api.minimaxi.com/v1
-set LLM_API_KEY=sk-cp-...
-python main.py "报告.pdf" --model MiniMax-M2.7-highspeed --no-self-verify --no-ai-review
+# 切换 LLM 模型
+python main.py "报告.pdf" --model MiniMax-M2.7-highspeed -o output/my_check.md
 ```
+
+---
+
+## 配置
+
+### API Key 从哪里来
+
+| 服务 | 注册入口 | 说明 |
+|------|----------|------|
+| **DashScope (阿里云)** | https://dashscope.aliyuncs.com/ | 默认 Base URL，支持 `qwen3.5-plus` |
+| **MiniMax** | https://api.minimaxi.com/ | 用 `MiniMax-M2.7-highspeed` 提速 |
+| **PaddleOCR-VL** | https://aistudio.baidu.com/ | 仅扫描件/复杂版式时需要 |
+
+### 三种配置注入方式（优先级从高到低）
+
+**1) GUI 侧边栏 / Streamlit Sidebar**
+
+最简单。桌面版填一次自动保存；Streamlit 每次会话生效。
+
+**2) 环境变量**
+
+```bash
+# PowerShell (Windows)
+$env:LLM_API_KEY = "sk-..."
+$env:LLM_BASE_URL = "https://coding.dashscope.aliyuncs.com/v1"
+$env:LLM_MODEL = "qwen3.5-plus"
+$env:PADDLE_OCR_TOKEN = "..."           # 可选
+
+# bash / zsh
+export LLM_API_KEY="sk-..."
+export LLM_MODEL="qwen3.5-plus"
+```
+
+**3) 桌面版 settings.json + 系统 keyring**
+
+桌面版分**两层**存储用户配置：
+
+- **敏感字段**（`llm_api_key`、`paddle_ocr_token`）→ 系统 keyring（Windows Credential Manager / macOS Keychain / Linux Secret Service），**绝不明文落盘**。
+- **非敏感字段**（模型名、URL、超时、UI 偏好）→ `~/AppData/Roaming/BuildingDeformationChecker/settings.json`，纯 JSON，可直接编辑或团队共享。
+
+安装系统 keyring 后端（首次使用前）：
+
+```bash
+pip install keyring
+```
+
+如果系统不支持 keyring（少数 headless Linux），settings_store 会自动回退到 JSON 存储并打印 warning。
+
+迁移 v1 旧配置：v1 把 API key 也写在 JSON 里；v2 启动时自动读出并迁移到 keyring，旧 JSON 中的明文密钥下次保存时会被清除。
+
+### 常用 RuntimeConfig 字段
+
+直接调用核心引擎时：
+
+```python
+from src.core import RuntimeConfig, run_pipeline
+
+cfg = RuntimeConfig(
+    pdf_path="report.pdf",
+    llm_api_key="sk-...",
+    llm_model="qwen3.5-plus",
+    paddle_ocr_token="",          # 留空则禁用 OCR
+    use_ocr=False,                # True = 强制优先 OCR
+    auto_fallback=True,           # 文本层不足时自动回退
+    skip_self_verify=False,       # 跳过 Step 6
+    skip_ai_review=False,         # 跳过 Step 7
+    output_dir="output",
+)
+
+result = run_pipeline(cfg, progress_callback=lambda *a: print(a))
+print(result.final_md)
+```
+
+---
+
+## v2 修复了什么：Streamlit 状态丢失 Bug
+
+v1 的 `app.py` 全文 1300 行**完全没用 `st.session_state`**，导致三个典型 bug：
+
+| 现象 | 根因 |
+|------|------|
+| 切换浏览器 tab，回来发现进度停了 | Streamlit WebSocket 重连触发 full rerun，`ScriptRunner` 线程被取消 |
+| 下载 Markdown 后想下 Word，按钮消失 | 所有结果存在 `if st.button` 块内的局部变量里，rerun 后丢失 |
+| 24 分钟的长任务被杀 | 整个流水线跑在主脚本线程，任何 rerun 都会终止 |
+
+**v2 的修复思路**：
+
+1. 把流水线塞进 `threading.Thread` 后台跑，线程句柄存模块级 dict（活在 rerun 之间）。
+2. 所有进度、日志、结果一律走 `st.session_state`，用 UUID 跟踪任务。
+3. 用 `@st.fragment(run_every=1.0)` 每秒轮询后台状态，无需用户操作。
+4. 完成后所有产物保留在 `st.session_state.result`，下载按钮触发的 rerun 不会丢。
+
+```mermaid
+stateDiagram-v2
+    [*] --> idle
+    idle --> running: 上传 PDF + 点击 开始检查<br/>(启动后台 Thread, 写入 task_id)
+    running --> running: fragment 每秒轮询<br/>同步 progress/logs
+    running --> done: thread.is_alive == False<br/>+ result.success
+    running --> failed: result.success == False
+    running --> cancelled: 用户取消 → cancel_event.set()
+    done --> done: 下载 MD/DOCX/HTML<br/>(rerun 不丢状态)
+    done --> idle: 点击 新建任务<br/>清空 session_state
+    failed --> idle: 点击 返回首页
+    cancelled --> idle: 点击 返回首页
+
+    note right of running: 切 tab / 关浏览器 / 重连\n后台 Thread 不受影响
+    note right of done: 反复下载、上传新 PDF\n均保持完成态
+```
+
+桌面版（PySide6）不存在 Streamlit 的 rerun 问题，但仍采用同样的"长任务走后台线程"模式：
+
+```mermaid
+sequenceDiagram
+    participant U as 用户
+    participant M as 主线程<br/>(MainWindow)
+    participant W as PipelineWorker<br/>(QObject)
+    participant T as QThread
+
+    U->>M: 拖入 PDF
+    M->>W: 创建 PipelineWorker(config)
+    M->>T: QThread + moveToThread(worker)
+    M->>T: thread.start()
+    T->>W: started 信号触发 worker.run()
+    activate W
+    W-->>M: progress(step, pct, detail) 信号
+    W-->>M: log_line(msg) 信号
+    M->>M: 更新 QProgressBar / QTextEdit<br/>(Qt 事件队列自动跨线程)
+    U->>M: 点击 取消运行
+    M->>W: worker.cancel() → Event.set()
+    W->>W: 下一个 _check_cancel() 抛 CancelledError
+    W-->>M: finished(PipelineResult) 信号
+    deactivate W
+    M->>M: stack.setCurrentWidget(results_panel)
+    M->>M: results_panel.render(result)
+```
+
+**关键点**：信号槽通过 Qt 事件队列跨线程投递，主 UI 线程不会被任何后台调用阻塞，最小化窗口 / 调整大小 / 切换桌面都不会影响后台任务。
+
+---
+
+## 安全设计
+
+- **API Key 不落盘**：所有敏感凭证存系统 keyring，settings.json 永远不含明文 sk-/token 字符串（详见上节）。
+- **配置并发安全**：`RuntimeConfig.to_app_globals()` 用 `threading.RLock` 串行化，多个流水线实例并发跑不会互相覆盖配置。
+- **输入校验前置**：流水线先校验 PDF 文件存在再同步全局配置，避免污染 `src.config` 后才报错。
+- **取消事件协作式**：`cancel_event` 在每步开始时检查，长任务可秒级响应取消，不会泄露未完成的 LLM 调用。
+- **OCR 调试目录可关**：默认开启 PaddleOCR 缓存以加速重跑，但调试目录会保存 OCR 原始/清洗中间产物，敏感项目应在 `~/.../settings.json` 关闭。
+
+---
+
+## 测试与质量
+
+```bash
+# 跑全部 138 个测试
+python -m pytest tests/ -v
+
+# 跑单个模块
+python -m pytest tests/test_text_normalize.py -v
+
+# 快速冒烟（无需 API key，用缓存 OCR + 内置样本）
+python smoke_test_v2.py
+```
+
+`tests/` 目录覆盖（共 138 个用例，1.2 秒跑完）：
+
+| 文件 | 用例数 | 重点覆盖 |
+|------|-------|----------|
+| `test_text_normalize.py` | 27 | U+2212 / 全角数字 / 千分位 / 中文单位前后缀 / 科学记数 |
+| `test_pipeline.py` | 25 | RuntimeConfig 默认值/同步、PipelineResult 派生属性、CancelledError、run_pipeline 异常路径 |
+| `test_export_formats.py` | 18 | DOCX 字节流/ZIP 签名/Microsoft YaHei 字体、HTML doctype/lang/中文项目名/print 媒体样式 |
+| `test_settings_store.py` | 17 | keyring 隔离、JSON 损坏容错、env var 回退、敏感字段不落 JSON |
+| `test_worker.py` | 9 | PipelineWorker.cancel()、SignalLogHandler、make_worker_thread 生命周期 |
+| `test_pdf_extractor.py` | 6 | OCR/文本层路由、清洗、缓存命中 |
+| `test_llm_parser.py` | 4 | JSON 提取容错、分块策略、`_extract_json_from_response` |
+| `test_calculation_checker.py` | 4 | 单位换算、容差动态调整、深层位移 abs 比较 |
+| `test_statistics_checker.py` | 4 | 正/负方向最大、跨表引用、水位放宽容差 |
+| `test_logic_and_self_verifier.py` | 6 | 安全状态语义匹配、Two-LLM 复核流程 |
+| `test_table_recognition_fixes.py` | 8 | 异常表识别、单位推断回归 |
+| `test_step78_timeout_fix.py` | 9 | Step 6 / Step 7 LLM 超时与降级 |
+| `test_report_generator.py` | 1 | Markdown 渲染快照 |
+
+仓库还附带 5 份样本 PDF + OCR 缓存（`output/*_ocr_debug/`），可在无 API key 情况下做离线回归。
 
 ---
 
 ## 项目结构
 
 ```
-建筑变形监测Agent/
-├── app.py                           # Streamlit Web UI (483行)
-│                                    #   - StreamlitLogHandler 日志捕获
-│                                    #   - 8步进度展示(含ReAct分析计划)
-│                                    #   - 多格式导出 (MD/DOCX/HTML)
-│                                    #   - _render_analysis_plan ReAct展示
-│                                    #   - _render_issues 按表分组展示
-│                                    #   - _generate_docx Word导出
-│                                    #   - _generate_html 可打印HTML
-│
-├── main.py                          # CLI 入口 (178行)
-│                                    #   - argparse 命令行参数
-│                                    #   - 8步流水线
-│
-├── requirements.txt                 # Python 依赖
-├── README.md                        # 本文档
-├── .gitignore                       # Git 忽略规则
+building-deformation-checker/
+├── desktop.py                       # 桌面版入口
+├── main.py                          # CLI 入口
+├── app.py                           # Streamlit Web UI (v2 重写)
+├── app_v1_legacy.py                 # v1 旧 UI，保留参照
+├── smoke_test_v2.py                 # 冒烟脚本
+├── requirements.txt
+├── LICENSE                          # MIT
 │
 ├── src/
-│   ├── config.py                    # 全局配置 (23行)
-│   │                                #   - LLM API 配置
-│   │                                #   - PaddleOCR API 配置
-│   │                                #   - 数值精度常量
-│   │
+│   ├── core/                        # 【v2 新增】UI 无关核心引擎
+│   │   ├── pipeline.py              #   - RuntimeConfig
+│   │   │                            #   - PipelineResult
+│   │   │                            #   - run_pipeline()
+│   │   └── __init__.py
+│   ├── config.py                    # 全局配置（兼容层）
 │   ├── models/
-│   │   └── data_models.py           # 数据模型定义 (165行)
-│   │                                #   - SafetyStatus / MonitoringCategory 枚举
-│   │                                #   - ThresholdConfig 报警/控制值
-│   │                                #   - TableVerificationConfig 动态验证配置
-│   │                                #   - MeasurementPoint 普通测点
-│   │                                #   - DeepDisplacementPoint 深层位移测点
-│   │                                #   - StatisticsSummary 表底统计
-│   │                                #   - MonitoringTable 监测数据表
-│   │                                #   - ReportSummaryItem 简报汇总项
-│   │                                #   - MonitoringReport 完整报告
-│   │                                #   - CheckIssue 检查问题
-│   │
+│   │   └── data_models.py           # MonitoringReport / CheckIssue 等数据类
+│   ├── utils/
+│   │   ├── text_normalize.py        # 【v2 新增】Unicode 数字归一化
+│   │   └── llm_client.py
 │   └── tools/
-│       ├── pdf_extractor.py         # PDF 提取 (197行)
-│       ├── llm_parser.py            # LLM 结构化解析 (343行)
-│       ├── table_analyzer.py        # 动态验证配置 + ReAct分析计划
-│       ├── calculation_checker.py   # 计算验证 (291行)
-│       ├── statistics_checker.py    # 统计验证 (260行)
-│       ├── logic_checker.py         # 逻辑检查 (326行)
-│       ├── self_verifier.py         # AI 自验证 (142行)
-│       └── report_generator.py      # 报告生成 (153行)
+│       ├── pdf_extractor.py         # PyMuPDF/pdfplumber/PaddleOCR-VL 路由
+│       ├── llm_parser.py            # LLM 结构化解析
+│       ├── table_analyzer.py        # 动态配置 + ReAct 计划
+│       ├── calculation_checker.py
+│       ├── statistics_checker.py
+│       ├── logic_checker.py
+│       ├── self_verifier.py         # Step 6 Two-LLM
+│       ├── extraction_quality.py    # 提取质量诊断
+│       ├── report_generator.py
+│       └── export_formats.py        # DOCX / HTML 转换
 │
-└── output/                          # 检查报告输出目录（git忽略）
+├── gui_desktop/                     # 【v2 新增】PySide6 桌面 GUI
+│   ├── main_window.py               #   - IdlePanel / RunningPanel / ResultsPanel
+│   ├── worker.py                    #   - QThread + Signal worker
+│   └── settings_store.py            #   - 配置持久化
+│
+├── tests/                           # 69 个测试
+├── docs/
+│   ├── specs/
+│   │   └── 2026-05-16-v2-redesign-design.md
+│   ├── 异构PDF表格核对流程设计.md
+│   └── 老板汇报_提取与误报治理设计说明.md
+│
+└── output/                          # 检查报告输出（git ignore）
+    └── *_ocr_debug/                 # OCR 调试与缓存目录
 ```
 
 ---
 
-## 各模块详细说明
+## 输出报告样例
 
-### 1. PDF 数据提取 (pdf_extractor.py)
-
-#### 技术方案
-
-提供两类提取入口，并在 OCR 路径下进一步细分 profile：
-
-| 引擎 / Profile | 适用场景 | 技术 | 优点 | 缺点 |
-|------|---------|------|------|------|
-| **PaddleOCR table profile** | 表格密集、跨页表、复杂版式 PDF | API 版面解析 + 表格导向 prompt | 表格结构更完整，适合多页统计表 | 需要额外清洗图表噪声 |
-| **PaddleOCR primary / fallback** | table profile 质量一般或失败时 | API 版面解析 + OCR/回退参数 | 兜底能力更强 | 输出更容易带入噪声 |
-| **pdfplumber** | 文字层 PDF、对比基线 | 直接读取 PDF 文本层 | 速度快、噪声少 | 图文混排 / 扫描件容易错行或缺表 |
-
-#### 当前默认提取链路
-
-当前默认策略为“pdfplumber 优先，按需回退 OCR”。`--ocr` 会优先使用 PaddleOCR 异步任务接口，`--no-ocr` 仅使用文本层，适合快速基线和批量回归：
-
-```
-if --ocr:
-    依次尝试 PaddleOCR:
-      1. table profile
-      2. primary profile
-      3. fallback profile
-    若 OCR 失败或质量不足 → 回退 pdfplumber
-else:
-    先使用 pdfplumber
-    若文本层质量不足:
-      1. table profile
-      2. primary profile
-      3. fallback profile
-    每次 OCR 后都执行 Markdown/HTML 表格清洗和质量评估
-```
-
-#### PaddleOCR API 调用细节
-
-- **优先端点**：`PADDLE_OCR_ASYNC_JOB_URL`，默认 `https://paddleocr.aistudio-app.com/api/v2/ocr/jobs`
-- **模型**：`PADDLE_OCR_MODEL`，默认 `PaddleOCR-VL-1.5`
-- **认证**：`Authorization: bearer <TOKEN>`
-- **输入**：本地 PDF 通过 multipart 上传；URL 文件通过 JSON `fileUrl` 提交
-- **输出**：任务完成后下载 `jsonUrl`，读取 `layoutParsingResults[].markdown.text`
-- **轮询**：`PADDLE_OCR_POLL_INTERVAL_SEC` / `PADDLE_OCR_POLL_TIMEOUT_SEC`
-- **legacy 回退**：异步 API 失败且 `PADDLE_OCR_ENABLE_LEGACY_FALLBACK=1` 时，才调用旧版 `PADDLE_OCR_URL`
-- **table profile 关键参数**：
-  - `markdownIgnoreLabels=["header","header_image","footer","footer_image","number","footnote","aside_text"]`
-  - `useLayoutDetection=True`
-  - `promptLabel="table"`
-  - `useOcrForImageBlock=False`
-  - `restructurePages=True`
-  - `mergeTables=True`
-  - `visualize=False`
-
-#### OCR 清洗与调试产物
-
-Paddle / MinerU 这类服务返回的 `markdown.text` 往往仍然包含大量 HTML 表格、图表标题、曲线坐标轴和图片占位。当前实现会在进入 LLM 前做一次轻量但针对性的清洗：
-
-1. 将 HTML 表格压缩成轻量文本表格
-2. 删除 `style/div/img` 等无意义包装
-3. 剔除 `监测数据成果曲线图`、位移曲线、坐标轴行、Markdown 图片行等噪声
-4. 保留表标题、统计块和关键列头，确保 `_split_chunks` 仍可按表边界分段
-
-调试模式下会在 `output/<pdf_stem>_ocr_debug/` 落盘：
-
-- `raw/page_XXX.md`：OCR 原始页内容
-- `clean/page_XXX.txt`：清洗后的页文本
-- `stats.json`：字符数、压缩率、表格数、异常页等指标
-- `request_profile.json`：实际请求 profile 参数、PDF SHA256 指纹、Paddle 模型、profile 指纹和 OCR 清洗器版本
-
-默认开启 `PADDLE_OCR_USE_CACHE=1`。如果 debug 目录中的 PDF 指纹、Paddle 模型、profile 指纹和清洗器版本都一致，系统会直接复用 `raw/clean/stats`，跳过远程 OCR 调用；任一条件变化都会自动失效，避免旧缓存污染新实验。
-
-#### 注意事项
-
-- PaddleOCR API 是外部服务，需确保 Token 有效且服务可用
-- 对于文字层很干净的 PDF，默认策略通常已经足够；`--no-ocr` 仍然是重要对比基线
-- 同一监测项跨页表的统计块，当前规则层已按 `(monitoring_item, borehole_id)` 组内合并后再做统计判定
-- `extract_tables_with_pdfplumber()` 提取结构化表格数据，但当前主流程仍以文本/Markdown 进入 LLM，结构化字段由 LLM 统一理解
-
----
-
-### 2. LLM 结构化解析 (llm_parser.py)
-
-#### 核心思路
-
-将 PDF 提取的非结构化文本发送给 LLM（qwen3.5-plus），由 LLM 理解表格含义后输出标准化 JSON。
-
-#### 多策略文本分块 (`_split_chunks`)
-
-大型 PDF 可能超过 LLM 上下文窗口，需要分块处理：
-
-| 策略 | 触发条件 | 分块方式 | 优先级 |
-|------|---------|---------|--------|
-| 按页标记分割 | 文本包含 `--- 第 N 页` | 按页标记拆分，合并到 ≤`LLM_PARSE_CHUNK_CHARS` 字符 | 最高 |
-| 按表边界分割 | 文本包含 `【xxx】监测` | 按表标题拆分，合并到 ≤`LLM_PARSE_CHUNK_CHARS` 字符 | 中 |
-| 字符数回退分割 | 以上策略都不适用，或单页/单表超长 | 每 `LLM_PARSE_CHUNK_CHARS` 字符切割，500 字符重叠 | 最低 |
-
-**设计决策**：当前默认 `LLM_PARSE_CHUNK_CHARS=18000`。此前大文档使用 28000 字符分块时，输出 JSON 更容易超长或被截断；降低分块尺寸后，大 PDF 会多发几次请求，但单块结构化更稳定。即使单页 OCR 文本超过上限，也会被二次切分，不再把超长单页原样送入 LLM。
-
-#### SYSTEM_PROMPT 设计
-
-提示词包含以下关键指令：
-
-1. **提取规则**：必须提取每一张监测数据表格，数值原样提取
-2. **语义理解**：通过语义识别监测项类型（不同公司表述差异大）
-3. **初始值说明**：有些表没有初始值列，此时 `initial_value` 设 `null`
-4. **正负号规则**：正负号代表方向不代表大小（这是最核心的领域知识）
-5. **间隔天数**：如果报告有日期范围，计算间隔天数
-6. **table_unit 字段**：LLM 需识别每张表的数据单位（mm/m/kN）
-7. **initial_value_reliable 字段**：LLM 需判断初始值是否可用于计算累计变化
-8. **JSON 结构模板**：严格定义输出格式
-
-#### 多块合并策略
-
-```
-第1块: 提取元数据（project_name, thresholds, summary_items）+ tables
-第2..N块: 提取本块 tables；如出现新的 thresholds/summary_items，按 item_name/monitoring_item 去重合并
-最终: 所有块的 tables 合并为一个列表；报告诊断中记录 LLM 分块总数、成功数和解析失败数
-```
-
-#### JSON 解析容错 (`_extract_json_from_response`)
-
-LLM 输出可能包含：
-- Markdown 代码块包裹（` ```json ... ``` `）
-- `<thinking>` 标签（思考过程）
-- 前缀/后缀无关文字
-
-处理流程：
-1. 去除 Markdown 代码块标记
-2. 去除 `<thinking>` 标签内容
-3. 找到第一个 `{` 和最后一个 `}` 之间的内容
-4. `json.loads()` 解析
-
-#### 数值解析辅助函数
-
-- `_sf(v)`: 安全浮点数转换，处理 `None`、空字符串、`"--"`、`"-"`、`"N/A"` 等
-- `_sid(v)`: 安全字符串 ID 转换，将 `"None"` / `"null"` 字符串转为空字符串
-- `_cat(s)`: 类别字符串到 `MonitoringCategory` 枚举的映射
-
-#### 注意事项
-
-- LLM 调用超时设为 300 秒（大文档解析可能需要较长时间）
-- `max_tokens=32000` 确保有足够空间输出大型 JSON
-- `temperature=0.1` 低温度确保输出稳定性
-- 某个分块 LLM 调用失败不会中断整个流程（`continue`）
-
----
-
-### 3. 动态验证配置 (table_analyzer.py)
-
-#### 核心理念
-
-**不硬编码容差/严重级别**，而是根据每张表的实际数据特征动态决定验证参数。
-
-这是整个系统最关键的设计之一，解决了"一套规则无法适配所有表格"的问题。
-
-#### `build_verification_config()` 逻辑
-
-根据 LLM 识别的 `table_unit` 和表格类别，生成 `TableVerificationConfig`：
-
-| 数据类型 | unit | unit_conversion | cumulative_tolerance | severity | initial_value_reliable |
-|---------|------|-----------------|---------------------|----------|----------------------|
-| 普通位移 (mm) | mm | 1.0 | 0.15 | error | true |
-| 高程数据 (m) | m | 1000.0 | 1.0 | warning | false |
-| 水位数据 | mm | 1.0 | 10.0 | warning | false |
-| 锚索拉力 (kN) | kN | 1.0 | 0.15 | error | true |
-
-#### 关于高程数据的特殊处理
-
-**这是最容易产生误报的场景**，需要特别理解：
-
-```
-初始高程 = -2.70184 m
-本次高程 = -2.70242 m
-报告中的累计变化 = 31.21 mm
-
-计算: (-2.70242 - (-2.70184)) × 1000 = -0.58 mm
-但报告说累计变化是 31.21 mm！
-
-原因: 报告中的"初始高程"是本期的参考值，不是项目建设初期的首次测量值。
-31.21 mm 是从项目首测以来的总累计变化，但表中没有真正的初始值。
-```
-
-因此高程数据的累计变化量不一致只能标记为 `warning`，不能判定为 `error`。
-
-#### 启发式检测 (`_detect_elevation_from_data`)
-
-如果 LLM 没有正确识别 `table_unit`，用启发式方法检测高程数据：
-
-- 初始值绝对值 < 100（看起来像高程，单位 m）
-- 累计变化绝对值 > 1（看起来像 mm 级别）
-- 两者量级不匹配 → 判断为高程数据
-
-#### LLM 配置增强 (`enrich_configs_with_llm`)
-
-对于启发式判断可能不准确的表格（计算值与报告值相差 > 100 倍），额外请求 LLM 分析：
-
-- 只在发现异常时才调用 LLM，减少 API 调用次数
-- 失败不影响主流程（`non-fatal`）
-
----
-
-### 3.5 表格分析计划 (table_analyzer.py — `generate_analysis_plan`)
-
-#### 核心理念
-
-在验证之前，先让系统"说出"它对每张表的理解，采用 **ReAct 模式**（Thought → Observation → Action）透明展示推理过程。
-
-这一步不调用 LLM，纯 Python 分析，基于已构建的 `TableVerificationConfig` 和表格数据特征。
-
-#### 输出结构
-
-对每张表生成一个分析计划 dict，包含：
-
-| 字段 | 说明 | 示例 |
-|------|------|------|
-| `table_name` | 监测项 + 孔位 | "深层水平位移观测 (C1)" |
-| `fields_detected` | 哪些数据列有值 | `{"initial_value": true, "change_rate": true}` |
-| `data_sample` | 前2个测点的原始数据 | "S1: 初始=-2.70184, 本次=-2.70242, 累计=31.21" |
-| `unit` / `conversion_note` | 单位及转换说明 | "m → mm (×1000转换)" |
-| `initial_reliable` / `reliability_reason` | 初始值可靠性分析 | "高程数据: 初始高程可能非项目首测基准" |
-| `interval_days` / `interval_source` | 监测间隔及来源 | "9天 (从数据反推)" |
-| `verification_methods` | 将执行的验证规则列表 | 累计变化量验证、变化速率验证、统计验证 |
-| `special_notes` | 特殊处理说明 | "高程数据累计变化不一致仅标warning" |
-
-#### 路由逻辑
-
-根据表格类型决定适用的验证规则：
-
-```
-if 锚索/支撑 → 锚索累计变化验证 + 统计验证
-elif 深层位移 → 深层位移速率验证(abs比较) + 统计验证(豁免跨表引用)
-else → 累计变化量验证 + 变化速率验证 + 统计验证
-```
-
-#### Streamlit 展示
-
-在"分析计划"选项卡中，每张表以 `st.expander` 展示：
-- **Thought** — 字段识别矩阵（✅/❌）
-- **Observation** — 数据样本 + 单位与基准分析
-- **Action** — 将执行的验证规则（含公式、容差、级别）
-- **特殊说明** — 需要注意的异常处理（如有）
-
----
-
-### 4. 计算验证 (calculation_checker.py)
-
-#### 核心公式
-
-```
-本次变化 = 本次测值 − 上次测值
-累计变化 = 本次测值 − 初始测值
-变化速率 = 本次变化 / 时间间隔(天)
-```
-
-#### 累计变化量验证 (`check_cumulative_change`)
-
-```python
-expected = (pt.current_value - pt.initial_value) * cfg.unit_conversion
-tol = cfg.cumulative_tolerance
-if abs(pt.cumulative_change) > 10:
-    tol = max(tol, abs(pt.cumulative_change) * 0.05)  # 大值时动态放大容差
-```
-
-- 使用 `TableVerificationConfig` 的 `unit_conversion`（高程数据需 ×1000）
-- 容差动态调整：当累计变化量 > 10mm 时，容差按 5% 放大
-- 严重级别由 `cfg.severity_for_cumulative` 决定
-
-#### 变化速率验证 (`check_change_rate`)
-
-监测间隔天数的推断策略（按优先级）：
-1. `cfg.interval_days`（LLM 从报告日期范围推断）
-2. `_infer_interval_days()`：从表中测点数据反推（取众数）
-   - 公式：`interval = current_change / change_rate`
-   - 过滤条件：`0.5 < |interval| < 365`
-3. 如果都无法推断，记录 `info` 级别提示并跳过
-
-**个别测点间隔不同的处理**：当某个测点反推出的间隔天数与多数测点不同（但本身是合理的整数天），降级为 `warning` 而非 `error`，并标注"可能该点上次监测时间不同"。
-
-#### 深层水平位移速率验证 (`check_deep_displacement_rate`)
-
-- 使用 `abs(expected_rate)` 和 `abs(dp.change_rate)` 比较（比较绝对值）
-- 这是一个重要的 bugfix：之前直接比较带符号值导致 `_close_enough(0.030, -0.030, 0.05)` 产生大量误报
-
-#### 锚索拉力验证 (`check_anchor_force`)
-
-- 公式：`累计变化 = 本次内力 - 初始内力`
-- 单位 kN，不需要单位转换
-- 初始值可靠，严格按 error 级别
-
----
-
-### 5. 统计验证 (statistics_checker.py)
-
-#### 验证内容
-
-每张表底部通常有统计摘要行，验证以下指标：
-
-| 统计项 | 验证方式 | 方向性检查 |
-|--------|---------|----------|
-| 正方向最大 | 所有累计值中正值的最大 | 若无正值，应为 "-" |
-| 负方向最大 | 所有累计值中负值绝对值最大（值最小的负数） | 若无负值，应为 "-" |
-| 最大速率 | 所有速率中绝对值最大，保留原始正负号 | - |
-| 最大内力 | 锚索/支撑力值的最大 | - |
-| 最小内力 | 锚索/支撑力值的最小 | - |
-
-#### 设计原则
-
-1. **每张表独立检查**：`_get_table_own_data()` 只取当前表自身数据，不跨表聚合
-2. **跨表引用检测**：如果统计引用的测点 ID 不在本表中，标记为错误
-3. **深层位移表豁免跨表引用检查**：深层位移表的统计值经常引用全局最大孔位（如 `CX10`），这是行业惯例而非错误
-
-#### 水位数据特殊容差
-
-水位监测数据的容差放大 10 倍（`tol = FLOAT_TOLERANCE * 10`），因为水位变化受环境因素影响较大。
-
----
-
-### 6. 逻辑检查 (logic_checker.py)
-
-#### 可核对性防线 (`check_report_extractability`)
-
-如果 LLM 解析后 `report.tables` 为空，系统会新增一条 `warning`，字段为“数据表识别”。这类报告不能因为“0 个计算错误”而判定通过，常见原因包括：
-
-- PDF 不是监测报告，例如设计说明、汇报材料或规范文档
-- 文本层/OCR 没有提取到可计算的监测数据表
-- LLM 分块解析失败或表格列映射失败
-
-报告结论会显示“需复核”，并把疑似来源标为 `extraction`。
-
-#### LLM 语义匹配 (`_build_semantic_maps`)
-
-这是解决"不同公司表述不同"的核心方案。
-
-**问题**：报告中的阈值名称、数据表名称、简报汇总名称可能完全不同：
-- 阈值："坡顶水平位移及沉降" 
-- 数据表："支护结构顶部水平位移" + "支护结构顶部竖向位移"
-- 简报："水平位移" + "竖向位移"
-
-**解决方案**：将三组名称发送给 LLM，请求建立对应关系。
-
-LLM 返回 JSON：
-```json
-{
-  "threshold_to_tables": {"坡顶水平位移及沉降": ["支护结构顶部水平位移", "支护结构顶部竖向位移"]},
-  "summary_to_tables": {"水平位移": ["支护结构顶部水平位移"]}
-}
-```
-
-**回退策略**：LLM 调用失败时，使用关键词组匹配（`_build_fallback_maps`），包含 7 组预定义关键词。
-
-#### 安全状态判定 (`check_safety_status`)
-
-```
-if |累计变化| >= 控制值 → 应为"控制"
-elif |累计变化| >= 报警值 → 应为"报警"  
-elif |速率| >= 速率限值 → 应为"报警"
-else → 应为"正常"
-
-if 报告标"正常" but 应为"报警"/"控制" → error
-if 报告标"报警" but 应为"正常" → warning（过严不算大错）
-```
-
-#### 汇总表一致性检查 (`check_summary_consistency`)
-
-验证简报汇总表中的最大值/最小值是否与对应分表的数据一致：
-
-- 锚索拉力：比较汇总中的力值与分表中的 `current_value` 最大/最小值
-- 其他监测项：比较汇总中的正/负方向最大与分表中的 `cumulative_change` 最大/最小值
-- 容差：一般用 `FLOAT_TOLERANCE`，锚索拉力用 `FLOAT_TOLERANCE * 2`
-
-#### 测点数量检查 (`check_point_count`)
-
-比较表头声明的测点数量与实际提取的行数，不一致则标记为 `warning`。
-
----
-
-### 7. AI 自验证 (self_verifier.py)
-
-#### 核心思路：Two-LLM Verification Pattern
-
-第一个 LLM 提取数据 → 规则引擎检查 → **第二个 LLM 确认错误**
-
-这大幅减少了由于数据提取不准确或规则过于严格导致的误报。
-
-#### 工作流程
-
-1. 筛选所有 `severity="error"` 的问题
-2. 对每个错误，从原始文本中截取相关表格片段（~2000 字符上下文）
-3. 组装 prompt，要求 LLM 逐一确认：
-   - `confirm`：错误确实存在 → 保持 error
-   - `downgrade`：不确定 → 降级为 warning
-   - `dismiss`：是误报 → 降级为 info
-4. 提供领域知识提示（正负号规则、高程精度、水位基准、分页拆表与提取误报）
-5. 通过进度回调向 Streamlit 报告批次开始、重试、失败和完成状态
-
-#### 关键设计
-
-- 按批次处理错误项，不再固定截断到 20 条
-- 使用 `id()` 做对象身份匹配，确保修改的是原始 CheckIssue 对象
-- 失败时 non-fatal，返回原始错误列表
-
----
-
-### 8. 报告生成 (report_generator.py)
-
-#### Markdown 报告结构
+`output/<pdf_stem>_检查报告.md` 头部片段：
 
 ```markdown
 # 建筑变形监测报告检查报告
-- 生成时间、项目名称、监测单位、报告编号、监测日期
-## 检查结果统计 (错误/警告/提示表格)
-## 数据提取摘要 (阈值/汇总/数据表列表、OCR/LLM 分块诊断)
-## 计算验证结果 (错误/警告/提示分组)
-## 统计验证结果
-## 逻辑检查结果
-## 补充审核意见 (可选)
-## 结论
+
+**生成时间**: 2026-05-13 01:10:37
+**项目名称**: 智能科技创新中心
+**监测单位**: 广东变形检测工程技术有限公司
+**报告编号**: 监测2023011-017
+**监测日期**: 2024-03-26
+
+## 检查结果统计
+
+| 类别 | 数量 |
+|------|------|
+| 错误 | 0    |
+| 警告 | 4    |
+| 提示 | 11   |
+| 合计 | 15   |
+
+> 疑似提取问题 8 条，建议结合原文人工复核。
+
+## 数据提取摘要
+
+- 提取方式: pdfplumber (pdfplumber)
+- 监测数据表: 12 张
+- 文本压缩率: 100.00%
+- OCR 调试目录: `output/监测报告检查（测试）_ocr_debug`
+
+## 计算验证结果
+...
 ```
 
-报告结论区分三种状态：
-
-- `0 error + 0 warning`：自动检查通过
-- `0 error + warning/info`：未发现硬错误，但结果为“需复核”，不能直接判定完全通过
-- `error > 0`：发现计算/统计/逻辑错误，建议复核
-
-Markdown 表格单元格会转义 `|` 并把换行替换为 `<br>`，避免 OCR 文本中的符号破坏报告表格。
-
-#### 多格式导出 (app.py)
-
-| 格式 | 实现 | 用途 |
-|------|------|------|
-| **Markdown** | 原生字符串 | 开发者查看、版本控制 |
-| **Word (docx)** | `python-docx` 生成 | 正式文档提交 |
-| **HTML** | `markdown` 库转换 + CSS | 浏览器打印为 PDF |
-
-Word 导出包含：标题页、基础信息表、检查摘要、问题表格和结论，统一使用黑色字体与正式表格样式。
-
-HTML 导出包含：微软雅黑字体、响应式布局、打印优化（`@media print`）。
+完整样例见 `output/batch_fast_20260513/` 目录下的四份 Markdown。
 
 ---
 
-## 数据模型
+## 已知限制与路线图
 
-### 核心数据类 (data_models.py)
+**当前限制**
 
-```
-MonitoringReport（完整报告）
-├── project_name, monitoring_company, report_number, ...
-├── thresholds: List[ThresholdConfig]        # 报警/控制值配置
-├── summary_items: List[ReportSummaryItem]   # 简报汇总表
-├── tables: List[MonitoringTable]            # 监测数据表
-├── threshold_map: dict                       # LLM语义匹配缓存
-├── summary_map: dict                         # LLM语义匹配缓存
-└── raw_text: str                             # 原始PDF文本
+- 单文件场景为主，未做多文件批处理 UI（CLI 可脚本化批量）。
+- 不做数据库持久化，所有结果落盘为文件。
+- LLM 调用未本地化，离线场景仅可跑规则层（Step 1/3/4/8）。
+- 桌面 GUI 暂未提供 PyInstaller 打包脚本，需手工跑 Python。
 
-MonitoringTable（单张数据表）
-├── monitoring_item, category, monitor_date, ...
-├── borehole_id, borehole_depth              # 深层位移孔位信息
-├── points: List[MeasurementPoint]           # 普通测点
-├── deep_points: List[DeepDisplacementPoint] # 深层位移测点
-├── statistics: StatisticsSummary            # 表底统计
-└── verification_config: TableVerificationConfig  # 动态验证配置
+**路线图（按优先级）**
 
-MeasurementPoint（普通测点）
-├── point_id, initial_value, previous_value, current_value
-├── current_change, cumulative_change, change_rate
-└── safety_status
-
-DeepDisplacementPoint（深层位移测点）
-├── depth
-├── previous_cumulative, current_cumulative
-└── change_rate
-
-TableVerificationConfig（动态验证配置）
-├── unit (mm/m/kN), unit_conversion (1.0/1000.0)
-├── cumulative_tolerance, rate_tolerance
-├── interval_days, direction_convention
-├── initial_value_reliable (true/false)
-└── severity_for_cumulative (error/warning)
-
-CheckIssue（检查问题）
-├── severity (error/warning/info)
-├── table_name, point_id, field_name
-├── expected_value, actual_value
-└── message
-```
+- [ ] PyInstaller 打包 `.exe`，零依赖分发
+- [ ] PaddleOCR-VL 本地推理选项（去 API 依赖）
+- [ ] 多文件并发批处理面板（桌面版）
+- [ ] 内嵌 PDF 预览定位异常字段（QPdfView 已在主窗框架内）
+- [ ] FastAPI 服务封装，供其它系统集成
 
 ---
 
-## 核心计算公式与正负号规则
+## 致谢与许可
 
-### 计算公式
+**技术栈**
 
-| 指标 | 公式 | 说明 |
-|------|------|------|
-| 本次变化 | `本次测值 − 上次测值` | 两次监测之间的变化量 |
-| 累计变化 | `本次测值 − 初始测值` | 从项目首测以来的总变化 |
-| 变化速率 | `本次变化 / 时间间隔(天)` | 每天的变化量 |
+- LLM 路由：`openai` SDK + DashScope / MiniMax 等 OpenAI 兼容端点
+- PDF：`pdfplumber` / `PyMuPDF` / PaddleOCR-VL
+- 桌面 GUI：`PySide6` 6.5+
+- Web UI：`streamlit` 1.30+
+- 文档导出：`python-docx` + `markdown`
 
-### 正负号规则（极其重要）
+**领域参照**
 
-> **正负号代表方向，不代表大小！**
+- GB 50497-2019《建筑基坑工程监测技术标准》
+- JGJ 8-2016《建筑变形测量规范》
 
-在建筑变形监测中：
-- **正值**：通常表示向外/向上/拉力增大
-- **负值**：通常表示向内/向下/拉力减小
+**许可**
 
-因此：
-- "正方向最大" = 所有正值中数值最大的（如 +5.2 > +3.1）
-- "负方向最大" = 所有负值中绝对值最大的（如 -8.3 的绝对值 > -2.1 的绝对值）
-- "最大变化速率" = 所有速率中绝对值最大的，但保留原始正负号
-
-### 单位转换
-
-| 数据类型 | 测值单位 | 变化量单位 | 转换 |
-|---------|---------|-----------|------|
-| 水平位移 | mm | mm | ×1 |
-| 高程/沉降 | m | mm | ×1000 |
-| 锚索拉力 | kN | kN | ×1 |
-| 水位 | m | mm 或 m | 视报告而定 |
-
----
-
-## 支持的监测项
-
-| 监测项 | MonitoringCategory | 常见别名 | 特殊处理 |
-|--------|-------------------|---------|---------|
-| 水平位移 | HORIZONTAL_DISP | 支护结构顶部水平位移、基坑顶位移、坡顶水平位移 | - |
-| 竖向位移 | VERTICAL_DISP | 支护结构顶部竖向位移、基坑顶沉降 | 高程数据检测 |
-| 沉降 | SETTLEMENT | 周边地面沉降、道路沉降、管线沉降 | 高程数据检测 |
-| 水位 | WATER_LEVEL | 地下水位、水位监测 | 放宽容差、初始值不可靠 |
-| 锚索拉力 | ANCHOR_FORCE | 锚索应力、预应力锚索 | kN 单位、初始值可靠 |
-| 支撑轴力 | STRUT_FORCE | 内支撑、钢支撑 | 同锚索拉力 |
-| 深层水平位移 | DEEP_HORIZONTAL | 支护桩测斜、测斜 | 特殊数据结构 |
-| 裂缝 | CRACK | 裂缝监测 | 目前仅分类，未特殊处理 |
-
----
-
-## 检查规则详解
-
-### 计算验证规则
-
-| # | 规则 | 公式 | 容差 | 严重级别 |
-|---|------|------|------|---------|
-| 1 | 累计变化量 | `(本次测值 - 初始测值) × unit_conversion` | 动态(0.15~1.0mm) | 动态(error/warning) |
-| 2 | 变化速率 | `本次变化量 / 间隔天数` | 0.05 mm/d | error |
-| 3 | 深层位移速率 | `(本次累计 - 上次累计) / 间隔天数` | 0.05 mm/d | error |
-| 4 | 锚索累计变化 | `本次内力 - 初始内力` | 0.15 kN | error |
-
-### 统计验证规则
-
-| # | 规则 | 说明 |
-|---|------|------|
-| 5 | 正方向最大统计 | 应为所有正累计值中的最大值 |
-| 6 | 负方向最大统计 | 应为所有负累计值中绝对值最大的 |
-| 7 | 方向性检查 | 若所有值非正，正方向统计应为 "-" |
-| 8 | 最大速率统计 | 应为所有速率绝对值最大的 |
-| 9 | 跨表引用检测 | 统计引用的测点必须在本表中 |
-
-### 逻辑检查规则
-
-| # | 规则 | 说明 |
-|---|------|------|
-| 10 | 安全状态判定 | 根据报警值/控制值验证安全状态标记 |
-| 11 | 汇总一致性 | 简报汇总表与分表数据应一致 |
-| 12 | 测点数量 | 表头声明的数量与实际行数应一致 |
-
----
-
-## 关键技术决策与注意事项
-
-### 1. 为什么用 LLM 而不是正则提取表格？
-
-- 不同公司的表格格式差异极大（列名、列顺序、数据排布都不同）
-- 正则/硬编码需要为每家公司写一套规则，维护成本极高
-- LLM 能通过语义理解自动适配不同格式
-
-### 2. 为什么需要 Two-LLM Verification Pattern？
-
-- 第一个 LLM 提取数据时可能出错（如把"备注"误认为"测值"）
-- 规则引擎检查基于提取的数据，如果提取有误则会产生"真诚的误报"
-- 第二个 LLM 结合原文上下文重新审视错误，能有效排除误报
-
-### 3. 为什么累计变化量不能简单用 `本次 - 初始` 计算？
-
-- **高程数据精度问题**：高程只有 5 位小数（精度 0.01mm），经过几十期累积，误差可能达到数 mm
-- **初始值基准不同**：部分报告中的"初始值"是本期参考值，不是项目首次测量值
-- **水位特殊性**：水位的初始基准可能因施工阶段而改变
-
-### 4. 为什么深层位移速率比较用绝对值？
-
-之前 `_close_enough(expected_rate, dp.change_rate, tol)` 直接比较带符号值：
-- `expected = 0.030`（正向），`actual = -0.030`（报告用负号表示方向）
-- `|0.030 - (-0.030)| = 0.060 > 0.05`，误判为错误
-
-修复后：`_close_enough(abs(expected), abs(actual), tol)` 只比较大小，忽略方向。
-
-### 5. 为什么跳过深层位移表的跨表引用检查？
-
-深层位移通常有多个孔位（如 CX1~CX15），每个孔位一张表。表底统计的"最大"可能引用全局最大的孔位（如"CX10"），这是跨所有孔位的全局统计，不是本表的。
-
-### 6. PaddleOCR 优先级
-
-优先使用 PaddleOCR 而非其他 OCR 方案的原因：
-- 支持版式分析（layout parsing），能识别表格结构
-- 输出 Markdown 格式，保留表格结构信息
-- 对中文识别效果好
-- API 调用方式简单
-
-### 7. LLM 调用的容错设计
-
-- 所有 LLM 调用都有 try-except 包裹
-- 超时设置：解析 300s、语义匹配 60s、自验证 120s
-- 失败后有回退策略（如语义匹配回退到关键词匹配）
-- 非核心的 LLM 调用（配置增强、自验证）失败不影响主流程
-
-### 8. Streamlit 日志捕获
-
-通过自定义 `StreamlitLogHandler` 类继承 `logging.Handler`，将所有模块的日志记录收集到内存列表 `log_records` 中，在"运行日志"选项卡中显示：
-
-```python
-class StreamlitLogHandler(logging.Handler):
-    def emit(self, record):
-        log_records.append(self.format(record))
-```
-
----
-
-## 已知问题与踩坑记录
-
-### 1. LLM 输出 "None" 字符串
-
-**现象**：LLM 有时将空值输出为字符串 `"None"` 而非 `null`
-
-**影响**：`stats.max_rate_id = "None"` 被当作有效测点ID，导致跨表引用检查误报
-
-**修复**：`_sid()` 函数将 `"None"` / `"null"` 转为空字符串
-
-### 2. 深层位移速率大量误报（177 个）
-
-**现象**：红土广场 PDF 检出 177 个深层位移速率错误
-
-**原因**：直接比较带符号的 `expected_rate` 和 `dp.change_rate`，正负号方向不同导致差值翻倍
-
-**修复**：比较绝对值 `_close_enough(abs(expected), abs(actual), tol)`
-
-### 3. 深层位移统计跨表引用误报（82 个）
-
-**现象**：红土广场 PDF 深层位移表的统计值引用了其他表的测点
-
-**原因**：行业惯例，深层位移的"全局最大"引用跨孔位的数据
-
-**修复**：`is_deep` 时跳过 `_check_cross_table_ref`
-
-### 4. 大文档 LLM 超时
-
-**现象**：恒大中心 138K 字符 PDF 在 LLM 解析阶段超时
-
-**修复**：改进文本分块策略（3 种策略），增大单块上限到 28K 字符，增大 `max_tokens` 到 32K
-
-### 5. config.py LLM_BASE_URL 环境变量名错误
-
-**现象**：`LLM_BASE_URL` 的 `os.getenv` 第一个参数误写为 `"LLM_API_KEY"`，导致如果设置了 `LLM_API_KEY` 环境变量，`LLM_BASE_URL` 会被覆盖为 API Key 的值
-
-**修复**：改为正确的 `os.getenv("LLM_BASE_URL", ...)`
-
-### 6. PowerShell heredoc 语法不兼容
-
-**现象**：Git commit 时使用 heredoc 语法（`<<'EOF'`）在 PowerShell 中报错
-
-**修复**：使用单行 commit message 或 `-m` 参数
-
----
-
-## 待改进方向
-
-### 高优先级
-
-1. **本地 OCR 支持**：当前 PaddleOCR 依赖远程 API，应支持本地部署的 PaddleOCR/PP-Structure，避免网络依赖和 Token 过期问题
-2. **LLM 提取准确率提升**：对于复杂的合并单元格或多页表格，LLM 有时会遗漏数据行或错误对齐列。可考虑：
-   - 先用 pdfplumber 提取结构化表格，再让 LLM 理解语义
-   - 使用多轮对话让 LLM 自检提取结果
-3. **批量处理能力**：支持一次上传多个 PDF，批量检查并汇总结果
-4. **持久化存储**：当前检查结果只保存为文件，应支持数据库存储，方便历史对比
-5. **黄金样本集**：当前已有单元测试和根目录 PDF 回归，但仍需沉淀更多带人工标注的 golden JSON/Markdown 结果，便于量化准确率
-
-### 中优先级
-
-6. **增量验证**：对比同一项目的连续期报告，验证"上次测值"是否与前期报告的"本次测值"一致
-7. **可配置规则引擎**：允许用户通过 YAML/JSON 自定义验证规则、容差、严重级别
-8. **图表验证**：验证报告中的监测曲线图与数据表是否一致
-9. **模板学习**：从已验证正确的报告中学习特定公司的格式，提高后续提取准确率
-10. **多模型支持**：允许切换不同 LLM（如 GPT-4、Claude），或使用本地模型降低成本
-
-### 低优先级
-
-11. **PDF 批注输出**：直接在原 PDF 上标注发现的错误位置
-12. **多语言支持**：目前仅支持中文报告
-13. **Web API 化**：提供 REST API 接口，方便集成到其他系统
-14. **权限管理**：多用户场景下的权限控制
-15. **结果看板**：批量任务的耗时、错误数、警告数和可核对性结论可进一步做成 Web 端汇总看板
-
-### 性能优化
-
-16. **并行 LLM 调用**：多个分块可以并行发送给 LLM（当前是串行）
-17. **流式输出**：LLM 解析过程中流式返回进度，提升用户体验
-18. **内存优化**：大 PDF 的 raw_text 可以不全部保存在 MonitoringReport 中
-
----
-
-## 测试记录
-
-### 测试用 PDF
-
-| PDF 文件 | 页数 | 特点 | 已测试 |
-|---------|------|------|--------|
-| 监测报告检查（测试）.pdf | 19 | 文字版，含人工植入的错误，有对比基准（docx） | 已回归 |
-| 【监测2023011-017】鱼珠乐天智能科技创新中心(1).pdf | 19 | 常规基坑监测报告，含多类位移/水位/内力表 | 已回归 |
-| 恒大中心基坑支护工程地铁监测报告第209期（第3616次）.pdf | 99 | 大文档(约 136K 字符)，需要稳定分块处理 | 已回归 |
-| 红土创新广场项目基坑监测报告第133期-hb.pdf | 22 | 深层位移/支撑轴力等复合表格 | 已回归 |
-| 设计的完整说明1.pdf | 23 | 非监测报告负样本，用于验证“0 表不能通过”防线 | 已回归 |
-
-### 最近一次批量回归（2026-05-13）
-
-命令基线：`python main.py <pdf> --no-ocr --no-self-verify --no-ai-review --model MiniMax-M2.7-highspeed`，输出目录 `output/batch_fast_after_refactor_20260513/`。
-
-| PDF | 识别表数 | error | warning | info | 耗时(s) | 结论 |
-|-----|---------:|------:|--------:|-----:|--------:|------|
-| 【监测2023011-017】鱼珠乐天智能科技创新中心(1).pdf | 12 | 0 | 4 | 11 | 135.2 | 需复核 |
-| 恒大中心基坑支护工程地铁监测报告第209期（第3616次）.pdf | 15 | 0 | 28 | 0 | 1425.2 | 需复核 |
-| 红土创新广场项目基坑监测报告第133期-hb.pdf | 12 | 1 | 8 | 0 | 228.3 | 发现错误 |
-| 监测报告检查（测试）.pdf | 11 | 0 | 3 | 9 | 198.8 | 需复核 |
-| 设计的完整说明1.pdf | 0 | 0 | 1 | 0 | 18.2 | 负样本防线生效 |
-
-说明：`设计的完整说明1.pdf` 是非监测报告，系统应报告“未识别到可计算核对的监测数据表”，不能因为没有计算错误而判定通过。
-
-### OCR 功能测试
-
-| 测试项 | 结果 | 说明 |
-|--------|------|------|
-| pdfplumber 提取文字版 PDF | 通过 | 5 个根目录 PDF 均可完成 fast 回归 |
-| PaddleOCR 异步 API | 通过 | 鱼珠 19 页实测成功，任务轮询完成，106651 原始字符清洗为 11632 字符 |
-| OCR debug/cache | 通过 | 缓存键包含 PDF SHA256、Paddle 模型、profile 指纹和清洗器版本；同一 PDF 二次提取 `ocr_cache_hit=True` |
-| OCR 清洗与图表去噪 | 通过 | 坐标轴行、图片行、重复曲线噪声可被剔除 |
-| 多页统计合并 | 通过 | 同监测项跨页统计按组内合并后判定 |
-| LLM 分块容错 | 通过 | 默认 18000 字符分块，超长单页会二次切分，并在报告中记录分块成功/失败数 |
-
----
-
-## 技术栈
-
-| 类别 | 技术 | 版本 | 用途 |
-|------|------|------|------|
-| LLM | DashScope (qwen3.5-plus) | OpenAI 兼容协议 | 语义理解、数据提取、语义匹配、自验证 |
-| PDF 解析 | pdfplumber | ≥0.11.0 | 文字版 PDF 文本提取 |
-| OCR | PaddleOCR (API) | 在线服务 | 扫描件版式分析 |
-| Web 框架 | Streamlit | ≥1.30.0 | Web 可视化界面 |
-| 文档生成 | python-docx | ≥1.0.0 | Word 文档导出 |
-| Markdown | markdown | ≥3.5.0 | Markdown 转 HTML |
-| HTTP 客户端 | requests | ≥2.31.0 | PaddleOCR API 调用 |
-| LLM 客户端 | openai | ≥1.0.0 | DashScope API 调用 |
-
----
-
-## 许可证
-
-本项目为内部工具，仅供学习和使用。
+MIT License — 见 [LICENSE](LICENSE)。欢迎 issue / PR。
