@@ -87,6 +87,18 @@ SYSTEM_PROMPT = """\
 
 
 def _extract_json_from_response(text: str) -> dict:
+    """从 LLM 响应中提取 JSON。处理常见的 LLM 输出污染：
+
+    - ```json ... ``` 代码块包裹
+    - <thinking> ... </thinking> 思考块
+    - JSON 前后的解释性文字
+    - 末尾不完整截断
+    - 字符串里未转义的换行（LLM 在长文本输出时常见）
+    - 数字字段后多余的小数点（如 "0.0." 应为 "0.0"）
+    - 数字 + 单位（如 12.5mm 应为 12.5）
+
+    解析失败时尝试 2 轮 fallback 修复后再失败。
+    """
     text = text.strip()
     m = re.search(r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL)
     if m:
@@ -100,7 +112,61 @@ def _extract_json_from_response(text: str) -> dict:
         idx = text.rfind("}")
         if idx >= 0:
             text = text[:idx + 1]
-    return json.loads(text)
+
+    # 一次尝试
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        # 应用启发式修复
+        repaired = _repair_llm_json(text, exc)
+        if repaired is not None:
+            try:
+                return json.loads(repaired)
+            except json.JSONDecodeError:
+                pass
+        # 重新抛出原始错误
+        raise
+
+
+def _repair_llm_json(text: str, exc: json.JSONDecodeError) -> str | None:
+    """启发式修复 LLM 偶尔生成的不合法 JSON。
+
+    覆盖场景（按频度递减）：
+    1. 数字字段后多余的小数点或单位（"0.0." → "0.0"；"12.5mm" → "12.5"）
+    2. 数组/对象末尾的尾随逗号（",}" → "}"；",]" → "]"）
+    3. 字符串值里出现未转义的换行
+    4. 半截字符串（最后一个 " 之后无配对）→ 截断到 exc.pos 之前
+    """
+    repaired = text
+
+    # 1. 去掉数字后的多余字符（如 "0.5mm,"、"3.4." 等）
+    repaired = re.sub(r'(-?\d+\.\d+)\.(?=[,\s\]}])', r'\1', repaired)
+    repaired = re.sub(r'(-?\d+\.?\d*)(mm/?d?|kN|KN|kn|cm|m)(?=[,\s\]}])', r'\1', repaired)
+
+    # 2. 尾随逗号
+    repaired = re.sub(r',(\s*[\]}])', r'\1', repaired)
+
+    # 3. 字符串内的换行
+    def _escape_newline_in_string(m: re.Match) -> str:
+        content = m.group(0)
+        return content.replace('\n', '\\n').replace('\r', '\\r')
+    repaired = re.sub(r'"[^"]*"', _escape_newline_in_string, repaired)
+
+    # 如果错误位置在文本末端附近，尝试截断到上一个合法 '}'
+    if exc.pos and exc.pos > len(repaired) * 0.5:
+        truncated = repaired[:exc.pos]
+        # 找最后一个完整对象的结束位置
+        last_brace = max(truncated.rfind('}'), truncated.rfind(']'))
+        if last_brace > 0:
+            # 补齐外层 {}
+            opens = repaired[:last_brace + 1].count('{') - repaired[:last_brace + 1].count('}')
+            if opens >= 0:
+                truncated = repaired[:last_brace + 1] + ('}' * opens)
+            else:
+                truncated = repaired[:last_brace + 1]
+            return truncated
+
+    return repaired if repaired != text else None
 
 
 def _sf(v: Any) -> float | None:

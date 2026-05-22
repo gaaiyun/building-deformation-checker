@@ -104,11 +104,20 @@ def build_verification_config(
         cfg.unit = "kN"
         cfg.unit_conversion = 1.0
         cfg.severity_for_cumulative = "error"
+    else:
+        # 水平位移、深层水平位移、测斜等：用通用混合单位检测
+        # （某些公司模板初始/本次列是 m 但累计是 mm，需要 ×1000 转换）
+        _apply_mixed_units_if_detected(table, cfg)
 
     return cfg
 
 
 def _looks_like_elevation_data(table: MonitoringTable) -> bool:
+    """旧版启发式：竖向位移/沉降专用，靠数值范围判断。
+
+    保留作为 fallback，但更稳健的判定改用 _detect_mixed_units_ratio 基于
+    实际数学关系判断。
+    """
     for pt in table.points[:5]:
         if pt.initial_value is None or pt.current_value is None or pt.cumulative_change is None:
             continue
@@ -117,10 +126,50 @@ def _looks_like_elevation_data(table: MonitoringTable) -> bool:
     return False
 
 
-def _detect_elevation_from_data(table: MonitoringTable, cfg: TableVerificationConfig):
+def _detect_mixed_units_ratio(table: MonitoringTable) -> Optional[float]:
+    """通用混合单位检测：基于多点数学关系推断单位转换因子。
+
+    场景：某些表的 initial_value / current_value 列是 m，但 cumulative_change
+    列是 mm（如 质安/展誉/深工勘 模板的水平位移表）。这时：
+        cumulative_change / (current_value - initial_value) ≈ 1000
+
+    返回：检测到的稳定转换因子（通常为 1.0 或 1000.0），或 None（无法判定）。
+
+    判定规则：
+        - 至少 5 个点的有效比值，剔除 (current-initial) 过小（< 1e-5）的不稳定点
+        - 中位数比值在 [950, 1050] → 返回 1000.0
+        - 中位数比值在 [0.95, 1.05] → 返回 1.0
+        - 否则 → 返回 None（数据混乱，留给上层 fallback）
     """
-    启发式检测：如果初始值/本次值看起来像高程（绝对值小于100的数值），
-    而累计变化量是mm级别的较大数值，则判断为高程数据。
+    ratios: list[float] = []
+    for pt in table.points:
+        if pt.initial_value is None or pt.current_value is None or pt.cumulative_change is None:
+            continue
+        diff = pt.current_value - pt.initial_value
+        if abs(diff) < 1e-5:
+            continue  # 跳过零变化点（除法不稳定）
+        if abs(pt.cumulative_change) < 0.05:
+            continue  # 跳过累计接近 0 的点
+        ratios.append(pt.cumulative_change / diff)
+
+    if len(ratios) < 5:
+        return None
+
+    ratios.sort()
+    median = ratios[len(ratios) // 2]
+
+    if 950 <= median <= 1050:
+        return 1000.0
+    if 0.95 <= median <= 1.05:
+        return 1.0
+    return None
+
+
+def _detect_elevation_from_data(table: MonitoringTable, cfg: TableVerificationConfig):
+    """启发式检测（沉降/竖向位移类专用）：初始值看似高程则推断 m 单位。
+
+    保留旧逻辑用于沉降类向后兼容。对其它类别使用更通用的
+    `_apply_mixed_units_if_detected`。
 
     例如：
         初始高程 = -2.70184 (m)
@@ -136,6 +185,31 @@ def _detect_elevation_from_data(table: MonitoringTable, cfg: TableVerificationCo
         cfg.cumulative_tolerance = max(FLOAT_TOLERANCE * 5, 1.0)
         cfg.severity_for_cumulative = "warning"
         cfg.initial_value_reliable = False
+
+
+def _apply_mixed_units_if_detected(table: MonitoringTable, cfg: TableVerificationConfig) -> None:
+    """通用：用数学关系检测混合单位，自动调整 unit_conversion。
+
+    适用于水平位移、深层位移等"初始/本次列是 m 但累计是 mm"的真实模板。
+    与高程检测不同：
+        - 不强制把 unit 改成 "m"（可能 LLM 已正确填了，仅 unit_conversion 错）
+        - 不降级 severity（这是正常变形测量，不像高程基准那么不可靠）
+        - 仅在 unit_conversion 当前是 1.0 时考虑调整（避免覆盖已正确配置）
+    """
+    if cfg.unit_conversion != 1.0:
+        return  # 已配置过转换，不动
+    detected = _detect_mixed_units_ratio(table)
+    if detected is None or detected == 1.0:
+        return
+    logger.info(
+        "表 [%s] 自动检测到 m→mm 单位转换（中位比值≈%.0f），unit_conversion %.1f→%.1f",
+        table.monitoring_item, detected, cfg.unit_conversion, detected,
+    )
+    cfg.unit_conversion = detected
+    cfg.cumulative_tolerance = max(cfg.cumulative_tolerance, 0.15)
+    # 标记为"unit 已修正"用于诊断
+    if not cfg.unit:
+        cfg.unit = "m"
 
 
 def _normalize_severity(value: object) -> str | None:
@@ -329,6 +403,35 @@ def generate_analysis_plan(report: MonitoringReport) -> list[dict]:
             notes.append(f"水位容差放大至{cfg.cumulative_tolerance}mm, 初始基准可能不同")
         if interval_days and interval_source == "从数据反推(众数)":
             notes.append("监测间隔从数据反推(取众数), 个别测点间隔不同时降级为warning")
+
+        # 混合单位自动检测的诊断信息
+        if (
+            cfg.unit_conversion == 1000.0
+            and cat in (
+                MonitoringCategory.HORIZONTAL_DISP,
+                MonitoringCategory.DEEP_HORIZONTAL,
+                MonitoringCategory.PILE_INCLINE,
+                MonitoringCategory.OTHER,
+            )
+        ):
+            notes.append(
+                "自动检测到混合单位：初始/本次值在 m，累计变化在 mm，已应用 ×1000 转换"
+            )
+
+        # 间隔仲裁信息：configured 与 inferred 差距大但选择了 inferred
+        if interval_days and interval_source == "报告日期范围":
+            from src.tools.calculation_checker import _infer_interval_days, _interval_confidence
+            inferred = _infer_interval_days(table)
+            if inferred and abs(inferred - interval_days) > 2:
+                inf_sup = _interval_confidence(table, inferred)
+                cfg_sup = _interval_confidence(table, interval_days)
+                if inf_sup >= 0.5 and inf_sup > cfg_sup:
+                    notes.append(
+                        f"间隔仲裁：报告日期范围 {interval_days:.0f} 天 vs 数据反推 "
+                        f"{inferred:.0f} 天（行支持率 {inf_sup:.0%} > {cfg_sup:.0%}），"
+                        f"已采纳反推值 {inferred:.0f} 天"
+                    )
+                    interval_days = inferred  # 同步显示用
 
         plans.append({
             "table_index": idx + 1,

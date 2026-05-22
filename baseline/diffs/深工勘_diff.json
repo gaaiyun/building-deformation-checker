@@ -1,0 +1,195 @@
+{
+  "支护结构顶部水平位移": [
+    {
+      "sheet": "支护结构顶部水平位移",
+      "cell": "E8",
+      "row": 8,
+      "col": 5,
+      "point_id": "W3",
+      "field_name": "",
+      "error_value": "6.47",
+      "correct_value": "4.47",
+      "diff_type": "数值改动（差 +2.0000，相对 44.7%）"
+    },
+    {
+      "sheet": "支护结构顶部水平位移",
+      "cell": "T8",
+      "row": 8,
+      "col": 20,
+      "point_id": "W3",
+      "field_name": "",
+      "error_value": "6.19",
+      "correct_value": "4.19",
+      "diff_type": "数值改动（差 +2.0000，相对 47.7%）"
+    },
+    {
+      "sheet": "支护结构顶部水平位移",
+      "cell": "J25",
+      "row": 25,
+      "col": 10,
+      "point_id": "W20",
+      "field_name": "",
+      "error_value": "0.53",
+      "correct_value": "0.23",
+      "diff_type": "数值改动（差 +0.3000，相对 130.4%）"
+    },
+    {
+      "sheet": "支护结构顶部水平位移",
+      "cell": "T25",
+      "row": 25,
+      "col": 20,
+      "point_id": "W20",
+      "field_name": "",
+      "error_value": "10.05",
+      "correct_value": "6.05",
+      "diff_type": "数值改动（差 +4.0000，相对 66.1%）"
+    },
+    {
+      "sheet": "支护结构顶部水平位移",
+      "cell": "E45",
+      "row": 45,
+      "col": 5,
+      "point_id": "W4",
+      "field_name": "",
+      "error_value": "5.37",
+      "correct_value": "4.37",
+      "diff_type": "数值改动（差 +1.0000，相对 22.9%）"
+    }
+  ],
+  "周边地面沉降": [
+    {
+      "sheet": "周边地面沉降",
+      "cell": "M10",
+      "row": 10,
+      "col": 13,
+      "point_id": "D3",
+      "field_name": "",
+      "error_value": "-5.79",
+      "correct_value": "-5.76",
+      "diff_type": "数值改动（差 -0.0300，相对 0.5%）"
+    },
+    {
+      "sheet": "周边地面沉降",
+      "cell": "G20",
+      "row": 20,
+      "col": 7,
+      "point_id": "D13",
+      "field_name": "",
+      "error_value": "-6.95",
+      "correct_value": "-6.75",
+      "diff_type": "数值改动（差 -0.2000，相对 3.0%）"
+    },
+    {
+      "sheet": "周边地面沉降",
+      "cell": "O21",
+      "row": 21,
+      "col": 15,
+      "point_id": "D14",
+      "field_name": "",
+      "error_value": "0.16",
+      "correct_value": "0.14",
+      "diff_type": "数值改动（差 +0.0200，相对 14.3%）"
+    },
+    {
+      "sheet": "周边地面沉降",
+      "cell": "C46",
+      "row": 46,
+      "col": 3,
+      "point_id": "D3",
+      "field_name": "",
+      "error_value": "-0.48",
+      "correct_value": "-0.28",
+      "diff_type": "数值改动（差 -0.2000，相对 71.4%）"
+    },
+    {
+      "sheet": "周边地面沉降",
+      "cell": "E46",
+      "row": 46,
+      "col": 5,
+      "point_id": "D3",
+      "field_name": "",
+      "error_value": "-0.38",
+      "correct_value": "-0.28",
+      "diff_type": "数值改动（差 -0.1000，相对 35.7%）"
+    }
+  ],
+  "支护桩支护结构深层水平位移": [
+    {
+      "sheet": "支护桩支护结构深层水平位移",
+      "cell": "F15",
+      "row": 15,
+      "col": 6,
+      "point_id": "4",
+      "field_name": "",
+      "error_value": "5.97",
+      "correct_value": "3.97",
+      "diff_type": "数值改动（差 +2.0000，相对 50.4%）"
+    },
+    {
+      "sheet": "支护桩支护结构深层水平位移",
+      "cell": "I16",
+      "row": 16,
+      "col": 9,
+      "point_id": "4.5",
+      "field_name": "",
+      "error_value": "3.69",
+      "correct_value": "3.60",
+      "diff_type": "数值改动（差 +0.0900，相对 2.5%）"
+    },
+    {
+      "sheet": "支护桩支护结构深层水平位移",
+      "cell": "J16",
+      "row": 16,
+      "col": 10,
+      "point_id": "4.5",
+      "field_name": "",
+      "error_value": "-0.09",
+      "correct_value": "-0.01",
+      "diff_type": "数值改动（差 -0.0800，相对 800.0%）"
+    },
+    {
+      "sheet": "支护桩支护结构深层水平位移",
+      "cell": "C20",
+      "row": 20,
+      "col": 3,
+      "point_id": "6.5",
+      "field_name": "",
+      "error_value": "2.49",
+      "correct_value": "1.49",
+      "diff_type": "数值改动（差 +1.0000，相对 67.1%）"
+    },
+    {
+      "sheet": "支护桩支护结构深层水平位移",
+      "cell": "F21",
+      "row": 21,
+      "col": 6,
+      "point_id": "7",
+      "field_name": "",
+      "error_value": "5.2",
+      "correct_value": "1.20",
+      "diff_type": "数值改动（差 +4.0000，相对 333.3%）"
+    },
+    {
+      "sheet": "支护桩支护结构深层水平位移",
+      "cell": "I71",
+      "row": 71,
+      "col": 9,
+      "point_id": "0.5",
+      "field_name": "",
+      "error_value": "10.58",
+      "correct_value": "4.58",
+      "diff_type": "数值改动（差 +6.0000，相对 131.0%）"
+    },
+    {
+      "sheet": "支护桩支护结构深层水平位移",
+      "cell": "F80",
+      "row": 80,
+      "col": 6,
+      "point_id": "5",
+      "field_name": "",
+      "error_value": "3.39",
+      "correct_value": "3.32",
+      "diff_type": "数值改动（差 +0.0700，相对 2.1%）"
+    }
+  ]
+}

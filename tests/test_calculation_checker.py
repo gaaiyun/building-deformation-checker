@@ -108,5 +108,100 @@ class CalculationCheckerTests(unittest.TestCase):
         self.assertFalse(any(issue.field_name == "变化速率" for issue in issues))
 
 
+class IntervalInferenceArbitrationTests(unittest.TestCase):
+    """v2 修复：configured 与 inferred 显著差距时，按行级支持率仲裁。
+
+    场景：XLSX 模板把多期数据并到一张 sheet，每期间隔 2 天但 LLM 从报告
+    日期范围抽到 7 天作为 configured。v1 在差距 >2 天时盲信 configured，
+    导致所有行都触发"反推 2 天"误报。
+    """
+
+    def _make_multi_period_table(self, configured_interval: float, real_interval: int) -> MonitoringTable:
+        """构造一张速率与 real_interval 一致的表（10 行齐刷刷支持推断值）"""
+        points = []
+        for i in range(10):
+            change = 1.0 + 0.1 * i
+            points.append(MeasurementPoint(
+                point_id=f"WY{240 + i}",
+                initial_value=2.0,
+                current_value=2.0 + change,
+                current_change=change,
+                cumulative_change=change,
+                change_rate=round(change / real_interval, 3),
+            ))
+        return MonitoringTable(
+            monitoring_item="支护结构水平位移",
+            category=MonitoringCategory.HORIZONTAL_DISP,
+            verification_config=TableVerificationConfig(
+                interval_days=configured_interval,
+                initial_value_reliable=True,
+            ),
+            points=points,
+        )
+
+    def test_multi_period_inferred_overrides_misconfigured(self):
+        """配置=7天，实际=2天，所有行支持 → 应采用推断的 2 天"""
+        table = self._make_multi_period_table(configured_interval=7, real_interval=2)
+        report = MonitoringReport(tables=[table])
+
+        issues = run_calculation_checks(report)
+
+        # 修复前：会有 10 个"反推 2 天"警告
+        # 修复后：用推断 2 天后所有速率都验证通过，应无 rate 相关 issue
+        rate_issues = [i for i in issues if i.field_name == "变化速率"]
+        self.assertEqual(
+            len(rate_issues), 0,
+            f"修复后不应有速率误报，实际有 {len(rate_issues)}：{[i.message for i in rate_issues]}",
+        )
+
+    def test_misconfigured_with_no_consistent_inference_keeps_configured(self):
+        """配置=7天，数据各行间隔不一致 → 推断值置信度低，保留 configured"""
+        # 各行间隔分别为 2, 3, 5, 7, 14 天（无共识）
+        irregular_intervals = [2, 3, 5, 7, 14] * 2
+        points = []
+        for i, interval in enumerate(irregular_intervals):
+            change = 1.0
+            points.append(MeasurementPoint(
+                point_id=f"P{i+1}",
+                initial_value=2.0,
+                current_value=3.0,
+                current_change=change,
+                cumulative_change=change,
+                change_rate=round(change / interval, 3),
+            ))
+        table = MonitoringTable(
+            monitoring_item="不规则间隔表",
+            category=MonitoringCategory.HORIZONTAL_DISP,
+            verification_config=TableVerificationConfig(
+                interval_days=7,
+                initial_value_reliable=True,
+            ),
+            points=points,
+        )
+        report = MonitoringReport(tables=[table])
+        # 这里不断言具体 issue 数，只断言行为不崩溃
+        # （混乱数据触发部分速率不一致是预期的）
+        run_calculation_checks(report)
+
+    def test_inferred_only_used_when_configured_missing(self):
+        """配置缺失时直接用推断值（原有行为保持）"""
+        table = self._make_multi_period_table(configured_interval=None, real_interval=10)
+        report = MonitoringReport(tables=[table])
+
+        issues = run_calculation_checks(report)
+
+        rate_issues = [i for i in issues if i.field_name == "变化速率"]
+        self.assertEqual(len(rate_issues), 0)
+
+    def test_minor_offset_within_2_days_uses_inferred(self):
+        """配置=10天，实际 9 天 (典型鱼珠乐天场景) → 差 1 天 ≤2，用推断 9"""
+        table = self._make_multi_period_table(configured_interval=10, real_interval=9)
+        report = MonitoringReport(tables=[table])
+
+        issues = run_calculation_checks(report)
+        rate_issues = [i for i in issues if i.field_name == "变化速率"]
+        self.assertEqual(len(rate_issues), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

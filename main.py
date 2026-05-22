@@ -16,6 +16,10 @@ import logging
 import sys
 from pathlib import Path
 
+# 必须最先加载 .env（其它模块导入时会读 os.environ）
+from src.utils.dotenv_loader import load_dotenv  # noqa: E402
+load_dotenv()
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",

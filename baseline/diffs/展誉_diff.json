@@ -1,0 +1,186 @@
+{
+  "基坑顶水平位移": [
+    {
+      "sheet": "基坑顶水平位移",
+      "cell": "F11",
+      "row": 11,
+      "col": 6,
+      "point_id": "WY4(位移)",
+      "field_name": "",
+      "error_value": "-10.9",
+      "correct_value": "-10.0",
+      "diff_type": "数值改动（差 -0.9000，相对 9.0%）"
+    },
+    {
+      "sheet": "基坑顶水平位移",
+      "cell": "C12",
+      "row": 12,
+      "col": 3,
+      "point_id": "WY5(位移)",
+      "field_name": "",
+      "error_value": "6.7",
+      "correct_value": "5.7",
+      "diff_type": "数值改动（差 +1.0000，相对 17.5%）"
+    },
+    {
+      "sheet": "基坑顶水平位移",
+      "cell": "F13",
+      "row": 13,
+      "col": 6,
+      "point_id": "WY6(位移)",
+      "field_name": "",
+      "error_value": "12.6",
+      "correct_value": "11.6",
+      "diff_type": "数值改动（差 +1.0000，相对 8.6%）"
+    },
+    {
+      "sheet": "基坑顶水平位移",
+      "cell": "I16",
+      "row": 16,
+      "col": 9,
+      "point_id": "WY13(位移)",
+      "field_name": "",
+      "error_value": "-2.6",
+      "correct_value": "-2.2",
+      "diff_type": "数值改动（差 -0.4000，相对 18.2%）"
+    },
+    {
+      "sheet": "基坑顶水平位移",
+      "cell": "C64",
+      "row": 64,
+      "col": 3,
+      "point_id": "WY14(位移)",
+      "field_name": "",
+      "error_value": "-0.9",
+      "correct_value": "-0.7",
+      "diff_type": "数值改动（差 -0.2000，相对 28.6%）"
+    }
+  ],
+  "立柱沉降": [
+    {
+      "sheet": "立柱沉降",
+      "cell": "F13",
+      "row": 13,
+      "col": 6,
+      "point_id": "LZ6(沉降)",
+      "field_name": "",
+      "error_value": "3.59",
+      "correct_value": "1.59",
+      "diff_type": "数值改动（差 +2.0000，相对 125.8%）"
+    },
+    {
+      "sheet": "立柱沉降",
+      "cell": "H13",
+      "row": 13,
+      "col": 8,
+      "point_id": "LZ6(沉降)",
+      "field_name": "",
+      "error_value": "0.6",
+      "correct_value": "0.54",
+      "diff_type": "数值改动（差 +0.0600，相对 11.1%）"
+    },
+    {
+      "sheet": "立柱沉降",
+      "cell": "B14",
+      "row": 14,
+      "col": 2,
+      "point_id": "LZ7(沉降)",
+      "field_name": "",
+      "error_value": "0.9",
+      "correct_value": "0.06",
+      "diff_type": "数值改动（差 +0.8400，相对 1400.0%）"
+    },
+    {
+      "sheet": "立柱沉降",
+      "cell": "C58",
+      "row": 58,
+      "col": 3,
+      "point_id": "LZ4(沉降)",
+      "field_name": "",
+      "error_value": "7.45",
+      "correct_value": "2.45",
+      "diff_type": "数值改动（差 +5.0000，相对 204.1%）"
+    },
+    {
+      "sheet": "立柱沉降",
+      "cell": "I58",
+      "row": 58,
+      "col": 9,
+      "point_id": "LZ4(沉降)",
+      "field_name": "",
+      "error_value": "10.15",
+      "correct_value": "2.15",
+      "diff_type": "数值改动（差 +8.0000，相对 372.1%）"
+    }
+  ],
+  "地下水位": [
+    {
+      "sheet": "地下水位",
+      "cell": "F8",
+      "row": 8,
+      "col": 6,
+      "point_id": "SW1(水位)",
+      "field_name": "",
+      "error_value": "-19020.3",
+      "correct_value": "-1902.30",
+      "diff_type": "数值改动（差 -17118.0000，相对 899.9%）"
+    },
+    {
+      "sheet": "地下水位",
+      "cell": "I10",
+      "row": 10,
+      "col": 9,
+      "point_id": "SW3(水位)",
+      "field_name": "",
+      "error_value": "1920",
+      "correct_value": "1914.00",
+      "diff_type": "数值改动（差 +6.0000，相对 0.3%）"
+    },
+    {
+      "sheet": "地下水位",
+      "cell": "F56",
+      "row": 56,
+      "col": 6,
+      "point_id": "SW2-1(水位)",
+      "field_name": "",
+      "error_value": "-3000",
+      "correct_value": "-300.00",
+      "diff_type": "数值改动（差 -2700.0000，相对 900.0%）"
+    }
+  ],
+  "建筑物倾斜X": [
+    {
+      "sheet": "建筑物倾斜X",
+      "cell": "C8",
+      "row": 8,
+      "col": 3,
+      "point_id": "SC1-SC2(倾斜)",
+      "field_name": "",
+      "error_value": "-0.1888",
+      "correct_value": "-0.1561",
+      "diff_type": "数值改动（差 -0.0327，相对 20.9%）"
+    },
+    {
+      "sheet": "建筑物倾斜X",
+      "cell": "F8",
+      "row": 8,
+      "col": 6,
+      "point_id": "SC1-SC2(倾斜)",
+      "field_name": "",
+      "error_value": "-0.999",
+      "correct_value": "-0.1112",
+      "diff_type": "数值改动（差 -0.8878，相对 798.4%）"
+    },
+    {
+      "sheet": "建筑物倾斜X",
+      "cell": "I9",
+      "row": 9,
+      "col": 9,
+      "point_id": "SC5-SC6(倾斜)",
+      "field_name": "",
+      "error_value": "-0.5654",
+      "correct_value": "-0.0144",
+      "diff_type": "数值改动（差 -0.5510，相对 3826.4%）"
+    }
+  ]
+}

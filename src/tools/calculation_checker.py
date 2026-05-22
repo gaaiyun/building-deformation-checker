@@ -58,22 +58,79 @@ def _infer_interval_days(table: MonitoringTable) -> Optional[float]:
     return Counter(intervals).most_common(1)[0][0]
 
 
+def _interval_confidence(table: MonitoringTable, candidate_days: float) -> float:
+    """计算 candidate_days 的"行级支持率"。
+
+    对表里每个有效行，反推 row_interval = |current_change / change_rate|；
+    若 row_interval 与 candidate_days 在 ±20% 容差内，记为"支持"。
+    返回 支持数 / 有效行总数。
+
+    用法：用于在配置值（来自报告日期范围）和推断值（来自实际数据）冲突时
+    判断哪个更可信。
+    """
+    if candidate_days is None or candidate_days <= 0:
+        return 0.0
+    supports = 0
+    total = 0
+    tol = max(0.5, candidate_days * 0.2)  # 至少 ±0.5 天，否则按 20%
+    for pt in table.points:
+        if (
+            pt.current_change is not None
+            and pt.change_rate is not None
+            and abs(pt.change_rate) > 1e-6
+        ):
+            row_interval = abs(pt.current_change / pt.change_rate)
+            if 0.5 < row_interval < 365:
+                total += 1
+                if abs(row_interval - candidate_days) <= tol:
+                    supports += 1
+    return supports / total if total else 0.0
+
+
 def _choose_interval_days(
     table: MonitoringTable,
     configured_interval: Optional[float],
 ) -> Optional[float]:
-    """
-    Choose the best interval for rate validation.
+    """选择用于速率验证的"权威"监测间隔。
 
-    Prefer row-inferred interval when it forms a consistent near-match to the
-    global report interval (typical 9d vs 10d discrepancy in fishzhu-like reports).
+    决策树：
+        1. 推断值与配置值都没有 → 返回 None（调用方会跳过速率验证）
+        2. 只有其中一个 → 返回那个
+        3. 两个差距 ≤2 天 → 优先用推断值（更精确，能去除小数级偏差）
+        4. 两个差距 >2 天 → 比较行级支持率：
+           - 若推断值支持率 ≥50% → 信推断（典型场景：报告日期范围跨多期，
+             如鱼珠乐天的"日期范围 7 天但每期 2 天"）
+           - 若配置值支持率 ≥推断值支持率 → 信配置
+           - 否则 → 信推断（数据 > 元数据）
+
+    历史背景：
+        - v1: 差距 >2 天时盲信 configured，导致多期模板（错误版/正确版都是
+          多期块）的全部行都触发"反推间隔≈2天"警告，34+ 行误报。
+        - v2: 引入行级支持率仲裁，多期场景下能正确识别每期内部的真实间隔。
     """
     inferred_interval = _infer_interval_days(table)
+
+    if configured_interval is None and inferred_interval is None:
+        return None
     if configured_interval is None:
         return inferred_interval
     if inferred_interval is None:
         return configured_interval
+
     if abs(inferred_interval - configured_interval) <= 2:
+        return inferred_interval  # 微小偏差，优先用推断（更精确）
+
+    # 显著差距：用行级支持率仲裁
+    cfg_support = _interval_confidence(table, configured_interval)
+    inf_support = _interval_confidence(table, inferred_interval)
+
+    if inf_support >= 0.5 and inf_support > cfg_support:
+        logger.info(
+            "表 [%s] 间隔仲裁: 推断 %.0f 天(支持率 %.0f%%) > 配置 %.0f 天(支持率 %.0f%%)，采纳推断值",
+            table.monitoring_item,
+            inferred_interval, inf_support * 100,
+            configured_interval, cfg_support * 100,
+        )
         return inferred_interval
     return configured_interval
 

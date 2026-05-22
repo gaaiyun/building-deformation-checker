@@ -77,11 +77,19 @@ def _get_table_point_ids(table: MonitoringTable) -> set[str]:
     return ids
 
 
-def _get_group_key(table: MonitoringTable) -> tuple[str, str]:
-    """同一监测项多页表按 monitoring_item + borehole_id 归组。"""
+def _get_group_key(table: MonitoringTable) -> tuple[str, str, str]:
+    """同一监测项的多页表按 (monitoring_item + borehole_id + monitor_date) 归组。
+
+    重要：必须包含 monitor_date，否则模板里同一 sheet 包含多期监测（4 个日期）
+    会被错误地合并成一个组，比对统计时会跨期混淆（同一编号在不同期的累计值不同）。
+
+    监测项相同 + 日期相同 → 同一份报告的不同页，应该合并
+    监测项相同 + 日期不同 → 不同期的报告，必须分开核对
+    """
     monitoring_item = str(table.monitoring_item or "").strip()
     borehole_id = str(table.borehole_id or "").strip()
-    return monitoring_item, borehole_id
+    monitor_date = str(getattr(table, "monitor_date", "") or "").strip()
+    return monitoring_item, borehole_id, monitor_date
 
 
 def _build_allowed_point_ids_map(report: MonitoringReport) -> dict[tuple[str, str], set[str]]:
