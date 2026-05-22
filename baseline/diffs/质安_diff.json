@@ -1,0 +1,160 @@
+{
+  "支护结构水平位移": [
+    {
+      "sheet": "支护结构水平位移",
+      "cell": "E10",
+      "row": 10,
+      "col": 5,
+      "point_id": "WY240",
+      "field_name": "累计变化量 / (mm) / 10.8",
+      "error_value": "6.7",
+      "correct_value": "5.7",
+      "diff_type": "数值改动（差 +1.0000，相对 17.5%）"
+    },
+    {
+      "sheet": "支护结构水平位移",
+      "cell": "F11",
+      "row": 11,
+      "col": 6,
+      "point_id": "WY241",
+      "field_name": "变化速率 / (mm/d) / 0.45",
+      "error_value": "3.4",
+      "correct_value": "0.40",
+      "diff_type": "数值改动（差 +3.0000，相对 750.0%）"
+    },
+    {
+      "sheet": "支护结构水平位移",
+      "cell": "F15",
+      "row": 15,
+      "col": 6,
+      "point_id": "WY245",
+      "field_name": "变化速率 / (mm/d) / 0.45",
+      "error_value": "0.99",
+      "correct_value": "0.95",
+      "diff_type": "数值改动（差 +0.0400，相对 4.2%）"
+    },
+    {
+      "sheet": "支护结构水平位移",
+      "cell": "C38",
+      "row": 38,
+      "col": 3,
+      "point_id": "WY236",
+      "field_name": "本次断面距离 / (m) / 2.0817",
+      "error_value": "5.0819",
+      "correct_value": "2.0819",
+      "diff_type": "数值改动（差 +3.0000，相对 144.1%）"
+    },
+    {
+      "sheet": "支护结构水平位移",
+      "cell": "F39",
+      "row": 39,
+      "col": 6,
+      "point_id": "WY237",
+      "field_name": "变化速率 / (mm/d) / 0.45",
+      "error_value": "10",
+      "correct_value": "0.00",
+      "diff_type": "数值改动（差 +10.0000，相对 1000000000000.0%）"
+    },
+    {
+      "sheet": "支护结构水平位移",
+      "cell": "C40",
+      "row": 40,
+      "col": 3,
+      "point_id": "WY238",
+      "field_name": "本次断面距离 / (m) / 2.0817",
+      "error_value": "4.2883",
+      "correct_value": "2.2883",
+      "diff_type": "数值改动（差 +2.0000，相对 87.4%）"
+    },
+    {
+      "sheet": "支护结构水平位移",
+      "cell": "C41",
+      "row": 41,
+      "col": 3,
+      "point_id": "WY239",
+      "field_name": "本次断面距离 / (m) / 2.0817",
+      "error_value": "3.6944",
+      "correct_value": "1.6944",
+      "diff_type": "数值改动（差 +2.0000，相对 118.0%）"
+    },
+    {
+      "sheet": "支护结构水平位移",
+      "cell": "C70",
+      "row": 70,
+      "col": 3,
+      "point_id": "WY236",
+      "field_name": "本次断面距离 / (m) / 2.0817",
+      "error_value": "10.0811",
+      "correct_value": "2.0811",
+      "diff_type": "数值改动（差 +8.0000，相对 384.4%）"
+    },
+    {
+      "sheet": "支护结构水平位移",
+      "cell": "C71",
+      "row": 71,
+      "col": 3,
+      "point_id": "WY237",
+      "field_name": "本次断面距离 / (m) / 2.0817",
+      "error_value": "5.4332",
+      "correct_value": "2.4332",
+      "diff_type": "数值改动（差 +3.0000，相对 123.3%）"
+    }
+  ],
+  "支护结构竖向位移": [
+    {
+      "sheet": "支护结构竖向位移",
+      "cell": "C6",
+      "row": 6,
+      "col": 3,
+      "point_id": "WY236",
+      "field_name": "本次高程 / (mm) / 9976.75000",
+      "error_value": "19976.75",
+      "correct_value": "9976.75000",
+      "diff_type": "数值改动（差 +10000.0000，相对 100.2%）"
+    },
+    {
+      "sheet": "支护结构竖向位移",
+      "cell": "E12",
+      "row": 12,
+      "col": 5,
+      "point_id": "WY242",
+      "field_name": "累计变化量 / (mm) / -11.59",
+      "error_value": "-12.88",
+      "correct_value": "-12.50",
+      "diff_type": "数值改动（差 -0.3800，相对 3.0%）"
+    },
+    {
+      "sheet": "支护结构竖向位移",
+      "cell": "C42",
+      "row": 42,
+      "col": 3,
+      "point_id": "WY240",
+      "field_name": "本次高程 / (mm) / 9976.75000",
+      "error_value": "19691.64",
+      "correct_value": "9691.64000",
+      "diff_type": "数值改动（差 +10000.0000，相对 103.2%）"
+    },
+    {
+      "sheet": "支护结构竖向位移",
+      "cell": "E42",
+      "row": 42,
+      "col": 5,
+      "point_id": "WY240",
+      "field_name": "累计变化量 / (mm) / -11.59",
+      "error_value": "-130.36",
+      "correct_value": "-13.36",
+      "diff_type": "数值改动（差 -117.0000，相对 875.7%）"
+    },
+    {
+      "sheet": "支护结构竖向位移",
+      "cell": "F42",
+      "row": 42,
+      "col": 6,
+      "point_id": "WY240",
+      "field_name": "变化速率 / (mm/d) / -0.170",
+      "error_value": "-10.3",
+      "correct_value": "-0.300",
+      "diff_type": "数值改动（差 -10.0000，相对 3333.3%）"
+    }
+  ]
+}
