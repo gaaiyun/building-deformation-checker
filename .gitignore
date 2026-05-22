@@ -3,8 +3,11 @@ __pycache__/
 .env
 output/
 test_data/
+test_pdfs/
 *.pdf
 *.docx
+*.xlsx
+*.xls
 .venv/
 .idea/
 .vscode/
@@ -22,3 +25,6 @@ dist/
 # 本地基线对比文件（包含报告内具体测点数据，可能敏感）
 # 如需共享，请评估后手动 add
 # baseline/
+
+# v1 旧版结果快照（仅本地比对用，不入仓库）
+baseline/results_before_fix/
