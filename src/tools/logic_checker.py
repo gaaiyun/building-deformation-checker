@@ -214,6 +214,13 @@ def check_report_extractability(report: MonitoringReport, issues: list[CheckIssu
     ))
 
 
+_PROXIMITY_THRESHOLD = 0.80
+"""触发"接近预警值"warning 的最低比例：|值| / 限值 >= 0.80 即提示"""
+
+_PROXIMITY_EPSILON = 1e-9
+"""浮点容差：4.8/6.0=0.7999... 应视为 0.80"""
+
+
 def check_safety_status(report: MonitoringReport, issues: list[CheckIssue]) -> None:
     for table_index, table in enumerate(report.tables):
         threshold = _find_threshold_semantic(report, table.monitoring_item)
@@ -256,8 +263,44 @@ def check_safety_status(report: MonitoringReport, issues: list[CheckIssue]) -> N
                     expected_value=should_be, actual_value=reported,
                     message=f"安全状态可能过严: 数据正常但标记为 {reported}",
                 ))
+            elif reported == "正常" and should_be == "正常":
+                # 新增：接近预警值的 proximity warning（≥80% 预警 / 限值时提示）
+                proximity_msg = _proximity_message(pt, threshold)
+                if proximity_msg:
+                    table_issues.append(CheckIssue(
+                        severity="warning", table_name=table.monitoring_item,
+                        point_id=pt.point_id, field_name="安全状态",
+                        expected_value="接近预警", actual_value="正常",
+                        message=proximity_msg,
+                    ))
         annotate_issues_for_table(report, table_issues, table_index, default_source="report")
         issues.extend(table_issues)
+
+
+def _proximity_message(pt, threshold) -> str | None:
+    """检查累计或速率是否接近报警值（≥80%）。
+
+    返回包含具体百分比的提示文字；不接近返回 None。
+
+    优先级：累计接近 > 速率接近（一行只生成一条 proximity 提示，避免噪音）。
+    """
+    # 累计接近预警值
+    if pt.cumulative_change is not None and threshold.warning_value:
+        ratio = abs(pt.cumulative_change) / threshold.warning_value
+        if (_PROXIMITY_THRESHOLD - _PROXIMITY_EPSILON) <= ratio < 1.0:
+            return (
+                f"累计变化 {pt.cumulative_change:.2f} 已接近预警值 "
+                f"{threshold.warning_value:.1f}（达 {ratio:.0%}），建议加密观测"
+            )
+    # 速率接近限值
+    if pt.change_rate is not None and threshold.rate_limit:
+        ratio = abs(pt.change_rate) / threshold.rate_limit
+        if (_PROXIMITY_THRESHOLD - _PROXIMITY_EPSILON) <= ratio < 1.0:
+            return (
+                f"变化速率 {pt.change_rate:.3f} mm/d 已接近速率限值 "
+                f"{threshold.rate_limit:.2f} mm/d（达 {ratio:.0%}），建议加密观测"
+            )
+    return None
 
 
 def check_summary_consistency(report: MonitoringReport, issues: list[CheckIssue]) -> None:
