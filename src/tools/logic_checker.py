@@ -183,6 +183,44 @@ def _find_matched_tables(report: MonitoringReport, summary_item_name: str) -> li
 
 # ── Check Functions ──────────────────────────────────────────
 
+def check_ocr_damage(report: MonitoringReport, issues: list[CheckIssue]) -> None:
+    """Gap 3: 当 extraction_diagnostics 含 ocr_damage_findings 时，升级为 warning。
+
+    analyze_extraction_quality 在 raw_text 上跑 detect_ocr_damage，把结果写到
+    diagnostics["ocr_damage_findings"]；本函数把那些发现暴露为最终报告 warning。
+    """
+    diagnostics = report.extraction_diagnostics or {}
+    findings = diagnostics.get("ocr_damage_findings") or []
+    if not findings:
+        return
+
+    # 一条总警告 + 最多 5 条具体定位
+    issues.append(CheckIssue(
+        severity="warning",
+        table_name="报告整体",
+        point_id="OCR",
+        field_name="OCR 损毁",
+        expected_value="OCR 输出无大段重复",
+        actual_value=f"{len(findings)} 处疑似损毁",
+        message=(
+            f"OCR 提取检出 {len(findings)} 处疑似损毁（重复字符/重复行/卡死）。"
+            "工具核对结果不可信，建议重新提取或人工核对原 PDF。"
+        ),
+        suspected_source="extraction",
+    ))
+    for d in findings[:5]:
+        issues.append(CheckIssue(
+            severity="warning",
+            table_name="报告整体",
+            point_id=f"位置 {d.get('position', '?')}",
+            field_name="OCR 损毁",
+            expected_value="正常输出",
+            actual_value=d.get("type", "unknown"),
+            message=d.get("message", ""),
+            suspected_source="extraction",
+        ))
+
+
 def check_report_extractability(report: MonitoringReport, issues: list[CheckIssue]) -> None:
     """Flag reports where extraction produced no verifiable monitoring table."""
     if report.tables:
@@ -477,6 +515,7 @@ def run_logic_checks(report: MonitoringReport) -> list[CheckIssue]:
     issues: list[CheckIssue] = []
 
     check_report_extractability(report, issues)
+    check_ocr_damage(report, issues)  # Gap 3: OCR 损毁警告
     if not report.tables:
         return issues
 

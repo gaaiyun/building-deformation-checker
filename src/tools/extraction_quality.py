@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from statistics import median
 from typing import Optional
@@ -12,6 +13,107 @@ SOURCE_HINTS = {
     "extraction": "（可能为 PDF 提取或列匹配问题，建议核对原文）",
     "logic": "（可能为规则边界或逻辑匹配问题，建议人工复核）",
 }
+
+
+_OCR_REPEAT_CHAR_THRESHOLD = 200
+"""连续 ≥N 个同一字符视为 OCR blob 损毁（如恒大中心 4080 个 '0'）"""
+
+_OCR_REPEAT_LINE_THRESHOLD = 50
+"""同一非空行重复 ≥N 次视为 OCR 卡死（如红土 CX12 案例）"""
+
+_OCR_DAMAGE_MIN_LINE_LENGTH = 3
+"""行级重复检测的最短行长度（避免短分隔符 '---' 误触发）"""
+
+
+def detect_ocr_damage(text: str | None) -> list[dict]:
+    """识别 OCR 输出的典型损毁模式。
+
+    返回每条损毁的字典列表：
+        [{"type": "repeat_char"|"repeat_line", "message": str, "position": int, "length": int}, ...]
+
+    损毁类型：
+        - **repeat_char**：连续 ≥200 个同一字符（如 4080 个 '0'）
+        - **repeat_line**：同一非空行连续重复 ≥50 次
+
+    设计原则：
+        - 保守阈值（200/50）避免误伤正常分隔符与表格边线
+        - 跳过过短行（< 3 字符），如 '---', '   '
+        - 返回结构化结果便于上游 UI 渲染
+
+    用于上游 pipeline 在 OCR 提取后立即调用，发现损毁时降级为 warning
+    标记 'OCR 失败，结果不可信'，而非装作'全部通过'。
+    """
+    if not text:
+        return []
+
+    findings: list[dict] = []
+
+    # 检测 1a：连续重复单字符（blob，如恒大 4080 个 '0'）
+    # 匹配同一字符连续出现 N+ 次（任何字符，包括 0/-/空格但要排除换行）
+    for m in re.finditer(r"([^\s\n])\1{" + str(_OCR_REPEAT_CHAR_THRESHOLD - 1) + ",}", text):
+        char = m.group(1)
+        length = len(m.group(0))
+        findings.append({
+            "type": "repeat_char",
+            "message": f"OCR 损毁疑似：连续 {length} 个 '{char}' 字符 blob（重复字符）",
+            "position": m.start(),
+            "length": length,
+            "char": char,
+        })
+
+    # 检测 1b：短字串重复（如中文 "正常正常..." 或英文 "abab..."）
+    # 匹配 2-10 字符的短字串连续重复 100+ 次（≈ 整体 200+ 字符）
+    pattern_substr = r"(.{2,10}?)\1{99,}"
+    for m in re.finditer(pattern_substr, text, re.DOTALL):
+        substr = m.group(1)
+        # 跳过包含换行的"伪重复"，让行级检测处理
+        if "\n" in substr:
+            continue
+        repeat = len(m.group(0)) // len(substr)
+        findings.append({
+            "type": "repeat_substring",
+            "message": (
+                f"OCR 损毁疑似：短字串 '{substr}' 连续重复 {repeat} 次"
+                f"（共 {len(m.group(0))} 字符）"
+            ),
+            "position": m.start(),
+            "length": len(m.group(0)),
+            "substring": substr,
+            "repeat_count": repeat,
+        })
+
+    # 检测 2：行级重复（同一非空行连续重复 N 次以上）
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if len(line) < _OCR_DAMAGE_MIN_LINE_LENGTH:
+            i += 1
+            continue
+        # 看接下来连续多少行内容完全一样
+        repeat_count = 1
+        j = i + 1
+        while j < len(lines) and lines[j].strip() == line:
+            repeat_count += 1
+            j += 1
+        if repeat_count >= _OCR_REPEAT_LINE_THRESHOLD:
+            # 计算大致 char offset
+            position = sum(len(lines[k]) + 1 for k in range(i))  # +1 for \n
+            findings.append({
+                "type": "repeat_line",
+                "message": (
+                    f"OCR 损毁疑似：同一行连续重复 {repeat_count} 次"
+                    f"（行内容：{line[:30]}{'...' if len(line) > 30 else ''}）"
+                ),
+                "position": position,
+                "line": i + 1,
+                "repeat_count": repeat_count,
+            })
+            i = j  # 跳过整个重复块
+        else:
+            i += 1
+
+    return findings
 
 
 def _non_null_ratio(values: list[object]) -> float:
@@ -156,6 +258,15 @@ def analyze_extraction_quality(report: MonitoringReport) -> MonitoringReport:
     diagnostics["duplicate_pages"] = duplicate_pages
     diagnostics["abnormal_table_count"] = len(flags_by_table)
     diagnostics["flagged_table_indexes"] = sorted(flags_by_table)
+
+    # OCR 损毁检测（Gap 3）：识别如恒大 4080 个 '0' blob 或红土 CX12 行重复
+    raw_text = getattr(report, "raw_text", "") or ""
+    if raw_text:
+        damages = detect_ocr_damage(raw_text)
+        if damages:
+            diagnostics["ocr_damage_findings"] = damages
+            diagnostics["ocr_damage_count"] = len(damages)
+
     report.table_extraction_flags = flags_by_table
     report.extraction_diagnostics = diagnostics
     return report
