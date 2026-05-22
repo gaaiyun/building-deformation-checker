@@ -635,4 +635,61 @@ def run_calculation_checks(report: MonitoringReport) -> list[CheckIssue]:
     check_current_change_anomaly(report, anomaly_issues)
     issues.extend(anomaly_issues)
 
+    # 符号一致性（Gap 6）：本次-初始 与 累计变化 应同号
+    sign_issues: list[CheckIssue] = []
+    check_sign_consistency(report, sign_issues)
+    issues.extend(sign_issues)
+
     return issues
+
+
+_SIGN_MIN_DIFF_MM = 0.5
+"""(current - initial) 在 mm 量级下小于该阈值时跳过，避免噪声误报"""
+
+
+def check_sign_consistency(
+    report: MonitoringReport,
+    issues: list[CheckIssue],
+) -> None:
+    """检查每个测点的 (current - initial) 与 cumulative_change 符号是否一致。
+
+    示例：监测报告测试 G2
+    - initial=9.51112 m, current=9.52275 m → 差 +11.63 mm (上升)
+    - 报告 cumulative=-17.45 mm (下沉)
+    - 符号矛盾 → ERROR
+
+    设计要点：
+    - 仅当 `initial_value_reliable=True` 时检查（与 cumulative 计算检查口径一致）
+    - 差值小于 ~0.5 mm 时跳过（高程表噪声范围）
+    - 独立于"数量级异常"60% 阈值，弥补单点孤立错号
+    """
+    for table in report.tables:
+        cfg = table.verification_config
+        if not cfg.initial_value_reliable:
+            continue
+
+        unit_conv = cfg.unit_conversion if cfg.unit_conversion else 1.0
+
+        for pt in table.points:
+            if pt.initial_value is None or pt.current_value is None or pt.cumulative_change is None:
+                continue
+            diff_mm = (pt.current_value - pt.initial_value) * unit_conv
+            if abs(diff_mm) < _SIGN_MIN_DIFF_MM:
+                continue
+            if abs(pt.cumulative_change) < _SIGN_MIN_DIFF_MM:
+                continue
+            if (diff_mm > 0) == (pt.cumulative_change > 0):
+                continue
+            issues.append(CheckIssue(
+                severity="error",
+                table_name=table.monitoring_item,
+                point_id=pt.point_id,
+                field_name="符号一致性",
+                expected_value=f"sign≈{'+' if diff_mm > 0 else '-'}",
+                actual_value=f"{pt.cumulative_change:+.2f}",
+                message=(
+                    f"符号矛盾：本次-初始 = {diff_mm:+.2f} mm "
+                    f"(本次 {pt.current_value} - 初始 {pt.initial_value})，"
+                    f"但累计标 {pt.cumulative_change:+.2f}，疑似 OCR/列错位或数据错"
+                ),
+            ))
