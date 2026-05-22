@@ -266,51 +266,52 @@ def check_deep_displacement_rate(
 
     cfg = table.verification_config
 
+    # 收集行级反推 intervals（用于推断与置信度计算）
+    rates_data: list[float] = []
+    for dp in table.deep_points:
+        diff = None
+        if dp.current_change is not None:
+            diff = abs(dp.current_change)
+        elif dp.previous_cumulative is not None and dp.current_cumulative is not None:
+            diff = abs(dp.current_cumulative - dp.previous_cumulative)
+        if (
+            diff is not None
+            and dp.change_rate is not None
+            and abs(dp.change_rate) > 1e-6
+            and diff > 1e-6
+        ):
+            inferred = diff / dp.change_rate
+            if 0.5 < abs(inferred) < 365:
+                rates_data.append(round(abs(inferred)))
+
+    inferred_interval = Counter(rates_data).most_common(1)[0][0] if rates_data else None
+
     if interval_days is None:
         interval_days = cfg.interval_days
-    chosen_interval = None
-    if interval_days is not None:
+
+    # 仲裁：configured vs inferred（深层位移版，逻辑同 _choose_interval_days）
+    if interval_days is None and inferred_interval is None:
+        chosen_interval = None
+    elif interval_days is None:
+        chosen_interval = inferred_interval
+    elif inferred_interval is None:
         chosen_interval = interval_days
-    if chosen_interval is None:
-        rates_data: list[float] = []
-        for dp in table.deep_points:
-            diff = None
-            if dp.current_change is not None:
-                diff = abs(dp.current_change)
-            elif dp.previous_cumulative is not None and dp.current_cumulative is not None:
-                diff = abs(dp.current_cumulative - dp.previous_cumulative)
-            if (
-                diff is not None
-                and dp.change_rate is not None
-                and abs(dp.change_rate) > 1e-6
-            ):
-                if diff > 1e-6:
-                    inferred = diff / dp.change_rate
-                    if 0.5 < abs(inferred) < 365:
-                        rates_data.append(round(abs(inferred)))
-        if rates_data:
-            chosen_interval = Counter(rates_data).most_common(1)[0][0]
+    elif abs(inferred_interval - interval_days) <= 2:
+        chosen_interval = inferred_interval  # 微小差异优先用推断
     else:
-        rates_data: list[float] = []
-        for dp in table.deep_points:
-            diff = None
-            if dp.current_change is not None:
-                diff = abs(dp.current_change)
-            elif dp.previous_cumulative is not None and dp.current_cumulative is not None:
-                diff = abs(dp.current_cumulative - dp.previous_cumulative)
-            if (
-                diff is not None
-                and dp.change_rate is not None
-                and abs(dp.change_rate) > 1e-6
-                and diff > 1e-6
-            ):
-                inferred = diff / dp.change_rate
-                if 0.5 < abs(inferred) < 365:
-                    rates_data.append(round(abs(inferred)))
-        if rates_data:
-            inferred_interval = Counter(rates_data).most_common(1)[0][0]
-            if abs(inferred_interval - chosen_interval) <= 2:
-                chosen_interval = inferred_interval
+        # 显著差距：用行级支持率仲裁
+        total = len(rates_data)
+        cfg_sup = sum(1 for r in rates_data if abs(r - interval_days) <= max(0.5, interval_days * 0.2)) / total if total else 0
+        inf_sup = sum(1 for r in rates_data if abs(r - inferred_interval) <= max(0.5, inferred_interval * 0.2)) / total if total else 0
+        if inf_sup >= 0.5 and inf_sup > cfg_sup:
+            logger.info(
+                "深层位移表 [%s] 间隔仲裁: 推断 %.0f 天(支持率 %.0f%%) > 配置 %.0f 天(支持率 %.0f%%)",
+                table.monitoring_item, inferred_interval, inf_sup * 100,
+                interval_days, cfg_sup * 100,
+            )
+            chosen_interval = inferred_interval
+        else:
+            chosen_interval = interval_days
 
     table_label = table.monitoring_item
     if table.borehole_id:
