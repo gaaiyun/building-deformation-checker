@@ -4,3 +4,4 @@ requests>=2.31.0
 streamlit>=1.30.0
 python-docx>=1.0.0
 markdown>=3.5.0
+json5>=0.14.0       # LLM 输出 JSON 容错（处理单引号 / 无引号 key / 尾随逗号）
