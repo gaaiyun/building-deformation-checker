@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from pathlib import Path
 from statistics import median
 from typing import Optional
 
@@ -113,6 +114,45 @@ def detect_ocr_damage(text: str | None) -> list[dict]:
         else:
             i += 1
 
+    return findings
+
+
+def detect_ocr_damage_in_cache(debug_dir: str | Path | None) -> list[dict]:
+    """扫描 OCR 缓存目录的 clean/page_*.txt，识别每页是否含损毁。
+
+    架构动机：当 PDF 含文字层时 pipeline 优选 pdfplumber，得到的 raw_text 干净；
+    但 OCR 缓存可能因 PaddleOCR-VL 异步任务返回失败被污染（如恒大 4009 char '0' blob）。
+    单纯检 raw_text 会漏报。此函数补充扫描磁盘缓存。
+
+    Args:
+        debug_dir: OCR 调试目录路径（含 clean/、raw/、stats.json）
+
+    Returns:
+        每条记录形如 detect_ocr_damage 的字典，并额外含 `source="ocr_cache"`
+        和 `page` 字段（如 "page_005.txt"）。
+    """
+    if not debug_dir:
+        return []
+    debug_path = Path(debug_dir)
+    clean_dir = debug_path / "clean"
+    if not clean_dir.exists() or not clean_dir.is_dir():
+        return []
+
+    findings: list[dict] = []
+    for page_file in sorted(clean_dir.glob("page_*.txt")):
+        try:
+            text = page_file.read_text(encoding="utf-8", errors="replace")
+        except (OSError, UnicodeDecodeError):
+            continue
+        page_findings = detect_ocr_damage(text)
+        for f in page_findings:
+            f["source"] = "ocr_cache"
+            f["page"] = page_file.name
+            f["page_path"] = str(page_file)
+            # 在 message 前加页面标识便于报警
+            original_msg = f.get("message", "")
+            f["message"] = f"OCR 缓存 {page_file.name}: {original_msg}"
+            findings.append(f)
     return findings
 
 
@@ -260,12 +300,22 @@ def analyze_extraction_quality(report: MonitoringReport) -> MonitoringReport:
     diagnostics["flagged_table_indexes"] = sorted(flags_by_table)
 
     # OCR 损毁检测（Gap 3）：识别如恒大 4080 个 '0' blob 或红土 CX12 行重复
+    # 两个来源：(a) report.raw_text（最终选用的提取结果） (b) OCR 缓存目录（含未选用的 OCR 输出）
+    # 即使 pdfplumber 取胜，OCR 缓存被污染依然值得告警——说明 OCR 不可信，禁止下次 fallback
+    all_damages: list[dict] = []
     raw_text = getattr(report, "raw_text", "") or ""
     if raw_text:
-        damages = detect_ocr_damage(raw_text)
-        if damages:
-            diagnostics["ocr_damage_findings"] = damages
-            diagnostics["ocr_damage_count"] = len(damages)
+        for f in detect_ocr_damage(raw_text):
+            f.setdefault("source", "raw_text")
+            all_damages.append(f)
+
+    debug_dir = diagnostics.get("debug_dir") or ""
+    if debug_dir:
+        all_damages.extend(detect_ocr_damage_in_cache(debug_dir))
+
+    if all_damages:
+        diagnostics["ocr_damage_findings"] = all_damages
+        diagnostics["ocr_damage_count"] = len(all_damages)
 
     report.table_extraction_flags = flags_by_table
     report.extraction_diagnostics = diagnostics

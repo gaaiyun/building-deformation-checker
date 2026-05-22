@@ -139,5 +139,141 @@ class OcrDamageEndToEndTests(unittest.TestCase):
         self.assertEqual(damage_issues[0].severity, "warning")
 
 
+class OcrCacheDirectoryScanTests(unittest.TestCase):
+    """关键架构修复：当 pdfplumber 取胜时 raw_text 干净，但 OCR 缓存可能被污染。
+
+    恒大中心 PDF 实际案例：
+    - extraction_method = pdfplumber（文字层 PDF 可直接取出干净文本）
+    - OCR 缓存目录 output/恒大中心..._ocr_debug/clean/page_005.txt 含 4009 char '0' blob
+    - 旧实现只检 raw_text → 漏报；需扩展扫描 debug_dir/clean/*.txt
+    """
+
+    def _make_temp_ocr_dir(self, tmpdir: Path, *, damaged_page: int, damage: str):
+        """构造仿真 OCR debug 目录：N 个 clean/page_XXX.txt，其中一页含损毁内容"""
+        clean = tmpdir / "clean"
+        clean.mkdir(parents=True, exist_ok=True)
+        # 几个正常页
+        for i in range(1, 5):
+            (clean / f"page_{i:03d}.txt").write_text(
+                f"正常页面 {i} 内容\n测点 S{i} 累计变化 0.5\n", encoding="utf-8"
+            )
+        # 一页损毁
+        (clean / f"page_{damaged_page:03d}.txt").write_text(damage, encoding="utf-8")
+        return tmpdir
+
+    def test_scans_ocr_cache_when_raw_text_clean(self):
+        """raw_text 干净（pdfplumber 取胜），但 OCR 缓存含 blob → 应检测"""
+        import tempfile
+        from src.models.data_models import MonitoringReport
+        from src.tools.extraction_quality import analyze_extraction_quality
+
+        with tempfile.TemporaryDirectory() as td:
+            tmpdir = Path(td) / "fake_ocr_debug"
+            self._make_temp_ocr_dir(
+                tmpdir,
+                damaged_page=5,
+                damage="前\n" + ("0" * 4080) + "\n后",
+            )
+
+            report = MonitoringReport()
+            report.raw_text = "干净的 pdfplumber 文本，无任何重复"
+            report.extraction_diagnostics = {"debug_dir": str(tmpdir)}
+            analyze_extraction_quality(report)
+
+            count = report.extraction_diagnostics.get("ocr_damage_count", 0)
+            self.assertGreaterEqual(count, 1,
+                                    f"应扫描 OCR 缓存目录并发现损毁：{report.extraction_diagnostics}")
+            findings = report.extraction_diagnostics.get("ocr_damage_findings", [])
+            # 至少一条记录来自 OCR 缓存（应有 source/page 标识）
+            cache_findings = [f for f in findings if f.get("source") == "ocr_cache" or "page_005" in str(f)]
+            self.assertGreaterEqual(len(cache_findings), 1,
+                                    f"应标明损毁来源为 OCR 缓存：{findings}")
+
+    def test_no_double_count_when_raw_text_also_damaged(self):
+        """raw_text 和 OCR 缓存都有损毁 → 应都记录，但区分来源"""
+        import tempfile
+        from src.models.data_models import MonitoringReport
+        from src.tools.extraction_quality import analyze_extraction_quality
+
+        with tempfile.TemporaryDirectory() as td:
+            tmpdir = Path(td) / "fake_ocr_debug"
+            self._make_temp_ocr_dir(
+                tmpdir,
+                damaged_page=3,
+                damage="X" * 500,
+            )
+
+            report = MonitoringReport()
+            report.raw_text = "前\n" + ("Y" * 600) + "\n后"
+            report.extraction_diagnostics = {"debug_dir": str(tmpdir)}
+            analyze_extraction_quality(report)
+
+            findings = report.extraction_diagnostics.get("ocr_damage_findings", [])
+            self.assertGreaterEqual(len(findings), 2,
+                                    f"raw_text + OCR 缓存均损毁，应记录两类：{findings}")
+
+    def test_no_findings_when_debug_dir_missing(self):
+        """debug_dir 不存在/为空 → 不应报错"""
+        from src.models.data_models import MonitoringReport
+        from src.tools.extraction_quality import analyze_extraction_quality
+
+        report = MonitoringReport()
+        report.raw_text = "干净文本"
+        report.extraction_diagnostics = {"debug_dir": "/nonexistent/path"}
+        analyze_extraction_quality(report)
+        self.assertEqual(
+            report.extraction_diagnostics.get("ocr_damage_count", 0), 0,
+            "不存在的目录不应触发"
+        )
+
+    def test_no_findings_when_clean_dir_pages_all_normal(self):
+        """OCR 缓存全部干净 → 不应触发"""
+        import tempfile
+        from src.models.data_models import MonitoringReport
+        from src.tools.extraction_quality import analyze_extraction_quality
+
+        with tempfile.TemporaryDirectory() as td:
+            tmpdir = Path(td) / "fake_ocr_debug"
+            clean = tmpdir / "clean"
+            clean.mkdir(parents=True)
+            for i in range(1, 10):
+                (clean / f"page_{i:03d}.txt").write_text(
+                    f"页面 {i} 正常监测数据\n", encoding="utf-8"
+                )
+
+            report = MonitoringReport()
+            report.raw_text = "干净"
+            report.extraction_diagnostics = {"debug_dir": str(tmpdir)}
+            analyze_extraction_quality(report)
+            self.assertEqual(
+                report.extraction_diagnostics.get("ocr_damage_count", 0), 0,
+                "全干净的 OCR 缓存不应触发"
+            )
+
+    def test_real_hengda_ocr_cache_detected(self):
+        """真实数据回归：恒大中心 OCR 缓存目录 → 应检出 4009 char '0' blob"""
+        from src.models.data_models import MonitoringReport
+        from src.tools.extraction_quality import analyze_extraction_quality
+
+        hengda_dir = ROOT / "output" / "恒大中心基坑支护工程地铁监测报告第209期（第3616次）_ocr_debug"
+        if not hengda_dir.exists():
+            self.skipTest(f"真实 OCR 缓存不存在，跳过：{hengda_dir}")
+
+        report = MonitoringReport()
+        report.raw_text = "假设 pdfplumber 给的干净文本"  # 模拟主线流程
+        report.extraction_diagnostics = {"debug_dir": str(hengda_dir)}
+        analyze_extraction_quality(report)
+
+        count = report.extraction_diagnostics.get("ocr_damage_count", 0)
+        self.assertGreaterEqual(count, 1,
+                                f"恒大缓存应识别为损毁：{report.extraction_diagnostics}")
+        findings = report.extraction_diagnostics.get("ocr_damage_findings", [])
+        # 应能定位到 page_005
+        zero_blob = [f for f in findings
+                     if f.get("type") == "repeat_char" and f.get("char") == "0"]
+        self.assertGreaterEqual(len(zero_blob), 1,
+                                f"应识别 '0' 字符 blob：{findings}")
+
+
 if __name__ == "__main__":
     unittest.main()
