@@ -471,6 +471,16 @@ def check_cross_period_continuity(
 
         for n_tbl, n1_tbl in zip(sorted_tbls, sorted_tbls[1:]):
             # 跨期连续性：n+1 累计 = n 累计 + n+1 本次
+            #
+            # 关键防御：同日期同次数的表是 LLM 多次抽取的"同一期"重复（如不同
+            # chunk 都拿到同一份数据），不能视为前后两期。跳过。
+            n_date = (n_tbl.monitor_date or "").strip()
+            n1_date = (n1_tbl.monitor_date or "").strip()
+            n_count = (n_tbl.monitor_count or "").strip()
+            n1_count = (n1_tbl.monitor_count or "").strip()
+            if n_date and n_date == n1_date and (not n_count or n_count == n1_count):
+                continue
+
             n_cums = {
                 p.point_id: p.cumulative_change
                 for p in n_tbl.points
@@ -479,8 +489,8 @@ def check_cross_period_continuity(
             if not n_cums:
                 continue
 
-            label_n = n_tbl.monitor_date or n_tbl.monitor_count or "前一期"
-            label_n1 = n1_tbl.monitor_date or n1_tbl.monitor_count or "本期"
+            label_n = n_date or n_count or "前一期"
+            label_n1 = n1_date or n1_count or "本期"
 
             for pt in n1_tbl.points:
                 if (

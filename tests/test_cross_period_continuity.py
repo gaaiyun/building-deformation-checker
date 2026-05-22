@@ -177,6 +177,24 @@ class CrossPeriodContinuityTests(unittest.TestCase):
         cross = [i for i in all_issues if i.field_name == "跨期累计连续性"]
         self.assertEqual(len(cross), 1)
 
+    def test_same_date_duplicate_tables_not_paired(self):
+        """LLM 可能在不同 chunk 重复抽取同期数据 → 两表 monitor_date 完全相同。
+        这种情况不应视为前后两期，否则会算出"自己减自己"类型的假阳性。"""
+        t1 = _make_period_table(
+            "周边建筑竖向位移", "2026-05-15",
+            [MeasurementPoint(point_id="SC1", cumulative_change=-1.06, current_change=0.77)],
+        )
+        # 同样的 monitoring_item + 同样的 date → LLM 在另一 chunk 重复抽
+        t2 = _make_period_table(
+            "周边建筑竖向位移", "2026-05-15",
+            [MeasurementPoint(point_id="SC1", cumulative_change=-1.06, current_change=0.77)],
+        )
+        report = MonitoringReport(tables=[t1, t2])
+        issues = []
+        check_cross_period_continuity(report, issues)
+        cross = [i for i in issues if i.field_name == "跨期累计连续性"]
+        self.assertEqual(len(cross), 0, "同日期重复表不应触发跨期检查")
+
     def test_deep_displacement_table_not_affected(self):
         """深层位移走自己的 prev/current 路径，不应被本函数检查"""
         from src.models.data_models import DeepDisplacementPoint
