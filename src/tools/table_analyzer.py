@@ -404,6 +404,35 @@ def generate_analysis_plan(report: MonitoringReport) -> list[dict]:
         if interval_days and interval_source == "从数据反推(众数)":
             notes.append("监测间隔从数据反推(取众数), 个别测点间隔不同时降级为warning")
 
+        # 混合单位自动检测的诊断信息
+        if (
+            cfg.unit_conversion == 1000.0
+            and cat in (
+                MonitoringCategory.HORIZONTAL_DISP,
+                MonitoringCategory.DEEP_HORIZONTAL,
+                MonitoringCategory.PILE_INCLINE,
+                MonitoringCategory.OTHER,
+            )
+        ):
+            notes.append(
+                "自动检测到混合单位：初始/本次值在 m，累计变化在 mm，已应用 ×1000 转换"
+            )
+
+        # 间隔仲裁信息：configured 与 inferred 差距大但选择了 inferred
+        if interval_days and interval_source == "报告日期范围":
+            from src.tools.calculation_checker import _infer_interval_days, _interval_confidence
+            inferred = _infer_interval_days(table)
+            if inferred and abs(inferred - interval_days) > 2:
+                inf_sup = _interval_confidence(table, inferred)
+                cfg_sup = _interval_confidence(table, interval_days)
+                if inf_sup >= 0.5 and inf_sup > cfg_sup:
+                    notes.append(
+                        f"间隔仲裁：报告日期范围 {interval_days:.0f} 天 vs 数据反推 "
+                        f"{inferred:.0f} 天（行支持率 {inf_sup:.0%} > {cfg_sup:.0%}），"
+                        f"已采纳反推值 {inferred:.0f} 天"
+                    )
+                    interval_days = inferred  # 同步显示用
+
         plans.append({
             "table_index": idx + 1,
             "table_name": name,
