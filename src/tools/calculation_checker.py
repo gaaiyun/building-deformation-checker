@@ -522,6 +522,89 @@ def check_cross_period_continuity(
                     ))
 
 
+_ANOMALY_OUTLIER_MULTIPLIER = 3.0
+"""单期变化离群阈值：|cc| > N × median(|cc|) 视为离群"""
+
+_ANOMALY_INCONSISTENT_MULTIPLIER = 3.0
+"""本次 vs 累计不协调阈值：|cc| > N × max(|cum|, 0.5) 视为可疑"""
+
+_ANOMALY_MIN_POINTS = 4
+"""至少需 N 个测点统计才有意义；少于此跳过"""
+
+_ANOMALY_MIN_ABS_VALUE = 0.5
+"""绝对值阈值：|cc| < 此值的'离群'通常是 OCR 噪音或自然测量误差，跳过"""
+
+
+def check_current_change_anomaly(
+    report: MonitoringReport,
+    issues: list[CheckIssue],
+) -> None:
+    """单期变化幅度异常检测（适用普通 points 表，深层位移不在此检查）
+
+    两类异常：
+    1. **行间离群**：|current_change_i| > 3 × median(|cc|) 且 |cc_i| >= 0.5
+       例：监测报告测试 M5 -23.9 vs 其它 ≤ 0.4
+    2. **本次 vs 累计 不协调**：|current_change| > 3 × max(|cumulative_change|, 0.5)
+       例：M5 |cc|=23.9, |cum|=1.7，cc 比 cum 大 14 倍 → 暗示数据/OCR 错
+
+    严重度：均为 warning（建议人工复核，不阻断）。
+    """
+    for table_index, table in enumerate(report.tables):
+        # 收集有效点（同时有 current_change 与 cumulative_change）
+        valid_pts = [
+            pt for pt in table.points
+            if pt.current_change is not None and pt.cumulative_change is not None
+        ]
+        if not valid_pts:
+            continue
+
+        # 离群需统计分布（≥4 点），不协调检查单行即可
+        do_outlier = len(valid_pts) >= _ANOMALY_MIN_POINTS
+        median_cc = 0.0
+        if do_outlier:
+            abs_ccs = sorted(abs(pt.current_change) for pt in valid_pts)
+            median_cc = abs_ccs[len(abs_ccs) // 2]
+
+        table_issues: list[CheckIssue] = []
+        for pt in valid_pts:
+            abs_cc = abs(pt.current_change)
+            abs_cum = abs(pt.cumulative_change)
+
+            # 跳过绝对值过小的（噪音范围）
+            if abs_cc < _ANOMALY_MIN_ABS_VALUE:
+                continue
+
+            # 检查 1（≥4 点）：离群
+            outlier = (
+                do_outlier
+                and abs_cc > _ANOMALY_OUTLIER_MULTIPLIER * max(median_cc, _ANOMALY_MIN_ABS_VALUE)
+            )
+            # 检查 2（任何样本量）：本次 vs 累计 不协调
+            inconsistent = abs_cc > _ANOMALY_INCONSISTENT_MULTIPLIER * max(abs_cum, _ANOMALY_MIN_ABS_VALUE)
+
+            if not (outlier or inconsistent):
+                continue
+
+            tags = []
+            if outlier:
+                tags.append(f"本次变化 {pt.current_change} 远超其它测点中位数 {median_cc:.3f}")
+            if inconsistent:
+                tags.append(f"本次变化 |{pt.current_change}| ≫ |累计 {pt.cumulative_change}|（≥{_ANOMALY_INCONSISTENT_MULTIPLIER}×）")
+
+            table_issues.append(CheckIssue(
+                severity="warning",
+                table_name=table.monitoring_item,
+                point_id=pt.point_id,
+                field_name="单期变化幅度",
+                expected_value="符合行间分布",
+                actual_value=_fmt(pt.current_change, 3),
+                message="单期变化异常：" + "；".join(tags) + "，建议核对原 PDF",
+            ))
+
+        annotate_issues_for_table(report, table_issues, table_index, default_source="report")
+        issues.extend(table_issues)
+
+
 def run_calculation_checks(report: MonitoringReport) -> list[CheckIssue]:
     """对报告中的所有表格运行计算验证"""
     issues: list[CheckIssue] = []
@@ -546,5 +629,10 @@ def run_calculation_checks(report: MonitoringReport) -> list[CheckIssue]:
     cross_period_issues: list[CheckIssue] = []
     check_cross_period_continuity(report, cross_period_issues)
     issues.extend(cross_period_issues)
+
+    # 单期变化异常（Gap 2）：识别离群本次变化 + 本次/累计不协调
+    anomaly_issues: list[CheckIssue] = []
+    check_current_change_anomaly(report, anomaly_issues)
+    issues.extend(anomaly_issues)
 
     return issues
