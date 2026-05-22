@@ -42,24 +42,39 @@ def load_tool_output(pdf_stem: str) -> dict | None:
 
 def normalize_sheet_name(name: str) -> str:
     """工具识别的表名 vs XLSX sheet 名映射（模糊化）"""
-    return name.replace("【", "").replace("】", "").replace(" ", "")
+    return name.replace("【", "").replace("】", "").replace(" ", "").replace("观测", "")
+
+
+def normalize_point_id(pid: str) -> str:
+    """测点编号归一化：去掉行业后缀（如"(位移)"、"(沉降)"）"""
+    pid = pid.replace("(位移)", "").replace("(沉降)", "").replace("(水位)", "")
+    pid = pid.replace("(倾斜)", "").replace("(内力)", "")
+    return pid.strip()
 
 
 def match_diff_to_tool(diff: dict, tool_issues: list[dict]) -> dict | None:
-    """模糊匹配：ground truth diff 是否在工具的 issues 里被报告？"""
+    """模糊匹配：ground truth diff 是否在工具的 issues 里被报告？
+
+    匹配优先级：
+        1. sheet 与 table 名互相包含（最关键）
+        2. 测点编号互相包含（去后缀对齐）
+        3. 至少其一字段命中（变化速率、累计变化量、本次断面距离 → 本次值）
+    """
     sheet = normalize_sheet_name(diff["sheet"])
-    point = diff.get("point_id", "")
+    point = normalize_point_id(diff.get("point_id", ""))
 
     for issue in tool_issues:
-        # 1. table 名匹配
-        if sheet and normalize_sheet_name(issue["table"]) not in sheet \
-                and sheet not in normalize_sheet_name(issue["table"]):
-            continue
-        # 2. 测点编号匹配（允许部分匹配）
-        if point and issue.get("point") and \
-                point.replace("(", "").replace(")", "") not in issue["point"] \
-                and issue["point"] not in point.replace("(", "").replace(")", ""):
-            continue
+        issue_table = normalize_sheet_name(issue["table"])
+        issue_point = normalize_point_id(issue.get("point", ""))
+
+        # 1. table 名匹配（互相包含）
+        if sheet and issue_table:
+            if sheet not in issue_table and issue_table not in sheet:
+                continue
+        # 2. 测点编号匹配
+        if point and issue_point:
+            if point not in issue_point and issue_point not in point:
+                continue
         return issue
     return None
 
