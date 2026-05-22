@@ -1,0 +1,32 @@
+{
+  "pdf": "设计的完整说明1.pdf",
+  "source": "baseline/负样本_设计说明_baseline.md",
+  "is_monitoring_report": false,
+  "document_type": "项目自身的 README/系统设计说明书（建筑变形监测报告检查智能体），非工程图纸/施工方案/任何测量数据报告",
+  "errors": [],
+  "warnings": [
+    {
+      "id": "W-1",
+      "category": "非监测报告",
+      "description": "本文档不是监测报告，工具不应识别为有监测项目数据"
+    }
+  ],
+  "expected_behavior": {
+    "errors_count": 0,
+    "warnings_count": 1,
+    "tables_count": 0,
+    "status": "N/A 或 非监测报告",
+    "rationale": "全文真正的测点数据行命中数 = 0 (regex 验证)；含大量监测领域术语（监测/测点/位移/累计变化等 200+ 次）和配置/规则表，极易被工具误识别为监测数据 schema"
+  },
+  "extraction_stats": {
+    "total_chars": 20918,
+    "extraction_method": "pdfplumber (text layer)",
+    "ocr_needed": false
+  },
+  "totals": {
+    "error_count": 0,
+    "warning_count": 1,
+    "trap_pdf_count": 0,
+    "note": "棘手的负样本：含监测术语但无监测数据"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "pdf": "红土创新广场项目基坑监测报告第133期-hb.pdf",
+  "source": "baseline/红土创新广场_baseline.md (13 张表 / 156 行核对)",
+  "monitoring_interval_days": 14,
+  "errors": [],
+  "warnings": [
+    {"id": "W-1", "category": "OCR", "table": "CX10 测斜表", "description": "OCR 未抽到 CX10 表；简报指出 CX10@-24m=-39.69mm 距 40mm 警戒值仅 0.31mm，是本期最关键数据点"},
+    {"id": "W-2", "category": "OCR", "table": "地下水位监测数据表", "description": "p13 OCR 仅留下曲线图图例；简报指出 SW05-SW11 累计下降超 4.0m 控制值"},
+    {"id": "W-3", "category": "OCR", "table": "工作量表", "point": "WS19", "description": "工作量表暗示 WS10-WS19 共 10 点，本期数据 OCR 仅 9 行（缺 WS19）"},
+    {"id": "W-4", "category": "OCR", "table": "CX09 测斜表", "description": "本期变化栏 OCR 截断（-17m~-31m 共 15 行缺）"},
+    {"id": "W-5", "category": "OCR", "table": "CX12 测斜表", "description": "本期变化栏严重污染（重复输出 200+ 次）"},
+    {"id": "W-6", "category": "OCR", "table": "CX13 测斜表", "description": "本期变化栏 OCR 缺尾 6 行（-31~-36m）"},
+    {"id": "W-7", "category": "OCR", "table": "CX16 测斜表", "description": "OCR 缺 -6.0m 行 + 本期变化栏被压成单行串"},
+    {"id": "W-8", "category": "OCR", "table": "CX18 测斜表", "description": "本期变化栏 OCR 缺尾 12 行 (-19~-30m)"},
+    {"id": "W-9", "category": "数据合理性", "table": "基坑顶位移", "description": "累计最大 25.5mm (WS17/WS18) 已超 24mm 警戒，但未超 30mm 控制，应进入'橙色警戒'"}
+  ],
+  "totals": {
+    "error_count": 0,
+    "warning_count": 9,
+    "data_table_count": 13,
+    "data_row_count": 156,
+    "note": "本 PDF 所有 OCR 可读数据公式核对全部通过；9 个 warning 均与 OCR 缺失/抽取质量相关，非真实数据错误"
+  }
+}

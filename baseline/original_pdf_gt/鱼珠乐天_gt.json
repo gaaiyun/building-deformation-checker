@@ -1,0 +1,81 @@
+{
+  "pdf": "【监测2023011-017】鱼珠乐天智能科技创新中心(1).pdf",
+  "source": "baseline/鱼珠乐天_baseline.md (senior civil engineering analyst manual audit)",
+  "monitoring_interval_days": 10,
+  "note": "本 PDF 与监测报告测试.pdf 是同一份监测报告的两个版本，含相同测点数据。",
+  "errors": [
+    {
+      "id": "ERR-1",
+      "table": "周边地面沉降",
+      "point": "D2",
+      "field": "最大速率统计",
+      "type": "stat_wrong",
+      "reported_id": "D2",
+      "reported_value": -0.010,
+      "expected_id": "D5",
+      "expected_value": -0.156,
+      "description": "D2 标为最大变化速率，但其速率绝对值最小；应为 D5 (-0.156 mm/d)"
+    },
+    {
+      "id": "ERR-2",
+      "table": "管线沉降",
+      "point": "G2",
+      "field": "累计变化量",
+      "type": "data_inconsistency",
+      "initial_value": 9.51112,
+      "current_value": 9.52275,
+      "expected_cumulative_mm": 11.63,
+      "reported_cumulative_mm": -17.45,
+      "description": "G2 本次高程 > 初始高程 (+11.63mm)，但累计标 -17.45mm 严重不一致"
+    },
+    {
+      "id": "ERR-3",
+      "table": "管线沉降",
+      "point": "G1",
+      "field": "最大速率统计",
+      "type": "stat_wrong",
+      "reported_id": "G1",
+      "reported_value": -0.008,
+      "expected_id": "G5",
+      "expected_value": -0.181,
+      "description": "G1 标为最大速率，但绝对值最小；应为 G5 (-0.181 mm/d)"
+    },
+    {
+      "id": "ERR-4",
+      "table": "管线沉降",
+      "point": "G1",
+      "field": "安全状态",
+      "type": "status_threshold_proximity",
+      "cumulative": -29.03,
+      "warning_threshold": 30.0,
+      "description": "G1 累计 -29.03mm 已达 30mm 报警值 96.8%，应进入预警，但报告判定正常"
+    },
+    {
+      "id": "ERR-5",
+      "table": "锚索拉力",
+      "point": "M5",
+      "field": "本次变化",
+      "type": "data_inconsistency",
+      "current_change_kN": -23.9,
+      "cumulative_change_kN": -1.7,
+      "description": "本次变化 -23.9kN 与累计 -1.7kN 严重不协调（其余测点本次变化都 ≤ 0.4kN）"
+    }
+  ],
+  "warnings": [
+    {"id": "W-1", "table": "支护结构顶部水平位移", "point": "S6", "field": "变化速率", "description": "S6 速率 0.11mm/d 与本次变化 1.9mm 不一致（应为 0.190 mm/d）"},
+    {"id": "W-2", "table": "支护结构顶部竖向位移", "category": "数据语义", "description": "9 行累计与 (本次-初始)×1000 严重不符，'初始高程'实际是上次值非项目零基准"},
+    {"id": "W-3", "table": "支护结构顶部竖向位移", "point": "S3", "field": "变化速率", "description": "S3 速率 0.484 mm/d 反推间隔 18d 而非 10d"},
+    {"id": "W-4", "table": "支护结构顶部竖向位移", "point": "S6", "field": "变化速率", "description": "S6 速率 0.065 mm/d 反推间隔 18d 而非 10d"},
+    {"id": "W-5", "table": "支护结构顶部竖向位移", "field": "负方向最大", "description": "全部累计为正值 (上升)，'负方向最大'标 S7/7.40 实属错误"},
+    {"id": "W-6", "table": "地下水位", "category": "数据语义", "description": "5 行累计与 (本次-初始) 严重不符，'初始水位'非项目零基准"},
+    {"id": "W-7", "table": "管线沉降", "field": "安全状态", "description": "G1 累计 -29.03 接近报警 30mm，应进入预警状态"},
+    {"id": "W-8", "table": "深层水平位移", "category": "符号丢失", "description": "OCR 输出速率均为正值（实际有负向变化，可能丢失符号）"},
+    {"id": "W-9", "table": "深层水平位移C1", "field": "负方向最大", "description": "C1 孔全部累计为正，标 d=-12 的 0.03 作负向最大属语义错"}
+  ],
+  "totals": {
+    "error_count": 5,
+    "warning_count": 9,
+    "data_table_count": 11,
+    "data_row_count": 133
+  }
+}

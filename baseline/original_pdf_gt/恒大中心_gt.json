@@ -1,0 +1,39 @@
+{
+  "pdf": "恒大中心基坑支护工程地铁监测报告第209期（第3616次）.pdf",
+  "source": "baseline/恒大中心_baseline.md (99 页大文档，OCR 损毁严重)",
+  "monitoring_interval_days": 7,
+  "errors": [
+    {
+      "id": "ERR-1",
+      "category": "OCR 失败",
+      "table": "表4及其后续 ~12 张统计表",
+      "description": "本期 OCR 输出含 4080 字符的 '0' blob 替换了表 4 ~ 表 16 共 12+ 张统计表数据；报告本应含的逐行数据 0% 可核对",
+      "note": "此为 OCR 工具失败而非报告本身错误，但工具应识别并标记，不能假装'全部通过'"
+    }
+  ],
+  "warnings": [
+    {"id": "W-1", "table": "表 1 vs 表 2", "category": "编号位数不一致", "description": "9 号线项目用 9S001（三位编号），11 号线项目用 11S01（两位编号）"},
+    {"id": "W-2", "table": "结论", "field": "安全状态", "description": "最大累计变化 5.6mm 已达预警值 6mm 的 93%，但报告声明'未超预警'未提示接近预警"},
+    {"id": "W-3", "table": "结论", "category": "编号格式不一致", "description": "结论中 11S031-1 / 11S027-2 与表 2 编号格式不一致"}
+  ],
+  "infos": [
+    {"id": "INFO-1", "description": "监测点 950 = (63+32)×2×5 自洽"},
+    {"id": "INFO-2", "description": "观测次数 28 = 4/天×7 天 自洽"},
+    {"id": "INFO-3", "description": "累计观测 3616 与封面一致"},
+    {"id": "INFO-4", "description": "断面长度 (283.5m/288m) 与监测段长 279m 接近"}
+  ],
+  "totals": {
+    "error_count": 1,
+    "warning_count": 3,
+    "info_count": 4,
+    "note": "本期 OCR 输出根本不足以做表级核对。工具如声称'全部通过'必然是假阳性。正确行为：识别可读表 + 对损坏表标记 'OCR 失败/需重新提取'"
+  },
+  "key_findings": {
+    "max_cumulative_displacement_point": "11S031-1",
+    "max_cumulative_displacement_mm": -5.6,
+    "max_cumulative_settlement_point": "11S027-2",
+    "max_cumulative_settlement_mm": -5.6,
+    "overall_status": "SAFE (接近预警 93%)",
+    "warning_proximity_ratio": 0.933
+  }
+}
