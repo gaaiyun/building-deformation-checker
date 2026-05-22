@@ -66,6 +66,32 @@ class JsonRepairTests(unittest.TestCase):
         with self.assertRaises(Exception):
             _extract_json_from_response(text)
 
+    def test_repair_handles_missing_comma_same_line_multi_space(self):
+        """MiniMax 偶发输出键值对之间缺逗号；repair 正则应能补"""
+        # 多空格分隔 → 触发 same-line 修复
+        text = '{"a": 1    "b": 2}'
+        result = _extract_json_from_response(text)
+        self.assertEqual(result, {"a": 1, "b": 2})
+
+    def test_repair_handles_missing_comma_newline(self):
+        """跨行缺逗号场景"""
+        text = '{"a": 1\n"b": 2}'
+        result = _extract_json_from_response(text)
+        self.assertEqual(result, {"a": 1, "b": 2})
+
+    def test_json5_handles_unquoted_keys(self):
+        """json5 支持无引号 key（LLM 偶发省略）"""
+        text = '{a: 1, b: "value"}'
+        result = _extract_json_from_response(text)
+        self.assertEqual(result["a"], 1)
+        self.assertEqual(result["b"], "value")
+
+    def test_json5_handles_single_quotes(self):
+        """json5 支持单引号字符串"""
+        text = "{'name': 'WY236', 'value': 12.5}"
+        result = _extract_json_from_response(text)
+        self.assertEqual(result["name"], "WY236")
+
 
 if __name__ == "__main__":
     unittest.main()

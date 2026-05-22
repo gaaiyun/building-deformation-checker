@@ -427,6 +427,90 @@ def check_anchor_force(
             ))
 
 
+def check_cross_period_continuity(
+    report: MonitoringReport,
+    issues: list[CheckIssue],
+) -> None:
+    """跨期累计连续性验证：``累计_{N+1} = 累计_N + 本次_{N+1}``
+
+    适用于"横向多期布局且无独立初始值列"的模板（如展誉立柱沉降、基坑顶水平位移）。
+    LLM 把同 monitoring_item 的不同期拆成不同 table 后，本函数按 monitor_date
+    排序，对每个测点检查跨期累计的连续性。
+
+    设计要点：
+        - 仅对 ``points`` 表生效（深层位移走自己的 prev/current 连续性逻辑）
+        - 按 monitoring_item + borehole_id 分组
+        - 同组少于 2 期 → 不做检查（向后兼容）
+        - 容差：max(0.15, |累计| * 5%)，与单期 cumulative 验证保持一致
+
+    历史背景：
+        - 展誉模板的"立柱沉降/基坑顶水平位移/地下水位/建筑物倾斜"等表无独立
+          初始值列，单期 ``(current - initial)`` 公式不适用
+        - 跨期连续性是这类模板的唯一可靠数学校核手段
+    """
+    from collections import defaultdict
+
+    groups: dict[tuple[str, str], list[MonitoringTable]] = defaultdict(list)
+    for t in report.tables:
+        if not t.points:
+            continue  # 深层位移走自己的路径
+        groups[(t.monitoring_item or "", t.borehole_id or "")].append(t)
+
+    for (item, bh), tables in groups.items():
+        if len(tables) < 2:
+            continue
+        # 按 monitor_date 排序（缺失日期排最后，按 monitor_count 备用）
+        sorted_tbls = sorted(
+            tables,
+            key=lambda t: (
+                (t.monitor_date or "9999"),
+                (t.monitor_count or ""),
+            ),
+        )
+
+        for n_tbl, n1_tbl in zip(sorted_tbls, sorted_tbls[1:]):
+            # 跨期连续性：n+1 累计 = n 累计 + n+1 本次
+            n_cums = {
+                p.point_id: p.cumulative_change
+                for p in n_tbl.points
+                if p.cumulative_change is not None and p.point_id
+            }
+            if not n_cums:
+                continue
+
+            label_n = n_tbl.monitor_date or n_tbl.monitor_count or "前一期"
+            label_n1 = n1_tbl.monitor_date or n1_tbl.monitor_count or "本期"
+
+            for pt in n1_tbl.points:
+                if (
+                    pt.cumulative_change is None
+                    or pt.current_change is None
+                    or not pt.point_id
+                ):
+                    continue
+                prev_cum = n_cums.get(pt.point_id)
+                if prev_cum is None:
+                    continue
+
+                expected = prev_cum + pt.current_change
+                tol = max(0.15, abs(pt.cumulative_change) * 0.05)
+
+                if not _close_enough(expected, pt.cumulative_change, tol):
+                    issues.append(CheckIssue(
+                        severity="error",
+                        table_name=item or "未命名表",
+                        point_id=pt.point_id,
+                        field_name="跨期累计连续性",
+                        expected_value=_fmt(expected, 2),
+                        actual_value=_fmt(pt.cumulative_change, 2),
+                        message=(
+                            f"跨期累计不连续: "
+                            f"{label_n}累计({_fmt(prev_cum, 2)}) + {label_n1}本次({_fmt(pt.current_change, 2)}) "
+                            f"= {_fmt(expected, 2)}, 但 {label_n1}累计报告值 = {_fmt(pt.cumulative_change, 2)}"
+                        ),
+                    ))
+
+
 def run_calculation_checks(report: MonitoringReport) -> list[CheckIssue]:
     """对报告中的所有表格运行计算验证"""
     issues: list[CheckIssue] = []
@@ -446,5 +530,10 @@ def run_calculation_checks(report: MonitoringReport) -> list[CheckIssue]:
 
         annotate_issues_for_table(report, table_issues, table_index, default_source="report")
         issues.extend(table_issues)
+
+    # 跨表检查：跨期累计连续性（对横向多期布局且无独立初始值列的模板特别有用）
+    cross_period_issues: list[CheckIssue] = []
+    check_cross_period_continuity(report, cross_period_issues)
+    issues.extend(cross_period_issues)
 
     return issues

@@ -34,6 +34,19 @@ SYSTEM_PROMPT = """\
 - 有些表没有"初始值"列，只有"本次变化量"和"累计变化量"，此时 initial_value 设 null
 - 累计变化量是从项目首测以来的总变化，不一定能通过表中两列算出
 
+## 关于横向多期布局（重要）
+- 某些模板把多次监测（如"第220次/第221次/第222次"或"第172次..第177次"）**横向**排列
+  在同一表里，每期占 3 列（本次变化 / 累计变化 / 变化速率）
+- **必须**把每期作为**独立的 table** 输出（不要合并成"宽表"）
+  - 每张 table 的 monitor_date 设为该期的日期（从 row 6 或日期行抽取）
+  - 每张 table 的 monitor_count 设为该期次（如"第220次"）
+  - 每张 table 的 points 只包含该期的列：current_change / cumulative_change / change_rate
+  - 如果 sheet 含 6 期数据 → 输出 6 张 table，monitoring_item 相同但 monitor_date 不同
+- 横向布局通常**没有显式 initial_value 列**：
+  - 第一列可能是测点编号，第二列直接就是第一期的本次变化（不是初始值！）
+  - 此时 initial_value 设 null，由跨期累计连续性来核对
+- **不要把测点编号列误填到 initial_value**
+
 ## 关于深层位移 / 测斜表（重要）
 - 深层位移表常见列为“上次累计 / 本次累计 / 本期变化”，此时:
   - previous_cumulative = 上次累计
@@ -113,18 +126,29 @@ def _extract_json_from_response(text: str) -> dict:
         if idx >= 0:
             text = text[:idx + 1]
 
-    # 一次尝试
+    # 三段式解析：strict json → repair + json → json5（容错解析器）
     try:
         return json.loads(text)
     except json.JSONDecodeError as exc:
-        # 应用启发式修复
+        # 第一轮：启发式修复后再 strict json
         repaired = _repair_llm_json(text, exc)
         if repaired is not None:
             try:
                 return json.loads(repaired)
             except json.JSONDecodeError:
                 pass
-        # 重新抛出原始错误
+        # 第二轮：json5 容错解析（处理缺逗号、单引号、未引号 key 等 LLM 常见输出）
+        try:
+            import json5  # 轻量依赖，能解析比标准 JSON 更宽松的格式
+            return json5.loads(text)
+        except Exception:
+            try:
+                # 修复后的文本再 json5
+                if repaired:
+                    return json5.loads(repaired)
+            except Exception:
+                pass
+        # 全部失败，重新抛原始错误
         raise
 
 
@@ -145,6 +169,21 @@ def _repair_llm_json(text: str, exc: json.JSONDecodeError) -> str | None:
 
     # 2. 尾随逗号
     repaired = re.sub(r',(\s*[\]}])', r'\1', repaired)
+
+    # 2.5. 键值对之间缺逗号（MiniMax 偶发输出）
+    # 模式：<value 结尾> <空白> "key": → 插入逗号
+    # value 结尾 = 数字结尾 / 字符串闭合 / 数组]结尾 / 对象}结尾 / null/true/false 结尾
+    repaired = re.sub(
+        r'(["\d\}\]ltnse])\s*\n\s*("[A-Za-z_][\w_]*":)',
+        r'\1,\n  \2',
+        repaired,
+    )
+    # 同样模式但同一行（更激进，可能误伤）
+    repaired = re.sub(
+        r'("|\d|\}|\])\s{2,}("[A-Za-z_][\w_]*":)',
+        r'\1, \2',
+        repaired,
+    )
 
     # 3. 字符串内的换行
     def _escape_newline_in_string(m: re.Match) -> str:
