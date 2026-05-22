@@ -193,16 +193,47 @@ def _repair_llm_json(text: str, exc: json.JSONDecodeError) -> str | None:
 
     # 如果错误位置在文本末端附近，尝试截断到上一个合法 '}'
     if exc.pos and exc.pos > len(repaired) * 0.5:
-        truncated = repaired[:exc.pos]
-        # 找最后一个完整对象的结束位置
-        last_brace = max(truncated.rfind('}'), truncated.rfind(']'))
-        if last_brace > 0:
-            # 补齐外层 {}
-            opens = repaired[:last_brace + 1].count('{') - repaired[:last_brace + 1].count('}')
-            if opens >= 0:
-                truncated = repaired[:last_brace + 1] + ('}' * opens)
-            else:
-                truncated = repaired[:last_brace + 1]
+        # 找最后一个完整对象的结束位置（在 exc.pos 之前）
+        search_text = repaired[:exc.pos + 1] if exc.pos < len(repaired) else repaired
+        last_close = max(search_text.rfind('}'), search_text.rfind(']'))
+        if last_close > 0:
+            # 截断到最后一个 close
+            truncated = repaired[:last_close + 1]
+            # 计算未闭合的括号
+            opens_curly = truncated.count('{') - truncated.count('}')
+            opens_square = truncated.count('[') - truncated.count(']')
+            # 补齐 ] 然后 }（嵌套顺序：先关数组再关对象，因为 tables 通常是数组）
+            # 实际策略：从右往左扫描，看 unmatched 是 [ 还是 {，按相反顺序补
+            if opens_square > 0 or opens_curly > 0:
+                # 简单粗暴：智能补全 - 检查嵌套结构
+                stack = []
+                in_string = False
+                escape = False
+                for ch in truncated:
+                    if escape:
+                        escape = False
+                        continue
+                    if ch == '\\' and in_string:
+                        escape = True
+                        continue
+                    if ch == '"':
+                        in_string = not in_string
+                        continue
+                    if in_string:
+                        continue
+                    if ch in '{[':
+                        stack.append(ch)
+                    elif ch == '}':
+                        if stack and stack[-1] == '{':
+                            stack.pop()
+                    elif ch == ']':
+                        if stack and stack[-1] == '[':
+                            stack.pop()
+                # 按 stack 反序补齐
+                closers = []
+                for opener in reversed(stack):
+                    closers.append('}' if opener == '{' else ']')
+                truncated += ''.join(closers)
             return truncated
 
     return repaired if repaired != text else None
@@ -453,6 +484,25 @@ def parse_report_with_llm(raw_text: str) -> MonitoringReport:
             parsed = _extract_json_from_response(raw)
         except (json.JSONDecodeError, ValueError) as e:
             logger.error("第%d段JSON解析失败: %s", i + 1, e)
+            # 调试 dump：把失败的原始 LLM 输出写到磁盘以便排查
+            try:
+                from pathlib import Path
+                debug_dir = Path("output") / "llm_debug"
+                debug_dir.mkdir(parents=True, exist_ok=True)
+                from time import strftime
+                ts = strftime("%Y%m%d_%H%M%S")
+                dump_path = debug_dir / f"chunk{i + 1}_failed_{ts}.txt"
+                dump_path.write_text(
+                    f"# LLM 调用失败的原始响应\n"
+                    f"# 错误: {e}\n"
+                    f"# Chunk index: {i + 1}/{len(chunks)}\n"
+                    f"# 长度: {len(raw)} 字符\n\n"
+                    f"{raw}",
+                    encoding="utf-8",
+                )
+                logger.info("已保存失败的 LLM 响应到: %s", dump_path)
+            except Exception as dump_exc:
+                logger.warning("无法保存调试 dump: %s", dump_exc)
             parse_failures += 1
             continue
         success_count += 1
