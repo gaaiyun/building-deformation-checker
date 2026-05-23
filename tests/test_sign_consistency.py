@@ -151,6 +151,56 @@ class SignConsistencyTests(unittest.TestCase):
         self.assertEqual(len(s2), 1)
         self.assertEqual(s2[0].severity, "error")
 
+    def test_period_relative_initial_skipped_to_avoid_false_positive(self):
+        """支护结构 S1 案例：initial=-2.70184, current=-2.70242（差-0.58mm）但累计+31.21mm。
+
+        diff:cumulative ratio = 0.58:31.21 ≈ 1:54 → 太悬殊。
+        合理解释："initial" 是 "上次测值" 而非 "项目首测"，
+        因此 current-initial 只是本期变化，与累计自然可异号。
+        此场景不应触发 false positive。
+
+        规则：当 |current-initial| 与 |cumulative| 不在同一量级（>10x 差距）时跳过。
+        """
+        # 真实运行数据：values 实际是 m 单位 → diff_mm = -0.58 (经 ×1000)
+        points = [
+            MeasurementPoint(point_id="S1", initial_value=-2.70184, current_value=-2.70242, cumulative_change=31.21),
+        ]
+        table = MonitoringTable(
+            monitoring_item="支护结构顶部竖向位移",
+            category=MonitoringCategory.SETTLEMENT,
+            verification_config=TableVerificationConfig(
+                unit="m", unit_conversion=1000.0,  # m → mm，所以 diff = -0.58 mm
+                initial_value_reliable=False,
+            ),
+            points=points,
+        )
+        report = MonitoringReport(tables=[table])
+        issues = []
+        check_sign_consistency(report, issues)
+        self.assertEqual(
+            issues, [],
+            f"量级悬殊（>10x）应视为不同 initial 语义，跳过避免误报：{[i.message for i in issues]}",
+        )
+
+    def test_g2_still_caught_when_diff_comparable_to_cumulative(self):
+        """G2 真实案例：diff +11.63 mm vs cumulative -17.45 mm 量级相当（1:1.5）→ 仍应报"""
+        points = [
+            MeasurementPoint(point_id="G2", initial_value=9.51112, current_value=9.52275, cumulative_change=-17.45),
+        ]
+        table = MonitoringTable(
+            monitoring_item="管线沉降",
+            category=MonitoringCategory.SETTLEMENT,
+            verification_config=TableVerificationConfig(
+                unit="m", unit_conversion=1000.0,
+                initial_value_reliable=False,
+            ),
+            points=points,
+        )
+        report = MonitoringReport(tables=[table])
+        issues = []
+        check_sign_consistency(report, issues)
+        self.assertEqual(len(issues), 1, f"量级相当时仍应报：{[i.message for i in issues]}")
+
     def test_none_values_skipped(self):
         """缺失字段直接跳过，不报错"""
         points = [

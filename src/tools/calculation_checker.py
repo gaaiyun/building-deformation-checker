@@ -646,6 +646,10 @@ def run_calculation_checks(report: MonitoringReport) -> list[CheckIssue]:
 _SIGN_MIN_DIFF_MM = 0.5
 """(current - initial) 在 mm 量级下小于该阈值时跳过，避免噪声误报"""
 
+_SIGN_MAGNITUDE_RATIO_MAX = 10.0
+"""|cumulative| / |current-initial| 超过该比例时跳过，因为 'initial' 列可能
+是 '上期测值' 而非 '项目首测'。两者量级相差过大时不应直接比较符号。"""
+
 
 def check_sign_consistency(
     report: MonitoringReport,
@@ -678,6 +682,11 @@ def check_sign_consistency(
             if abs(diff_mm) < _SIGN_MIN_DIFF_MM:
                 continue
             if abs(pt.cumulative_change) < _SIGN_MIN_DIFF_MM:
+                continue
+            # 量级悬殊（>10×）：'initial' 列可能是'上期'而非'项目首测'，跳过避免误报
+            larger = max(abs(diff_mm), abs(pt.cumulative_change))
+            smaller = min(abs(diff_mm), abs(pt.cumulative_change))
+            if smaller > 0 and (larger / smaller) > _SIGN_MAGNITUDE_RATIO_MAX:
                 continue
             if (diff_mm > 0) == (pt.cumulative_change > 0):
                 continue
