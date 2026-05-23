@@ -274,6 +274,44 @@ class OcrCacheDirectoryScanTests(unittest.TestCase):
         self.assertGreaterEqual(len(zero_blob), 1,
                                 f"应识别 '0' 字符 blob：{findings}")
 
+    def test_real_hengda_endtoend_emits_logic_warning(self):
+        """端到端整合：模拟 pipeline → 恒大缓存损毁应在 run_logic_checks 产生 warning"""
+        from src.models.data_models import (
+            MonitoringCategory, MonitoringReport, MonitoringTable, TableVerificationConfig,
+        )
+        from src.tools.extraction_quality import analyze_extraction_quality
+        from src.tools.logic_checker import run_logic_checks
+
+        hengda_dir = ROOT / "output" / "恒大中心基坑支护工程地铁监测报告第209期（第3616次）_ocr_debug"
+        if not hengda_dir.exists():
+            self.skipTest(f"真实 OCR 缓存不存在，跳过：{hengda_dir}")
+
+        # 加一张普通表，避免 run_logic_checks 走 empty path
+        table = MonitoringTable(
+            monitoring_item="伪表",
+            category=MonitoringCategory.HORIZONTAL_DISP,
+            verification_config=TableVerificationConfig(),
+        )
+        report = MonitoringReport(tables=[table])
+        report.raw_text = "pdfplumber 提取的干净文本，与 OCR 失败无关"
+        report.extraction_diagnostics = {"debug_dir": str(hengda_dir)}
+
+        # Step 1: extraction_quality 触发缓存扫描
+        analyze_extraction_quality(report)
+        self.assertGreaterEqual(report.extraction_diagnostics.get("ocr_damage_count", 0), 1)
+
+        # Step 2: logic_checker 把 diagnostics 翻成 warning
+        issues = run_logic_checks(report)
+        damage_warnings = [i for i in issues if i.field_name == "OCR 损毁"]
+        self.assertGreaterEqual(len(damage_warnings), 1,
+                                f"应产生 OCR 损毁 warning，但实际 issues 字段：{[i.field_name for i in issues]}")
+        # 至少一条 warning 应提及缓存损毁字样（来自 page_005 0 blob）
+        msgs = [w.message for w in damage_warnings]
+        self.assertTrue(
+            any("0" in m or "blob" in m.lower() or "重复" in m for m in msgs),
+            f"warning 消息应反映损毁内容：{msgs}",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
