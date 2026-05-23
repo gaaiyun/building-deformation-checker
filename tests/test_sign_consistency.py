@@ -100,22 +100,34 @@ class SignConsistencyTests(unittest.TestCase):
         check_sign_consistency(report, issues)
         self.assertEqual(issues, [])
 
-    def test_unreliable_initial_skips_check(self):
-        """initial_value_reliable=False → 跳过检查（与 cumulative_change 检查一致）"""
-        points = [MeasurementPoint(point_id="G1", initial_value=9.50, current_value=9.52, cumulative_change=-20.0)]
+    def test_unreliable_initial_still_checks_sign(self):
+        """initial_value_reliable=False 时也应检查符号（GT ERROR-06 真实案例）。
+
+        管线沉降表标记"不可靠"是因为高程精度限制 (0.01mm)，与符号无关。
+        Sign(current - initial) 仍应匹配 sign(cumulative_change)。
+        监测报告测试 G2: initial=9.51112, current=9.52275 (上升 +11.63mm) 但累计 -17.45mm → ERROR
+        """
+        points = [
+            MeasurementPoint(point_id="G2", initial_value=9.51112, current_value=9.52275, cumulative_change=-17.45),
+        ]
         table = MonitoringTable(
             monitoring_item="管线沉降",
             category=MonitoringCategory.SETTLEMENT,
             verification_config=TableVerificationConfig(
                 unit="m", unit_conversion=1000.0,
-                initial_value_reliable=False,
+                initial_value_reliable=False,  # 高程不可靠但符号仍可验
             ),
             points=points,
         )
         report = MonitoringReport(tables=[table])
         issues = []
         check_sign_consistency(report, issues)
-        self.assertEqual(issues, [], "不可靠基准时应跳过")
+        g2 = [i for i in issues if i.point_id == "G2"]
+        self.assertGreaterEqual(len(g2), 1, "不可靠基准也应检测符号矛盾")
+        # 不可靠时降级为 warning，可靠时保持 error
+        self.assertEqual(g2[0].severity, "warning")
+        # 消息应提示不可靠
+        self.assertIn("不可靠", g2[0].message)
 
     def test_horizontal_displacement_sign(self):
         """水平位移也适用：本次-初始>0 但累计<0 → ERROR"""

@@ -659,16 +659,17 @@ def check_sign_consistency(
     - 符号矛盾 → ERROR
 
     设计要点：
-    - 仅当 `initial_value_reliable=True` 时检查（与 cumulative 计算检查口径一致）
+    - 对所有有 initial+current+cumulative 字段的表格都检查
+      （即使 initial_value_reliable=False：高程精度的不可靠不影响符号正确性）
+    - initial_value_reliable=True → severity=error
+    - initial_value_reliable=False → severity=warning（保留怀疑空间）
     - 差值小于 ~0.5 mm 时跳过（高程表噪声范围）
     - 独立于"数量级异常"60% 阈值，弥补单点孤立错号
     """
     for table in report.tables:
         cfg = table.verification_config
-        if not cfg.initial_value_reliable:
-            continue
-
         unit_conv = cfg.unit_conversion if cfg.unit_conversion else 1.0
+        is_reliable = bool(cfg.initial_value_reliable)
 
         for pt in table.points:
             if pt.initial_value is None or pt.current_value is None or pt.cumulative_change is None:
@@ -680,8 +681,11 @@ def check_sign_consistency(
                 continue
             if (diff_mm > 0) == (pt.cumulative_change > 0):
                 continue
+
+            severity = "error" if is_reliable else "warning"
+            uncertainty_hint = "" if is_reliable else "（初始基准标记不可靠，请人工确认是否为同基准比较）"
             issues.append(CheckIssue(
-                severity="error",
+                severity=severity,
                 table_name=table.monitoring_item,
                 point_id=pt.point_id,
                 field_name="符号一致性",
@@ -691,5 +695,6 @@ def check_sign_consistency(
                     f"符号矛盾：本次-初始 = {diff_mm:+.2f} mm "
                     f"(本次 {pt.current_value} - 初始 {pt.initial_value})，"
                     f"但累计标 {pt.cumulative_change:+.2f}，疑似 OCR/列错位或数据错"
+                    f"{uncertainty_hint}"
                 ),
             ))

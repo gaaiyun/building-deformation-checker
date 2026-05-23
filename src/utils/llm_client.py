@@ -37,12 +37,32 @@ def call_chat_completion(
 
     返回:
         LLM 返回的文本内容（已去除 <thinking> 标签），失败返回 None
+
+    缓存：
+        当 temperature ≤ 0.3 且 LLM_USE_CACHE 启用时，按
+        (model, messages, params) 哈希查磁盘缓存，命中直接返回。
+        见 src.utils.llm_cache。
     """
     import src.config as cfg
+    from src.utils import llm_cache
 
     timeout_sec = timeout if timeout is not None else getattr(cfg, "LLM_TIMEOUT_NORMAL", 90)
     retries = max_retries if max_retries is not None else getattr(cfg, "LLM_MAX_RETRIES", 2)
     backoff_sec = getattr(cfg, "LLM_RETRY_BACKOFF_SEC", 10)
+
+    # 缓存命中检查（先于 API 调用）
+    cache_enabled = llm_cache.should_use_cache_for(temperature)
+    cache_dir = llm_cache.get_cache_dir() if cache_enabled else None
+    cache_key = None
+    if cache_enabled:
+        cache_key = llm_cache.build_cache_key(
+            messages, model=cfg.LLM_MODEL,
+            temperature=temperature, max_tokens=max_tokens,
+        )
+        cached = llm_cache.load_cached_response(cache_dir, cache_key)
+        if cached is not None:
+            logger.info("LLM 缓存命中 [%s]", cache_key[:8])
+            return cached
 
     # 统一关闭 SDK 隐式重试，避免与本模块显式重试叠加导致长时间阻塞。
     client = OpenAI(api_key=cfg.LLM_API_KEY, base_url=cfg.LLM_BASE_URL, max_retries=0)
@@ -60,6 +80,12 @@ def call_chat_completion(
             raw = resp.choices[0].message.content or ""
             # 去除 <thinking> 标签
             raw = re.sub(r'<think(?:ing)?>.*?</think(?:ing)?>', '', raw, flags=re.DOTALL).strip()
+            # 写缓存（异常时不破坏主流程）
+            if cache_enabled and cache_key:
+                llm_cache.save_cached_response(
+                    cache_dir, cache_key, raw,
+                    params={"model": cfg.LLM_MODEL, "temperature": temperature, "max_tokens": max_tokens},
+                )
             return raw
         except Exception as e:
             last_exc = e
