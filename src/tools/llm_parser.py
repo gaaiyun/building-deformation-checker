@@ -335,8 +335,17 @@ def _build_report(data: dict) -> MonitoringReport:
                 safety_status=str(pt.get("safety_status", "")),
             ))
         for dp in tb.get("deep_points", []):
+            # 鲁棒解析 depth：LLM 可能返回 "01-1" 等非数字格式，原 float() 会抛 ValueError
+            # 中断整个 pipeline。改用 _sf 容错解析，缺/坏的 depth 跳过该点而非崩溃。
+            depth_val = _sf(dp.get("depth"))
+            if depth_val is None:
+                logger.warning(
+                    "LLM 返回的 deep_point depth 无法解析为数字，已跳过: depth=%r",
+                    dp.get("depth"),
+                )
+                continue
             t.deep_points.append(DeepDisplacementPoint(
-                depth=float(dp.get("depth", 0)),
+                depth=depth_val,
                 previous_cumulative=_sf(dp.get("previous_cumulative")),
                 current_cumulative=_sf(dp.get("current_cumulative")),
                 current_change=_sf(dp.get("current_change")),
