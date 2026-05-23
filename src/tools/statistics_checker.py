@@ -31,6 +31,13 @@ from src.models.data_models import (
 logger = logging.getLogger(__name__)
 
 
+_MAX_RATE_DISAGREEMENT_THRESHOLD = 0.3
+"""max_rate 报告值 / 实际 max(|rate|) < N → 触发真实最大被掩盖警告"""
+
+_MAX_RATE_MIN_ABS = 0.05
+"""所有速率都低于该绝对值（mm/d）时跳过判断（噪声范围）"""
+
+
 def _close(a: Optional[float], b: Optional[float], tol: float) -> bool:
     if a is None or b is None:
         return True
@@ -150,6 +157,44 @@ def _check_cross_table_ref(
         ),
     ))
     return True
+
+
+def _emit_max_rate_disagreement_warning(
+    table_label: str,
+    stats,
+    actual_rate_id: str,
+    actual_rate_val: float,
+    issues: list[CheckIssue],
+) -> None:
+    """Gap 5：当报告的最大速率 |reported| 远低于表内 max(|rate|) 时，
+    触发 warning 提醒真实最大速率被"行业口径"掩盖。
+
+    阈值：|reported| < 0.3 × max(|rate|)，且 max(|rate|) ≥ 0.05 mm/d
+    """
+    reported_abs = abs(stats.max_rate_value or 0)
+    actual_abs = abs(actual_rate_val)
+
+    if actual_abs < _MAX_RATE_MIN_ABS:
+        return  # 噪声范围，不告警
+    if reported_abs <= 0:
+        return
+    if reported_abs >= actual_abs * _MAX_RATE_DISAGREEMENT_THRESHOLD:
+        return  # 报告值已接近真实最大
+
+    ratio_x = actual_abs / reported_abs if reported_abs else float("inf")
+    issues.append(CheckIssue(
+        severity="warning",
+        table_name=table_label,
+        point_id=actual_rate_id,
+        field_name="最大速率统计",
+        expected_value=f"{actual_rate_id}={_fmt(actual_rate_val)}",
+        actual_value=f"{stats.max_rate_id}={_fmt(stats.max_rate_value)}",
+        message=(
+            f"行业口径下报告值 {stats.max_rate_id}={_fmt(stats.max_rate_value)} "
+            f"远小于表内最大|速率| {actual_rate_id}={_fmt(actual_rate_val)} "
+            f"（约 {ratio_x:.1f}× 差距），真实最大速率可能被掩盖，建议人工复核"
+        ),
+    ))
 
 
 def check_table_statistics(
@@ -350,9 +395,12 @@ def check_table_statistics(
         if not cross_ref:
             pos_rates = [(pid, v) for pid, v in rate_vals if v > 0]
             neg_rates = [(pid, v) for pid, v in rate_vals if v < 0]
+            actual_rate_id, actual_rate_val = max(rate_vals, key=lambda x: abs(x[1]))
+
             if neg_rates and not pos_rates:
                 closest_id, closest_val = max(neg_rates, key=lambda x: x[1])
                 if _close(closest_val, stats.max_rate_value, RATE_TOLERANCE):
+                    # 行业口径 info（兼容现有约定）
                     issues.append(CheckIssue(
                         severity="info",
                         table_name=table_label,
@@ -365,8 +413,12 @@ def check_table_statistics(
                             f"{stats.max_rate_id}={_fmt(stats.max_rate_value)}（行业口径）"
                         ),
                     ))
+                    # Gap 5：行业口径仍可能掩盖真实最大速率。
+                    # 当 |报告值| ≪ max(|rate|) 时（< 30%），告警提醒
+                    _emit_max_rate_disagreement_warning(
+                        table_label, stats, actual_rate_id, actual_rate_val, issues,
+                    )
                     return
-            actual_rate_id, actual_rate_val = max(rate_vals, key=lambda x: abs(x[1]))
             if not _close(abs(actual_rate_val), abs(stats.max_rate_value), RATE_TOLERANCE):
                 issues.append(CheckIssue(
                     severity="error", table_name=table_label,
