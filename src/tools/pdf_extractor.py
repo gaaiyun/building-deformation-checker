@@ -676,6 +676,10 @@ def _call_paddle_ocr_legacy(pdf_path: str, profile: dict) -> dict:
 
 
 def _call_paddle_ocr(pdf_path: str, profile: dict) -> dict:
+    # 早期退出：无 token 时 legacy API 同样会 401，避免冗余调用 + 日志噪声
+    if not PADDLE_OCR_TOKEN:
+        raise ValueError("PADDLE_OCR_TOKEN is required for PaddleOCR (both async and legacy APIs)")
+
     if PADDLE_OCR_USE_ASYNC:
         try:
             return _call_paddle_ocr_async(pdf_path, profile)

@@ -167,6 +167,8 @@ class PdfExtractorTests(unittest.TestCase):
     def test_paddle_async_failure_can_fall_back_to_legacy(self):
         legacy_result = {"layoutParsingResults": [{"markdown": {"text": "legacy"}}]}
         with (
+            # token 必须非空，否则 _call_paddle_ocr 早期退出（见 test_paddle_ocr_no_token.py）
+            patch.object(pdf_extractor, "PADDLE_OCR_TOKEN", "fake_token"),
             patch.object(pdf_extractor, "PADDLE_OCR_USE_ASYNC", True),
             patch.object(pdf_extractor, "PADDLE_OCR_ENABLE_LEGACY_FALLBACK", True),
             patch.object(pdf_extractor, "_call_paddle_ocr_async", side_effect=RuntimeError("async down")),
