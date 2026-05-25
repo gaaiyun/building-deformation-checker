@@ -270,14 +270,19 @@ def check_safety_status(report: MonitoringReport, issues: list[CheckIssue]) -> N
             if not pt.safety_status:
                 continue
             should_be = "正常"
-            if pt.cumulative_change is not None and threshold.warning_value is not None:
+            # 容忍 LLM 误抽出的负 threshold（如 -30 应为 30）：用 abs 比较，
+            # 但 ≤0 (含 None) 表示真无阈值，跳过
+            abs_warn = abs(threshold.warning_value) if threshold.warning_value else 0
+            abs_ctrl = abs(threshold.control_value) if threshold.control_value else 0
+            abs_rate_limit = abs(threshold.rate_limit) if threshold.rate_limit else 0
+            if pt.cumulative_change is not None and abs_warn > 0:
                 abs_cum = abs(pt.cumulative_change)
-                if threshold.control_value and abs_cum >= threshold.control_value:
+                if abs_ctrl > 0 and abs_cum >= abs_ctrl:
                     should_be = "控制"
-                elif abs_cum >= threshold.warning_value:
+                elif abs_cum >= abs_warn:
                     should_be = "报警"
-            if pt.change_rate is not None and threshold.rate_limit is not None:
-                if abs(pt.change_rate) >= threshold.rate_limit:
+            if pt.change_rate is not None and abs_rate_limit > 0:
+                if abs(pt.change_rate) >= abs_rate_limit:
                     if should_be == "正常":
                         should_be = "报警"
 
@@ -323,20 +328,23 @@ def _proximity_message(pt, threshold) -> str | None:
     优先级：累计接近 > 速率接近（一行只生成一条 proximity 提示，避免噪音）。
     """
     # 累计接近预警值
-    if pt.cumulative_change is not None and threshold.warning_value:
-        ratio = abs(pt.cumulative_change) / threshold.warning_value
+    # 注：用 abs(threshold.warning_value) 容忍 LLM 偶发抽出负值（如 -30 应为 30）
+    abs_warn = abs(threshold.warning_value) if threshold.warning_value else 0
+    if pt.cumulative_change is not None and abs_warn > 0:
+        ratio = abs(pt.cumulative_change) / abs_warn
         if (_PROXIMITY_THRESHOLD - _PROXIMITY_EPSILON) <= ratio < 1.0:
             return (
                 f"累计变化 {pt.cumulative_change:.2f} 已接近预警值 "
-                f"{threshold.warning_value:.1f}（达 {ratio:.0%}），建议加密观测"
+                f"{abs_warn:.1f}（达 {ratio:.0%}），建议加密观测"
             )
-    # 速率接近限值
-    if pt.change_rate is not None and threshold.rate_limit:
-        ratio = abs(pt.change_rate) / threshold.rate_limit
+    # 速率接近限值（同样容忍负值）
+    abs_rate_limit = abs(threshold.rate_limit) if threshold.rate_limit else 0
+    if pt.change_rate is not None and abs_rate_limit > 0:
+        ratio = abs(pt.change_rate) / abs_rate_limit
         if (_PROXIMITY_THRESHOLD - _PROXIMITY_EPSILON) <= ratio < 1.0:
             return (
                 f"变化速率 {pt.change_rate:.3f} mm/d 已接近速率限值 "
-                f"{threshold.rate_limit:.2f} mm/d（达 {ratio:.0%}），建议加密观测"
+                f"{abs_rate_limit:.2f} mm/d（达 {ratio:.0%}），建议加密观测"
             )
     return None
 
