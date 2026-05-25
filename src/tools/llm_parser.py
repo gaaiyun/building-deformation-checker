@@ -164,8 +164,14 @@ def _repair_llm_json(text: str, exc: json.JSONDecodeError) -> str | None:
     repaired = text
 
     # 1. 去掉数字后的多余字符（如 "0.5mm,"、"3.4." 等）
+    # 顺序很重要：先剥单位，再清尾部多余点
+    # 1a. 数字 + 单位（仅当后面是分隔符且前面不是字母时；保护字符串值如 "5m"）
+    #     注：当前 lookahead 已含 `,\s\]}`，闭合引号 `"` 不在内，因此字符串内不会触发
+    repaired = re.sub(r'(?<![A-Za-z])(-?\d+\.?\d*)(mm/?d?|kN|KN|kn|cm|m)\b(?=[,\s\]}])', r'\1', repaired)
+    # 1b. 双小数点（'12.5.' → '12.5'）
     repaired = re.sub(r'(-?\d+\.\d+)\.(?=[,\s\]}])', r'\1', repaired)
-    repaired = re.sub(r'(-?\d+\.?\d*)(mm/?d?|kN|KN|kn|cm|m)(?=[,\s\]}])', r'\1', repaired)
+    # 1c. 尾随单点（'12.' → '12'）— 必须放在 1a/1b 之后，避免剥掉合法 '12.5'
+    repaired = re.sub(r'(-?\d+)\.(?=[,\s\]}])', r'\1', repaired)
 
     # 2. 尾随逗号
     repaired = re.sub(r',(\s*[\]}])', r'\1', repaired)
