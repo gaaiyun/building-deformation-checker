@@ -28,6 +28,9 @@ from typing import Optional
 
 DEFAULT_CACHE_TEMP_MAX = 0.3
 
+_MIN_CACHEABLE_LENGTH = 20
+"""短于此阈值的响应不缓存（可能是错误信息或 thinking 残留）"""
+
 
 def is_cache_enabled() -> bool:
     """根据环境变量决定是否启用缓存"""
@@ -63,17 +66,21 @@ def build_cache_key(
     model: str,
     temperature: float,
     max_tokens: int,
+    base_url: str = "",
 ) -> str:
     """生成 SHA256 hex 缓存键。
 
     inputs 规范化为有序 JSON 以确保跨平台一致：
     - messages 用 sort_keys，避免顺序差异
     - 数字精度统一
+    - base_url 纳入 key：不同 endpoint 同模型名（DashScope vs MiniMax 都叫 qwen3.5-plus）
+      不可命中（防误命中错误响应）。base_url 默认空字符串保持后向兼容。
     """
     payload = {
         "model": model,
         "temperature": round(float(temperature), 6),
         "max_tokens": int(max_tokens),
+        "base_url": base_url or "",
         "messages": messages,
     }
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True)
@@ -101,7 +108,22 @@ def save_cached_response(
     text: str,
     params: Optional[dict] = None,
 ) -> None:
-    """保存 LLM 响应到磁盘（写入失败静默忽略，缓存只是优化非必需）"""
+    """保存 LLM 响应到磁盘。
+
+    缓存写入失败静默忽略（缓存仅为优化，非主流程）。
+
+    拒绝缓存的场景：
+    - 空 / 纯空白响应
+    - 短于 _MIN_CACHEABLE_LENGTH 字符的响应（可能是错误信息或 thinking 残留）
+
+    原子写入：先写 .tmp.{pid} 再 os.replace，避免并发读到半写文件。
+    """
+    # 过滤：拒绝缓存空/极短响应（避免污染）
+    if not text or not text.strip():
+        return
+    if len(text) < _MIN_CACHEABLE_LENGTH:
+        return
+
     try:
         cache_dir.mkdir(parents=True, exist_ok=True)
         record = {
@@ -109,10 +131,18 @@ def save_cached_response(
             "ts": datetime.now(timezone.utc).isoformat(),
             "params": params or {},
         }
-        (cache_dir / f"{key}.json").write_text(
+        final_path = cache_dir / f"{key}.json"
+        # 原子写入：先写临时文件，再 os.replace 到目标位置
+        tmp_path = cache_dir / f"{key}.json.tmp.{os.getpid()}.{id(text):x}"
+        tmp_path.write_text(
             json.dumps(record, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        os.replace(tmp_path, final_path)
     except (OSError, TypeError, ValueError):
-        # 缓存写入失败不影响主流程
-        pass
+        # 缓存写入失败不影响主流程；清理可能残留的 tmp
+        try:
+            if 'tmp_path' in locals() and tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass

@@ -58,6 +58,7 @@ def call_chat_completion(
         cache_key = llm_cache.build_cache_key(
             messages, model=cfg.LLM_MODEL,
             temperature=temperature, max_tokens=max_tokens,
+            base_url=cfg.LLM_BASE_URL,  # 包含 endpoint，防同名不同端点误命中
         )
         cached = llm_cache.load_cached_response(cache_dir, cache_key)
         if cached is not None:

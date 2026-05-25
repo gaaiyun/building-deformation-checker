@@ -66,8 +66,10 @@ class LlmCacheStorageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             cache_dir = Path(td)
             key = "abc123"
-            save_cached_response(cache_dir, key, "hello LLM response")
-            self.assertEqual(load_cached_response(cache_dir, key), "hello LLM response")
+            # 文本必须 ≥20 字符（rejection of empty/short responses）
+            content = "hello LLM response - 长度足够缓存"
+            save_cached_response(cache_dir, key, content)
+            self.assertEqual(load_cached_response(cache_dir, key), content)
 
     def test_load_miss_returns_none(self):
         from src.utils.llm_cache import load_cached_response
@@ -78,7 +80,8 @@ class LlmCacheStorageTests(unittest.TestCase):
         from src.utils.llm_cache import save_cached_response
         with tempfile.TemporaryDirectory() as td:
             cache_dir = Path(td) / "deep" / "nested" / "cache"
-            save_cached_response(cache_dir, "k", "v")
+            # 文本必须 ≥20 字符
+            save_cached_response(cache_dir, "k", "value-长度足够-测试目录创建-cache test ok")
             self.assertTrue((cache_dir / "k.json").exists())
 
     def test_corrupted_cache_file_returns_none(self):
@@ -113,7 +116,7 @@ class LlmClientCacheIntegrationTests(unittest.TestCase):
         class FakeResp:
             class Choice:
                 class Message:
-                    content = "fake LLM response"
+                    content = "fake LLM response with longer content for cache test (more than 20 chars)"
                 message = Message()
             choices = [Choice()]
 
@@ -138,7 +141,7 @@ class LlmClientCacheIntegrationTests(unittest.TestCase):
             ):
                 result = llm_client.call_chat_completion(msgs, temperature=0.1)
 
-        self.assertEqual(result, "fake LLM response")
+        self.assertEqual(result, "fake LLM response with longer content for cache test (more than 20 chars)")
         self.assertEqual(call_count["n"], 1)
         # 缓存目录应有一个 .json 文件
         self.assertEqual(len(list(self.cache_dir.glob("*.json"))), 1)
@@ -148,14 +151,14 @@ class LlmClientCacheIntegrationTests(unittest.TestCase):
         from src.utils import llm_client
         from src.utils.llm_cache import build_cache_key, save_cached_response
         msgs = [{"role": "user", "content": "test prompt"}]
-        key = build_cache_key(msgs, model="m", temperature=0.1, max_tokens=4000)
-        save_cached_response(self.cache_dir, key, "cached response")
+        key = build_cache_key(msgs, model="m", temperature=0.1, max_tokens=4000, base_url="x")
+        save_cached_response(self.cache_dir, key, "cached response with sufficient length for caching reliably")
 
         call_count = {"n": 0}
 
         def fake_create(**kw):
             call_count["n"] += 1
-            raise RuntimeError("应该不被调到")
+            raise RuntimeError("应该不被调到 — placeholder长度足够")
 
         import src.config as fake_cfg
         with patch("src.utils.llm_client.OpenAI") as MockOpenAI:
@@ -173,7 +176,7 @@ class LlmClientCacheIntegrationTests(unittest.TestCase):
             ):
                 result = llm_client.call_chat_completion(msgs, temperature=0.1)
 
-        self.assertEqual(result, "cached response")
+        self.assertEqual(result, "cached response with sufficient length for caching reliably")
         self.assertEqual(call_count["n"], 0, "命中缓存时不应调 API")
 
     def test_high_temperature_bypasses_cache(self):
@@ -183,15 +186,15 @@ class LlmClientCacheIntegrationTests(unittest.TestCase):
 
         msgs = [{"role": "user", "content": "high temp"}]
         # 预先写一个 0.1 的缓存
-        key_low = build_cache_key(msgs, model="m", temperature=0.1, max_tokens=4000)
-        save_cached_response(self.cache_dir, key_low, "low temp cached")
+        key_low = build_cache_key(msgs, model="m", temperature=0.1, max_tokens=4000, base_url="x")
+        save_cached_response(self.cache_dir, key_low, "low temp cached - 长度足够缓存ok")
 
         call_count = {"n": 0}
 
         class FakeResp:
             class Choice:
                 class Message:
-                    content = "fresh from API"
+                    content = "fresh from API with longer content meeting minimum cache length"
                 message = Message()
             choices = [Choice()]
 
@@ -215,7 +218,7 @@ class LlmClientCacheIntegrationTests(unittest.TestCase):
             ):
                 result = llm_client.call_chat_completion(msgs, temperature=0.7)
 
-        self.assertEqual(result, "fresh from API")
+        self.assertEqual(result, "fresh from API with longer content meeting minimum cache length")
         self.assertEqual(call_count["n"], 1, "高温调用应直调 API")
 
     def test_cache_disabled_via_env(self):
@@ -225,13 +228,13 @@ class LlmClientCacheIntegrationTests(unittest.TestCase):
 
         os.environ["LLM_USE_CACHE"] = "0"
         msgs = [{"role": "user", "content": "no cache"}]
-        key = build_cache_key(msgs, model="m", temperature=0.1, max_tokens=4000)
-        save_cached_response(self.cache_dir, key, "should not be returned")
+        key = build_cache_key(msgs, model="m", temperature=0.1, max_tokens=4000, base_url="x")
+        save_cached_response(self.cache_dir, key, "should not be returned - 长度足够缓存ok")
 
         class FakeResp:
             class Choice:
                 class Message:
-                    content = "fresh from API"
+                    content = "fresh from API with longer content meeting minimum cache length"
                 message = Message()
             choices = [Choice()]
 
@@ -254,7 +257,7 @@ class LlmClientCacheIntegrationTests(unittest.TestCase):
             ):
                 result = llm_client.call_chat_completion(msgs, temperature=0.1)
 
-        self.assertEqual(result, "fresh from API")
+        self.assertEqual(result, "fresh from API with longer content meeting minimum cache length")
 
 
 if __name__ == "__main__":
