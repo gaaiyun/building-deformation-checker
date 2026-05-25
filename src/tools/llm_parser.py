@@ -191,52 +191,85 @@ def _repair_llm_json(text: str, exc: json.JSONDecodeError) -> str | None:
         return content.replace('\n', '\\n').replace('\r', '\\r')
     repaired = re.sub(r'"[^"]*"', _escape_newline_in_string, repaired)
 
-    # 如果错误位置在文本末端附近，尝试截断到上一个合法 '}'
+    # 如果错误位置在文本末端附近，尝试截断闭合
     if exc.pos and exc.pos > len(repaired) * 0.5:
         # 找最后一个完整对象的结束位置（在 exc.pos 之前）
         search_text = repaired[:exc.pos + 1] if exc.pos < len(repaired) else repaired
         last_close = max(search_text.rfind('}'), search_text.rfind(']'))
+
+        # 若已有 close bracket：截到那里，补齐剩余未闭合
+        # 否则：保留全文，从原始 text 扫 stack 闭合（适配深嵌套早期截断）
         if last_close > 0:
-            # 截断到最后一个 close
             truncated = repaired[:last_close + 1]
-            # 计算未闭合的括号
-            opens_curly = truncated.count('{') - truncated.count('}')
-            opens_square = truncated.count('[') - truncated.count(']')
-            # 补齐 ] 然后 }（嵌套顺序：先关数组再关对象，因为 tables 通常是数组）
-            # 实际策略：从右往左扫描，看 unmatched 是 [ 还是 {，按相反顺序补
-            if opens_square > 0 or opens_curly > 0:
-                # 简单粗暴：智能补全 - 检查嵌套结构
-                stack = []
-                in_string = False
-                escape = False
-                for ch in truncated:
-                    if escape:
-                        escape = False
-                        continue
-                    if ch == '\\' and in_string:
-                        escape = True
-                        continue
-                    if ch == '"':
-                        in_string = not in_string
-                        continue
-                    if in_string:
-                        continue
-                    if ch in '{[':
-                        stack.append(ch)
-                    elif ch == '}':
-                        if stack and stack[-1] == '{':
-                            stack.pop()
-                    elif ch == ']':
-                        if stack and stack[-1] == '[':
-                            stack.pop()
-                # 按 stack 反序补齐
-                closers = []
-                for opener in reversed(stack):
-                    closers.append('}' if opener == '{' else ']')
-                truncated += ''.join(closers)
+        else:
+            # 处理末尾未完成 token（如 '"unfinished'）
+            # 找到最后一个完整 token 的位置，避免在字符串中间断开
+            truncated = _trim_to_last_safe_token(repaired)
+
+        truncated = _close_unmatched_brackets(truncated)
+        if truncated != repaired:
             return truncated
 
     return repaired if repaired != text else None
+
+
+def _close_unmatched_brackets(text: str) -> str:
+    """根据字符串内未闭合的 { 和 [ 反序追加 } 和 ] 闭合。
+
+    考虑字符串引号转义。如果未结束的字符串存在，先 close 字符串。
+    """
+    stack = []
+    in_string = False
+    escape = False
+    string_open_pos = -1
+    last_safe = 0  # 最近一个合法 token 边界（数字/}/]/字符串闭合后）
+
+    for i, ch in enumerate(text):
+        if escape:
+            escape = False
+            continue
+        if ch == '\\' and in_string:
+            escape = True
+            continue
+        if ch == '"':
+            if in_string:
+                in_string = False
+                last_safe = i + 1
+            else:
+                in_string = True
+                string_open_pos = i
+            continue
+        if in_string:
+            continue
+        if ch in '{[':
+            stack.append(ch)
+        elif ch == '}':
+            if stack and stack[-1] == '{':
+                stack.pop()
+                last_safe = i + 1
+        elif ch == ']':
+            if stack and stack[-1] == '[':
+                stack.pop()
+                last_safe = i + 1
+        elif ch.isdigit() or ch in '.-eE':
+            last_safe = i + 1
+
+    # 如果终态还在字符串里，截到该字符串开始前
+    if in_string and string_open_pos >= 0:
+        text = text[:string_open_pos].rstrip(', \t\n')
+
+    closers = []
+    for opener in reversed(stack):
+        closers.append('}' if opener == '{' else ']')
+    return text + ''.join(closers)
+
+
+def _trim_to_last_safe_token(text: str) -> str:
+    """对未完成的尾部 token 截断（如最后一个数字写一半）。
+
+    目前只做最保守处理：移除尾部空白。完整 token 切割已在 _close_unmatched_brackets 内处理。
+    """
+    return text.rstrip()
 
 
 def _sf(v: Any) -> float | None:
