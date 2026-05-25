@@ -138,6 +138,29 @@ class MaxRateDisagreementTests(unittest.TestCase):
         # 0.080/0.100 = 80% → 不警告
         self.assertEqual(len(warnings), 0, f"轻微低估不警告：{[w.message for w in warnings]}")
 
+    def test_sign_mismatch_when_all_negative_caught(self):
+        """全 rate 为负但报告值符号反 (+0.156 vs -0.156) → 应识别符号矛盾
+
+        旧实现 abs() 抹平符号，漏报。新行为应触发 error 或 warning。
+        """
+        table = MonitoringTable(
+            monitoring_item="周边地面沉降",
+            category=MonitoringCategory.SETTLEMENT,
+            points=[
+                MeasurementPoint(point_id="D1", change_rate=-0.019),
+                MeasurementPoint(point_id="D2", change_rate=-0.010),
+                MeasurementPoint(point_id="D5", change_rate=-0.156),
+            ],
+            statistics=StatisticsSummary(max_rate_id="D5", max_rate_value=+0.156),  # 符号错
+        )
+        issues = run_statistics_checks(MonitoringReport(tables=[table]))
+        rate_issues = [i for i in issues if "速率" in (i.field_name or "")]
+        self.assertGreaterEqual(len(rate_issues), 1, f"应识别符号矛盾：{issues}")
+        # 严重程度至少 warning（符号错通常是数据/列错位严重问题）
+        severities = {i.severity for i in rate_issues}
+        self.assertTrue("error" in severities or "warning" in severities,
+                        f"应为 error 或 warning，实际：{severities}")
+
     def test_small_absolute_values_no_warning(self):
         """所有速率都很小（< 0.05 mm/d）→ 不警告（噪声范围）"""
         table = MonitoringTable(

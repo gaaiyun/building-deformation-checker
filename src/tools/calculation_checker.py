@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
+from statistics import median
 from typing import Optional
 
 from src.config import RATE_TOLERANCE
@@ -562,8 +563,9 @@ def check_current_change_anomaly(
         do_outlier = len(valid_pts) >= _ANOMALY_MIN_POINTS
         median_cc = 0.0
         if do_outlier:
-            abs_ccs = sorted(abs(pt.current_change) for pt in valid_pts)
-            median_cc = abs_ccs[len(abs_ccs) // 2]
+            abs_ccs = [abs(pt.current_change) for pt in valid_pts]
+            # 用 statistics.median 而不是 [n//2]，正确处理偶数样本（取两中数均值）
+            median_cc = median(abs_ccs)
 
         table_issues: list[CheckIssue] = []
         for pt in valid_pts:

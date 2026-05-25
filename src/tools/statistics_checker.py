@@ -419,7 +419,21 @@ def check_table_statistics(
                         table_label, stats, actual_rate_id, actual_rate_val, issues,
                     )
                     return
-            if not _close(abs(actual_rate_val), abs(stats.max_rate_value), RATE_TOLERANCE):
+            # 先查符号矛盾：abs() 抹平了 ±，如 -0.156 vs +0.156 会被认为"匹配"但符号错
+            if (actual_rate_val * stats.max_rate_value < 0
+                    and abs(stats.max_rate_value) >= _MAX_RATE_MIN_ABS):
+                issues.append(CheckIssue(
+                    severity="error", table_name=table_label,
+                    point_id=actual_rate_id, field_name="最大速率统计",
+                    expected_value=_fmt(actual_rate_val),
+                    actual_value=_fmt(stats.max_rate_value),
+                    message=(
+                        f"最大速率符号矛盾: 实际 {actual_rate_id}={_fmt(actual_rate_val)} "
+                        f"(全部速率同向)，但报告 {stats.max_rate_id}={_fmt(stats.max_rate_value)} "
+                        f"符号相反，疑似 OCR/列错位"
+                    ),
+                ))
+            elif not _close(abs(actual_rate_val), abs(stats.max_rate_value), RATE_TOLERANCE):
                 issues.append(CheckIssue(
                     severity="error", table_name=table_label,
                     point_id=actual_rate_id, field_name="最大速率统计",
