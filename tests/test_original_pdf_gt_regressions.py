@@ -18,6 +18,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -36,7 +37,21 @@ from src.models.data_models import (
 )
 from src.tools.calculation_checker import run_calculation_checks
 from src.tools.statistics_checker import run_statistics_checks
+import src.tools.logic_checker as logic_checker
 from src.tools.logic_checker import run_logic_checks
+
+
+def _offline_semantic_maps(report):
+    """离线替身：用关键词回退建图，避免构造 OpenAI 客户端发起真实网络调用。
+
+    run_logic_checks 内部的 _build_semantic_maps 会无条件构造 OpenAI()，在
+    无 API key 的 CI 环境抛 OpenAIError。本回归只验证规则引擎对真实错误的识别，
+    与 LLM 语义匹配无关，故直接走 _build_fallback_maps（纯关键词，无网络）。
+    """
+    threshold_names = [th.item_name for th in report.thresholds]
+    table_names = list({t.monitoring_item for t in report.tables})
+    summary_names = [si.monitoring_item for si in report.summary_items]
+    logic_checker._build_fallback_maps(report, threshold_names, table_names, summary_names)
 
 
 # ───────── 工具函数 ─────────
@@ -318,6 +333,14 @@ class NegativeSampleTests(unittest.TestCase):
 
 class HengdaProximityWarningTests(unittest.TestCase):
     """恒大中心 baseline 提示：累计 5.6mm 达预警 6mm 的 93%，应升级为'接近预警'"""
+
+    def setUp(self):
+        # 拦截 LLM 语义匹配，改用离线关键词回退（无网络、无 API key 依赖）
+        self._patch = patch.object(
+            logic_checker, "_build_semantic_maps", _offline_semantic_maps
+        )
+        self._patch.start()
+        self.addCleanup(self._patch.stop)
 
     def test_cumulative_at_93_percent_of_warning_should_proximity_alert(self):
         """累计 -5.6mm，报警值 -6.0mm，达 93%，应识别为'接近预警'"""
