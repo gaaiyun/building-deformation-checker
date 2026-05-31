@@ -12,6 +12,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -25,7 +26,21 @@ from src.models.data_models import (
     TableVerificationConfig,
     ThresholdConfig,
 )
+import src.tools.logic_checker as logic_checker
 from src.tools.logic_checker import run_logic_checks
+
+
+def _offline_semantic_maps(report):
+    """离线替身：用关键词回退建图，避免构造 OpenAI 客户端发起真实网络调用。
+
+    run_logic_checks 内部会调 _build_semantic_maps，后者无条件构造 OpenAI()，
+    在无 API key 的 CI 环境会抛 OpenAIError。本测试只验证 proximity 规则逻辑，
+    与 LLM 语义匹配无关，故直接走 _build_fallback_maps（纯关键词，无网络）。
+    """
+    threshold_names = [th.item_name for th in report.thresholds]
+    table_names = list({t.monitoring_item for t in report.tables})
+    summary_names = [si.monitoring_item for si in report.summary_items]
+    logic_checker._build_fallback_maps(report, threshold_names, table_names, summary_names)
 
 
 def _make(threshold_warn, threshold_rate, cum, rate):
@@ -59,6 +74,14 @@ def _make(threshold_warn, threshold_rate, cum, rate):
 
 
 class ProximityNegativeThresholdTests(unittest.TestCase):
+
+    def setUp(self):
+        # 拦截 LLM 语义匹配，改用离线关键词回退（无网络、无 API key 依赖）
+        self._patch = patch.object(
+            logic_checker, "_build_semantic_maps", _offline_semantic_maps
+        )
+        self._patch.start()
+        self.addCleanup(self._patch.stop)
 
     def test_negative_warning_value_does_not_block_proximity(self):
         """LLM 抽出负 warning_value (-30, 应为 30) 时，仍能识别 96.8% 接近
