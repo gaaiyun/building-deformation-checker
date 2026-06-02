@@ -20,6 +20,7 @@ pack_project.tar.gz
 build/
 dist/
 *.exe
+*.msi
 *.spec.bak
 
 # 本地基线对比文件（包含报告内具体测点数据，可能敏感）

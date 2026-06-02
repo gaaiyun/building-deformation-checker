@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="Building Deformation Checker"
+    Manufacturer="gaaiyun"
+    Version="$(var.ProductVersion)"
+    UpgradeCode="B60F87E3-11C7-4B29-BD19-2218FD64B5AE"
+    Scope="perMachine">
+    <MajorUpgrade DowngradeErrorMessage="A newer version is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Feature Id="MainFeature" Title="Building Deformation Checker" Level="1">
+      <ComponentGroupRef Id="AppComponents" />
+    </Feature>
+  </Package>
+
+  <Fragment>
+    <StandardDirectory Id="ProgramFilesFolder">
+      <Directory Id="INSTALLFOLDER" Name="Building Deformation Checker" />
+    </StandardDirectory>
+  </Fragment>
+
+  <Fragment>
+    <ComponentGroup Id="AppComponents" Directory="INSTALLFOLDER">
+      <Component Id="MainExecutable" Guid="*">
+        <File
+          Id="BuildingDeformationCheckerExe"
+          Source="$(var.SourceDir)\BuildingDeformationChecker.exe"
+          KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+</Wix>

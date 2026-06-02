@@ -157,9 +157,6 @@ cd building-deformation-checker
 # 通用依赖
 pip install -r requirements.txt
 
-# 桌面版需额外安装
-pip install PySide6>=6.5
-
 # 文本层快速路由（推荐）
 pip install pymupdf
 ```
@@ -171,8 +168,11 @@ openai>=1.0.0        # LLM 调用（OpenAI 兼容协议）
 pdfplumber>=0.11.0   # 文字版 PDF 解析
 requests>=2.31.0     # PaddleOCR API 调用
 streamlit>=1.30.0    # Streamlit Web UI
+PySide6>=6.5.0       # 桌面 GUI
 python-docx>=1.0.0   # Word 导出
 markdown>=3.5.0      # Markdown → HTML
+keyring>=25.0.0      # 桌面版敏感配置存储
+pyinstaller>=6.0.0   # 桌面版 .exe 打包
 ```
 
 ### 三种启动方式
@@ -184,6 +184,19 @@ python desktop.py
 ```
 
 拖入 PDF 即跑；首次启动会提示填写 API Key，配置自动持久化到 `~/AppData/.../settings.json`（Windows）。
+
+**打包桌面版**
+
+```powershell
+# 生成 dist/BuildingDeformationChecker.exe
+powershell -ExecutionPolicy Bypass -File scripts/build_desktop.ps1
+
+# 如需生成 MSI，先安装 WiX Toolset，再加 -BuildMsi
+dotnet tool install --global wix
+powershell -ExecutionPolicy Bypass -File scripts/build_desktop.ps1 -BuildMsi -Version 2.1.0
+```
+
+安装包不内置任何 API Key。交付给甲方/复核员后，由对方在桌面版左侧配置面板自行输入 OpenAI 兼容 `API Key`、`Base URL`、模型名和 PaddleOCR Token；敏感字段保存到系统 keyring，不写入仓库或安装包。
 
 **2) Streamlit Web**
 
@@ -364,7 +377,7 @@ sequenceDiagram
 ## 测试与质量
 
 ```bash
-# 跑全部 311 个测试（当前基线：309 passed, 2 skipped）
+# 跑全部 313 个测试（当前基线：311 passed, 2 skipped）
 python -m pytest tests/ -v
 
 # 跑单个模块
@@ -374,7 +387,7 @@ python -m pytest tests/test_text_normalize.py -v
 python smoke_test_v2.py
 ```
 
-`tests/` 目录覆盖（当前 `311 collected / 309 passed / 2 skipped`，约 5 秒跑完）：
+`tests/` 目录覆盖（当前 `313 collected / 311 passed / 2 skipped`，约 5 秒跑完）：
 
 | 文件 | 用例数 | 重点覆盖 |
 |------|-------|----------|
@@ -472,7 +485,7 @@ building-deformation-checker/
 │   ├── worker.py                    #   - QThread + Signal worker
 │   └── settings_store.py            #   - 配置持久化
 │
-├── tests/                           # 311 个 pytest 用例（309 passed, 2 skipped）
+├── tests/                           # 313 个 pytest 用例（311 passed, 2 skipped）
 ├── docs/
 │   ├── specs/
 │   │   └── 2026-05-16-v2-redesign-design.md
@@ -531,11 +544,12 @@ building-deformation-checker/
 - 单文件场景为主，未做多文件批处理 UI（CLI 可脚本化批量）。
 - 不做数据库持久化，所有结果落盘为文件。
 - LLM 调用未本地化，离线场景仅可跑规则层（Step 1/3/4/8）。
-- 桌面 GUI 已有 `build_desktop.spec`，源码方式与 offscreen 自动化测试已验证；正式 `.exe` 交付前仍需在目标 Windows 机器做一次打包产物 smoke。
+- 桌面 GUI 已有 `build_desktop.spec` 与 `scripts/build_desktop.ps1`，源码方式、配置面板和结果面板已通过 offscreen 自动化测试；正式 `.exe` / `.msi` 交付前仍需在目标 Windows 机器做一次打包产物 smoke。
 
 **路线图（按优先级）**
 
-- [ ] PyInstaller 打包 `.exe`，零依赖分发
+- [x] PyInstaller 打包 `.exe` 脚本，支持零依赖分发
+- [x] 可选 WiX `.msi` 安装包模板
 - [ ] PaddleOCR-VL 本地推理选项（去 API 依赖）
 - [ ] 多文件并发批处理面板（桌面版）
 - [ ] 内嵌 PDF 预览定位异常字段（QPdfView 已在主窗框架内）
