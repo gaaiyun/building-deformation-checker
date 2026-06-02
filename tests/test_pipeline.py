@@ -37,8 +37,8 @@ class TestRuntimeConfigDefaults(unittest.TestCase):
         cfg = RuntimeConfig(pdf_path="x.pdf")
         self.assertEqual(cfg.pdf_path, "x.pdf")
         self.assertEqual(cfg.llm_api_key, "")
-        self.assertTrue(cfg.llm_base_url.startswith("http"))
-        self.assertEqual(cfg.llm_model, "qwen3.5-plus")
+        self.assertEqual(cfg.llm_base_url, "https://api.deepseek.com")
+        self.assertEqual(cfg.llm_model, "deepseek-v4-flash")
 
     def test_default_timeouts_sensible(self):
         cfg = RuntimeConfig(pdf_path="x.pdf")

@@ -6,12 +6,16 @@ import os
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 LLM_BASE_URL = os.getenv(
     "LLM_BASE_URL",
-    "https://coding.dashscope.aliyuncs.com/v1",
+    "https://api.deepseek.com",
 )
-LLM_MODEL = os.getenv("LLM_MODEL", "qwen3.5-plus")
+LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-v4-flash")
 
 # 可切换的模型列表（Coding Plan 支持的模型）
 AVAILABLE_MODELS = [
+    "deepseek-v4-flash",
+    "deepseek-v4-pro",
+    "deepseek-chat",
+    "deepseek-reasoner",
     "qwen3.5-plus",
     "MiniMax-M2.7",
     "MiniMax-M2.7-highspeed",

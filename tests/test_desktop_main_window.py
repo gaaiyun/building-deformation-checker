@@ -10,6 +10,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -18,9 +19,9 @@ if str(ROOT) not in sys.path:
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
-    from PySide6.QtWidgets import QApplication, QGroupBox, QPushButton
+    from PySide6.QtWidgets import QApplication, QComboBox, QGroupBox, QLabel, QPushButton
 
-    from gui_desktop.main_window import ConfigPanel, MainWindow, ResultsPanel
+    from gui_desktop.main_window import APP_ICON_PATH, ConfigPanel, MainWindow, ResultsPanel
     from src.core.pipeline import PipelineResult
     from src.models.data_models import CheckIssue, MonitoringReport
 
@@ -57,6 +58,8 @@ class DesktopMainWindowTests(unittest.TestCase):
                 "skip_ai_review": True,
             }
         )
+        panel.llm_api_key.setText("sk-test")
+        panel.paddle_ocr_token.setText("ocr-token")
 
         cfg = panel.to_runtime_config("sample.pdf")
 
@@ -74,17 +77,79 @@ class DesktopMainWindowTests(unittest.TestCase):
 
     def test_config_panel_default_ocr_model_is_vl_16(self):
         panel = ConfigPanel({})
-        self.assertEqual(panel.paddle_ocr_model.text(), "PaddleOCR-VL-1.6")
+        self.assertEqual(panel.paddle_ocr_model.currentText(), "PaddleOCR-VL-1.6")
+
+    def test_config_panel_defaults_to_deepseek_v4_flash(self):
+        panel = ConfigPanel({})
+
+        self.assertEqual(panel.llm_base_url.text(), "https://api.deepseek.com")
+        self.assertEqual(panel.llm_model.currentText(), "deepseek-v4-flash")
+
+    def test_config_panel_prefills_sensitive_keys_from_user_keyring_settings(self):
+        panel = ConfigPanel(
+            {
+                "llm_api_key": "sk-saved-by-user",
+                "paddle_ocr_token": "paddle-saved-by-user",
+            }
+        )
+
+        self.assertEqual(panel.llm_api_key.text(), "sk-saved-by-user")
+        self.assertEqual(panel.paddle_ocr_token.text(), "paddle-saved-by-user")
+
+    def test_config_panel_can_clear_saved_sensitive_keys(self):
+        panel = ConfigPanel({})
+        panel.llm_api_key.setText("sk-runtime-only")
+        panel.paddle_ocr_token.setText("paddle-runtime-only")
+
+        captured = {}
+        with patch("gui_desktop.main_window.save_settings", lambda payload: captured.update(payload)):
+            panel.clear_secrets()
+
+        self.assertEqual(captured["llm_api_key"], "")
+        self.assertEqual(captured["paddle_ocr_token"], "")
+        self.assertEqual(panel.llm_api_key.text(), "")
+        self.assertEqual(panel.paddle_ocr_token.text(), "")
+
+    def test_config_panel_lists_deepseek_and_paddle_vl16_models(self):
+        panel = ConfigPanel({})
+
+        llm_models = [
+            panel.llm_model.itemText(i)
+            for i in range(panel.llm_model.count())
+        ]
+        self.assertIn("deepseek-v4-flash", llm_models)
+        self.assertIn("deepseek-v4-pro", llm_models)
+
+        self.assertIsInstance(panel.paddle_ocr_model, QComboBox)
+        ocr_models = [
+            panel.paddle_ocr_model.itemText(i)
+            for i in range(panel.paddle_ocr_model.count())
+        ]
+        self.assertEqual(panel.paddle_ocr_model.currentText(), "PaddleOCR-VL-1.6")
+        self.assertIn("PaddleOCR-VL-1.6", ocr_models)
 
     def test_main_window_constructs_three_state_panels(self):
         win = MainWindow()
         try:
             self.assertEqual(win.windowTitle(), "建筑变形监测报告核验台 v2 · 桌面版")
+            self.assertFalse(win.windowIcon().isNull())
             self.assertIsNotNone(win.config_panel)
             self.assertIsNotNone(win.idle_panel)
             self.assertIsNotNone(win.running_panel)
             self.assertIsNotNone(win.results_panel)
             self.assertEqual(win.stack.count(), 3)
+        finally:
+            win.close()
+
+    def test_city_safety_iot_brand_assets_are_used(self):
+        self.assertTrue(APP_ICON_PATH.exists())
+        self.assertEqual(APP_ICON_PATH.suffix.lower(), ".ico")
+
+        win = MainWindow()
+        try:
+            labels = [label.text() for label in win.findChildren(QLabel)]
+            self.assertIn("城安物联", labels)
+            self.assertIn("CITY SAFETY IOT", labels)
         finally:
             win.close()
 

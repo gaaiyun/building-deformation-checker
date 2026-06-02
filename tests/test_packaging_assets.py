@@ -14,6 +14,7 @@ def test_requirements_include_desktop_and_packaging_dependencies():
 
 
 def test_desktop_build_script_supports_exe_and_optional_msi_without_keys():
+    spec = (ROOT / "build_desktop.spec").read_text(encoding="utf-8")
     script = (ROOT / "scripts" / "build_desktop.ps1").read_text(encoding="utf-8")
     wxs = (ROOT / "packaging" / "BuildingDeformationChecker.wxs").read_text(encoding="utf-8")
 
@@ -29,6 +30,9 @@ def test_desktop_build_script_supports_exe_and_optional_msi_without_keys():
     assert "BuildingDeformationChecker.exe" in wxs
     assert 'Scope="perUser"' in wxs
     assert 'StandardDirectory Id="LocalAppDataFolder"' in wxs
+    assert "city_safety_iot.ico" in spec
+    assert "city_safety_iot.ico" in wxs
+    assert "ARPPRODUCTICON" in wxs
     assert "sk-" not in script
     assert "PADDLE_OCR_TOKEN" not in script
     assert "sk-" not in wxs

@@ -1,13 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package
-    Name="Building Deformation Checker"
-    Manufacturer="gaaiyun"
+    Name="建筑变形监测报告核验台"
+    Manufacturer="城安物联"
     Version="$(var.ProductVersion)"
     UpgradeCode="B60F87E3-11C7-4B29-BD19-2218FD64B5AE"
     Scope="perUser">
     <MajorUpgrade DowngradeErrorMessage="A newer version is already installed." />
     <MediaTemplate EmbedCab="yes" />
+    <Icon Id="city_safety_iot.ico" SourceFile="$(var.AssetsDir)\city_safety_iot.ico" />
+    <Property Id="ARPPRODUCTICON" Value="city_safety_iot.ico" />
 
     <Feature Id="MainFeature" Title="Building Deformation Checker" Level="1">
       <ComponentGroupRef Id="AppComponents" />
@@ -18,6 +20,9 @@
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="INSTALLFOLDER" Name="Building Deformation Checker" />
     </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="城安物联" />
+    </StandardDirectory>
   </Fragment>
 
   <Fragment>
@@ -26,6 +31,23 @@
         <File
           Id="BuildingDeformationCheckerExe"
           Source="$(var.SourceDir)\BuildingDeformationChecker.exe"
+          KeyPath="yes" />
+      </Component>
+      <Component Id="ApplicationShortcut" Directory="ApplicationProgramsFolder" Guid="*">
+        <Shortcut
+          Id="ApplicationStartMenuShortcut"
+          Name="建筑变形监测报告核验台"
+          Description="城安物联建筑变形监测报告核验台"
+          Target="[INSTALLFOLDER]BuildingDeformationChecker.exe"
+          WorkingDirectory="INSTALLFOLDER"
+          Icon="city_safety_iot.ico" />
+        <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
+        <RegistryValue
+          Root="HKCU"
+          Key="Software\CitySafetyIot\BuildingDeformationChecker"
+          Name="installed"
+          Type="integer"
+          Value="1"
           KeyPath="yes" />
       </Component>
     </ComponentGroup>

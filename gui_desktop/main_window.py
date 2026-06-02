@@ -36,8 +36,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QThread, QUrl, Signal
-from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent, QIcon, QFont
+from PySide6.QtCore import QSize, Qt, QThread, QUrl, Signal
+from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -75,6 +75,20 @@ from src.core import PipelineResult, RuntimeConfig
 logger = logging.getLogger(__name__)
 
 
+def resource_path(*parts: str) -> Path:
+    """Return a project resource path, both from source and PyInstaller onefile."""
+    if getattr(sys, "frozen", False):
+        base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+    else:
+        base = Path(__file__).resolve().parents[1]
+    return base.joinpath(*parts)
+
+
+APP_ICON_PATH = resource_path("assets", "city_safety_iot.ico")
+APP_LOGO_PATH = resource_path("assets", "city_safety_iot_logo.png")
+APP_MARK_PATH = resource_path("assets", "city_safety_iot_icon.png")
+
+
 PROFESSIONAL_STYLESHEET = """
 QWidget {
     font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
@@ -91,7 +105,21 @@ QLabel#SidebarTitle {
     color: #152238;
     font-size: 18px;
     font-weight: 700;
-    padding: 4px 2px 8px 2px;
+    padding: 2px 2px 0 2px;
+}
+QLabel#BrandName {
+    color: #0b4d93;
+    font-size: 20px;
+    font-weight: 800;
+}
+QLabel#BrandSubName {
+    color: #0b4d93;
+    font-size: 11px;
+    font-weight: 700;
+}
+QLabel#ProductSubtitle {
+    color: #475569;
+    font-size: 12px;
 }
 QGroupBox#ConfigCard {
     background: #ffffff;
@@ -192,17 +220,23 @@ class ConfigPanel(QWidget):
         llm_box = QGroupBox("LLM 设置")
         llm_box.setObjectName("ConfigCard")
         llm_form = QFormLayout(llm_box)
+        # User convenience: saved secrets are read from the local OS keyring.
+        # Packaged EXE/MSI never includes keys; each user's machine owns its keyring.
         self.llm_api_key = QLineEdit(settings.get("llm_api_key", ""))
         self.llm_api_key.setEchoMode(QLineEdit.Password)
-        self.llm_api_key.setPlaceholderText("sk-... 或 sk-cp-...")
+        self.llm_api_key.setPlaceholderText("请输入自己的 API Key（不会内置到安装包）")
         llm_form.addRow("API Key", self.llm_api_key)
 
-        self.llm_base_url = QLineEdit(settings.get("llm_base_url", ""))
+        self.llm_base_url = QLineEdit(settings.get("llm_base_url") or "https://api.deepseek.com")
         llm_form.addRow("Base URL", self.llm_base_url)
 
         self.llm_model = QComboBox()
         self.llm_model.setEditable(True)
         self.llm_model.addItems([
+            "deepseek-v4-flash",
+            "deepseek-v4-pro",
+            "deepseek-chat",
+            "deepseek-reasoner",
             "MiniMax-M2.7-highspeed",
             "MiniMax-M2.7",
             "qwen3.5-plus",
@@ -210,8 +244,10 @@ class ConfigPanel(QWidget):
             "glm-5",
             "qwen3-coder-plus",
         ])
-        if (m := settings.get("llm_model")):
-            self.llm_model.setCurrentText(m)
+        saved_model = settings.get("llm_model") or "deepseek-v4-flash"
+        if saved_model == "MiniMax-M2.7-highspeed":
+            saved_model = "deepseek-v4-flash"
+        self.llm_model.setCurrentText(saved_model)
         llm_form.addRow("模型", self.llm_model)
 
         layout.addWidget(llm_box)
@@ -222,9 +258,22 @@ class ConfigPanel(QWidget):
         ocr_form = QFormLayout(ocr_box)
         self.paddle_ocr_token = QLineEdit(settings.get("paddle_ocr_token", ""))
         self.paddle_ocr_token.setEchoMode(QLineEdit.Password)
+        self.paddle_ocr_token.setPlaceholderText("请输入自己的 PaddleOCR Token")
         ocr_form.addRow("Token", self.paddle_ocr_token)
 
-        self.paddle_ocr_model = QLineEdit(settings.get("paddle_ocr_model", "PaddleOCR-VL-1.6"))
+        self.paddle_ocr_model = QComboBox()
+        self.paddle_ocr_model.setEditable(True)
+        self.paddle_ocr_model.addItems([
+            "PaddleOCR-VL-1.6",
+            "PaddleOCR-VL-1.5",
+            "PaddleOCR-VL",
+            "PP-StructureV3",
+            "PP-OCRv5",
+        ])
+        saved_ocr_model = settings.get("paddle_ocr_model", "PaddleOCR-VL-1.6")
+        if saved_ocr_model == "PaddleOCR-VL-1.5":
+            saved_ocr_model = "PaddleOCR-VL-1.6"
+        self.paddle_ocr_model.setCurrentText(saved_ocr_model)
         ocr_form.addRow("模型", self.paddle_ocr_model)
 
         self.paddle_ocr_use_async = QCheckBox("使用异步 OCR API")
@@ -261,6 +310,10 @@ class ConfigPanel(QWidget):
         save_btn.clicked.connect(self.persist)
         layout.addWidget(save_btn)
 
+        clear_secret_btn = QPushButton("清空已保存密钥")
+        clear_secret_btn.clicked.connect(self.clear_secrets)
+        layout.addWidget(clear_secret_btn)
+
         layout.addStretch(1)
 
     def to_runtime_config(self, pdf_path: str) -> RuntimeConfig:
@@ -270,7 +323,7 @@ class ConfigPanel(QWidget):
             llm_base_url=self.llm_base_url.text().strip(),
             llm_model=self.llm_model.currentText().strip(),
             paddle_ocr_token=self.paddle_ocr_token.text().strip(),
-            paddle_ocr_model=self.paddle_ocr_model.text().strip(),
+            paddle_ocr_model=self.paddle_ocr_model.currentText().strip(),
             paddle_ocr_use_async=self.paddle_ocr_use_async.isChecked(),
             paddle_ocr_use_cache=self.paddle_ocr_use_cache.isChecked(),
             use_ocr=self.use_ocr.isChecked(),
@@ -286,7 +339,26 @@ class ConfigPanel(QWidget):
             "llm_base_url": self.llm_base_url.text(),
             "llm_model": self.llm_model.currentText(),
             "paddle_ocr_token": self.paddle_ocr_token.text(),
-            "paddle_ocr_model": self.paddle_ocr_model.text(),
+            "paddle_ocr_model": self.paddle_ocr_model.currentText(),
+            "paddle_ocr_use_async": self.paddle_ocr_use_async.isChecked(),
+            "paddle_ocr_use_cache": self.paddle_ocr_use_cache.isChecked(),
+            "use_ocr": self.use_ocr.isChecked(),
+            "skip_self_verify": self.skip_self_verify.isChecked(),
+            "skip_ai_review": self.skip_ai_review.isChecked(),
+        }
+        self._settings.update(snapshot)
+        save_settings(self._settings)
+
+    def clear_secrets(self) -> None:
+        self.llm_api_key.clear()
+        self.paddle_ocr_token.clear()
+        snapshot = {
+            **self._settings,
+            "llm_api_key": "",
+            "paddle_ocr_token": "",
+            "llm_base_url": self.llm_base_url.text(),
+            "llm_model": self.llm_model.currentText(),
+            "paddle_ocr_model": self.paddle_ocr_model.currentText(),
             "paddle_ocr_use_async": self.paddle_ocr_use_async.isChecked(),
             "paddle_ocr_use_cache": self.paddle_ocr_use_cache.isChecked(),
             "use_ocr": self.use_ocr.isChecked(),
@@ -620,9 +692,27 @@ class IdlePanel(QWidget):
         layout = QVBoxLayout(self)
         layout.addStretch(1)
 
+        logo = QLabel()
+        logo.setAlignment(Qt.AlignCenter)
+        logo.setObjectName("HeroLogo")
+        pixmap = QPixmap(str(APP_LOGO_PATH))
+        if not pixmap.isNull():
+            logo.setPixmap(pixmap.scaled(180, 180, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            layout.addWidget(logo)
+
+        brand = QLabel("城安物联")
+        brand.setObjectName("BrandName")
+        brand.setAlignment(Qt.AlignCenter)
+        layout.addWidget(brand)
+
+        brand_en = QLabel("CITY SAFETY IOT")
+        brand_en.setObjectName("BrandSubName")
+        brand_en.setAlignment(Qt.AlignCenter)
+        layout.addWidget(brand_en)
+
         title = QLabel("建筑变形监测报告核验台")
         title_font = title.font()
-        title_font.setPointSize(22)
+        title_font.setPointSize(18)
         title_font.setBold(True)
         title.setFont(title_font)
         title.setAlignment(Qt.AlignCenter)
@@ -674,6 +764,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setObjectName("AppShell")
         self.setWindowTitle("建筑变形监测报告核验台 v2 · 桌面版")
+        self.setWindowIcon(QIcon(str(APP_ICON_PATH)))
         self.setMinimumSize(1180, 760)
         self.resize(1280, 820)
         self.setFont(QFont("Microsoft YaHei UI", 9))
@@ -702,6 +793,27 @@ class MainWindow(QMainWindow):
         config_wrap.setObjectName("Sidebar")
         cw = QVBoxLayout(config_wrap)
         cw.setContentsMargins(12, 12, 12, 12)
+
+        brand_row = QHBoxLayout()
+        brand_icon = QLabel()
+        brand_icon.setFixedSize(QSize(44, 44))
+        brand_icon.setAlignment(Qt.AlignCenter)
+        mark = QPixmap(str(APP_MARK_PATH))
+        if not mark.isNull():
+            brand_icon.setPixmap(mark.scaled(40, 40, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        brand_row.addWidget(brand_icon)
+
+        brand_text = QVBoxLayout()
+        brand_name = QLabel("城安物联")
+        brand_name.setObjectName("BrandName")
+        brand_text.addWidget(brand_name)
+        brand_en = QLabel("CITY SAFETY IOT")
+        brand_en.setObjectName("BrandSubName")
+        brand_text.addWidget(brand_en)
+        brand_row.addLayout(brand_text)
+        brand_row.addStretch(1)
+        cw.addLayout(brand_row)
+
         sidebar_title = QLabel("配置")
         sidebar_title.setObjectName("SidebarTitle")
         cw.addWidget(sidebar_title)

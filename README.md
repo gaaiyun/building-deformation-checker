@@ -183,7 +183,7 @@ pyinstaller>=6.0.0   # 桌面版 .exe 打包
 python desktop.py
 ```
 
-拖入 PDF 即跑；首次启动会提示填写 API Key，配置自动持久化到 `~/AppData/.../settings.json`（Windows）。
+拖入 PDF 即跑；首次启动会提示填写 API Key。非敏感配置持久化到 `~/AppData/.../settings.json`（Windows），API Key 和 PaddleOCR Token 保存到系统 keyring，后续会自动预填；交付/演示前如需清掉本机旧 key，点击桌面版左侧的 **清空已保存密钥**。
 
 **打包桌面版**
 
@@ -193,10 +193,10 @@ powershell -ExecutionPolicy Bypass -File scripts/build_desktop.ps1
 
 # 如需生成 MSI，先安装 .NET 8 SDK + WiX 4，再加 -BuildMsi
 dotnet tool install --tool-path G:\dev-cache\dotnet-tools wix --version 4.0.6
-powershell -ExecutionPolicy Bypass -File scripts/build_desktop.ps1 -BuildMsi -Version 2.1.0 -WixToolPath G:\dev-cache\dotnet-tools\wix.exe
+powershell -ExecutionPolicy Bypass -File scripts/build_desktop.ps1 -BuildMsi -Version 2.1.1 -WixToolPath G:\dev-cache\dotnet-tools\wix.exe
 ```
 
-安装包不内置任何 API Key。交付给甲方/复核员后，由对方在桌面版左侧配置面板自行输入 OpenAI 兼容 `API Key`、`Base URL`、模型名和 PaddleOCR Token；敏感字段保存到系统 keyring，不写入仓库或安装包。
+安装包不内置任何 API Key。交付给甲方/复核员后，由对方在桌面版左侧配置面板自行输入 OpenAI 兼容 `API Key`、`Base URL`、模型名和 PaddleOCR Token；敏感字段保存到对方电脑的系统 keyring，不写入仓库或安装包。EXE/MSI 已接入城安物联图标、窗口品牌和开始菜单快捷方式。
 
 **2) Streamlit Web**
 
@@ -219,7 +219,7 @@ python main.py "扫描件.pdf" --ocr
 python main.py "报告.pdf" --no-ai-review --no-self-verify
 
 # 切换 LLM 模型
-python main.py "报告.pdf" --model MiniMax-M2.7-highspeed -o output/my_check.md
+python main.py "报告.pdf" --model deepseek-v4-flash -o output/my_check.md
 ```
 
 ---
@@ -230,9 +230,9 @@ python main.py "报告.pdf" --model MiniMax-M2.7-highspeed -o output/my_check.md
 
 | 服务 | 注册入口 | 说明 |
 |------|----------|------|
-| **DashScope (阿里云)** | https://dashscope.aliyuncs.com/ | 默认 Base URL，支持 `qwen3.5-plus` |
-| **MiniMax** | https://api.minimaxi.com/ | 用 `MiniMax-M2.7-highspeed` 提速 |
-| **DeepSeek** | https://api.deepseek.com | OpenAI 兼容端点，当前批量回归使用 `deepseek-v4-flash` |
+| **DeepSeek** | https://api.deepseek.com | 默认 OpenAI 兼容端点；桌面版模型下拉含 `deepseek-v4-flash`、`deepseek-v4-pro`、`deepseek-chat`、`deepseek-reasoner` |
+| **DashScope (阿里云)** | https://dashscope.aliyuncs.com/ | 可选 OpenAI 兼容端点，支持 `qwen3.5-plus` |
+| **MiniMax** | https://api.minimaxi.com/ | 可选 OpenAI 兼容端点，可用 `MiniMax-M2.7-highspeed` |
 | **PaddleOCR-VL** | https://aistudio.baidu.com/ | 仅扫描件/复杂版式时需要 |
 
 ### 三种配置注入方式（优先级从高到低）
@@ -246,14 +246,15 @@ python main.py "报告.pdf" --model MiniMax-M2.7-highspeed -o output/my_check.md
 ```bash
 # PowerShell (Windows)
 $env:LLM_API_KEY = "sk-..."
-$env:LLM_BASE_URL = "https://coding.dashscope.aliyuncs.com/v1"
-$env:LLM_MODEL = "qwen3.5-plus"
+$env:LLM_BASE_URL = "https://api.deepseek.com"
+$env:LLM_MODEL = "deepseek-v4-flash"
 $env:PADDLE_OCR_TOKEN = "..."           # 可选
 $env:PADDLE_OCR_MODEL = "PaddleOCR-VL-1.6"
 
 # bash / zsh
 export LLM_API_KEY="sk-..."
-export LLM_MODEL="qwen3.5-plus"
+export LLM_BASE_URL="https://api.deepseek.com"
+export LLM_MODEL="deepseek-v4-flash"
 export PADDLE_OCR_MODEL="PaddleOCR-VL-1.6"
 ```
 
@@ -263,6 +264,7 @@ export PADDLE_OCR_MODEL="PaddleOCR-VL-1.6"
 
 - **敏感字段**（`llm_api_key`、`paddle_ocr_token`）→ 系统 keyring（Windows Credential Manager / macOS Keychain / Linux Secret Service），**绝不明文落盘**。
 - **非敏感字段**（模型名、URL、超时、UI 偏好）→ `~/AppData/Roaming/BuildingDeformationChecker/settings.json`，纯 JSON，可直接编辑或团队共享。
+- 桌面版会从 keyring 自动预填已保存的 key，方便甲方第一次配置后重复使用；如需清理本机旧 key，点击 **清空已保存密钥**。
 
 安装系统 keyring 后端（首次使用前）：
 
@@ -284,7 +286,8 @@ from src.core import RuntimeConfig, run_pipeline
 cfg = RuntimeConfig(
     pdf_path="report.pdf",
     llm_api_key="sk-...",
-    llm_model="qwen3.5-plus",
+    llm_base_url="https://api.deepseek.com",
+    llm_model="deepseek-v4-flash",
     paddle_ocr_token="",          # 留空则禁用 OCR
     use_ocr=False,                # True = 强制优先 OCR
     auto_fallback=True,           # 文本层不足时自动回退
@@ -377,7 +380,7 @@ sequenceDiagram
 ## 测试与质量
 
 ```bash
-# 跑全部 315 个测试（当前基线：313 passed, 2 skipped）
+# 跑全部 322 个测试（当前基线：320 passed, 2 skipped）
 python -m pytest tests/ -v
 
 # 跑单个模块
@@ -387,12 +390,13 @@ python -m pytest tests/test_text_normalize.py -v
 python smoke_test_v2.py
 ```
 
-`tests/` 目录覆盖（当前 `315 collected / 313 passed / 2 skipped`，约 5 秒跑完）：
+`tests/` 目录覆盖（当前 `322 collected / 320 passed / 2 skipped`，约 5 秒跑完）：
 
 | 文件 | 用例数 | 重点覆盖 |
 |------|-------|----------|
 | `test_text_normalize.py` | 27 | U+2212 / 全角数字 / 千分位 / 中文单位前后缀 / 科学记数 |
 | `test_pipeline.py` | 25 | RuntimeConfig 默认值/同步、PipelineResult 派生属性、CancelledError、run_pipeline 异常路径 |
+| `test_default_provider_config.py` | 2 | DeepSeek v4 flash 与 PaddleOCR-VL-1.6 的全局/RuntimeConfig 默认值 |
 | `test_export_formats.py` | 18 | DOCX 字节流/ZIP 签名/Microsoft YaHei 字体、HTML doctype/lang/中文项目名/print 媒体样式 |
 | `test_settings_store.py` | 17 | keyring 隔离、JSON 损坏容错、env var 回退、敏感字段不落 JSON |
 | `test_worker.py` | 9 | PipelineWorker.cancel()、SignalLogHandler、make_worker_thread 生命周期 |
@@ -441,9 +445,9 @@ python smoke_test_v2.py
 |------|----------|------|
 | CLI | `python main.py missing.pdf` | 正常返回“文件不存在”错误路径，无 traceback |
 | Streamlit | 本地启动 `streamlit run app.py --server.headless=true --server.port=8765` 并访问 `http://127.0.0.1:8765` | HTTP 200 |
-| 桌面端 UI | `tests/test_desktop_main_window.py` 在 `QT_QPA_PLATFORM=offscreen` 下实例化主窗、专业主题、配置和结果面板 | 6 passed |
+| 桌面端 UI | `tests/test_desktop_main_window.py` 在 `QT_QPA_PLATFORM=offscreen` 下实例化主窗、城安物联品牌、专业主题、配置和结果面板 | 11 passed |
 | 桌面端 EXE | PyInstaller 构建 `dist/BuildingDeformationChecker.exe` 并启动 8 秒 | `EXE_SMOKE_OK` |
-| 桌面端 MSI | WiX 4 构建 `dist/BuildingDeformationChecker-2.1.0.msi`，静默安装、启动安装后 EXE、静默卸载 | install/uninstall exit 0 |
+| 桌面端 MSI | WiX 4 构建 `dist/BuildingDeformationChecker-2.1.1.msi`，静默安装、启动安装后 EXE、静默卸载 | install/uninstall exit 0 |
 
 ---
 
@@ -488,7 +492,7 @@ building-deformation-checker/
 │   ├── worker.py                    #   - QThread + Signal worker
 │   └── settings_store.py            #   - 配置持久化
 │
-├── tests/                           # 315 个 pytest 用例（313 passed, 2 skipped）
+├── tests/                           # 322 个 pytest 用例（320 passed, 2 skipped）
 ├── docs/
 │   ├── specs/
 │   │   └── 2026-05-16-v2-redesign-design.md

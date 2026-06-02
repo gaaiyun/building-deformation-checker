@@ -10,7 +10,7 @@
 - 返回结构化 PipelineResult 包含所有中间产物
 
 用法:
-    cfg = RuntimeConfig(pdf_path="x.pdf", llm_api_key="sk-...", llm_model="qwen3.5-plus")
+    cfg = RuntimeConfig(pdf_path="x.pdf", llm_api_key="sk-...", llm_model="deepseek-v4-flash")
     result = run_pipeline(cfg, progress_callback=lambda step, pct, msg: print(msg))
     print(result.final_md)
 """
@@ -51,8 +51,8 @@ class RuntimeConfig:
 
     # ── LLM 配置 ────────────────────────────────
     llm_api_key: str = ""
-    llm_base_url: str = "https://coding.dashscope.aliyuncs.com/v1"
-    llm_model: str = "qwen3.5-plus"
+    llm_base_url: str = "https://api.deepseek.com"
+    llm_model: str = "deepseek-v4-flash"
     llm_timeout_normal: int = 120
     llm_parse_chunk_chars: int = 18000
     llm_parse_max_tokens: int = 24000

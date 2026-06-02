@@ -37,10 +37,10 @@ _SENSITIVE_KEYS: frozenset[str] = frozenset({"llm_api_key", "paddle_ocr_token"})
 # ─── 默认值 ──────────────────────────────────────────────────
 _DEFAULTS: dict[str, Any] = {
     "llm_api_key": "",
-    "llm_base_url": "https://api.minimaxi.com/v1",
-    "llm_model": "MiniMax-M2.7-highspeed",
+    "llm_base_url": "https://api.deepseek.com",
+    "llm_model": "deepseek-v4-flash",
     "paddle_ocr_token": "",
-    "paddle_ocr_model": "PaddleOCR-VL-1.5",
+    "paddle_ocr_model": "PaddleOCR-VL-1.6",
     "paddle_ocr_use_async": True,
     "paddle_ocr_use_cache": True,
     "paddle_ocr_enable_legacy_fallback": True,

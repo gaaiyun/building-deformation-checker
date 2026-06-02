@@ -1,6 +1,6 @@
 param(
     [switch]$BuildMsi,
-    [string]$Version = "2.1.0",
+    [string]$Version = "2.1.1",
     [string]$WixToolPath = ""
 )
 
@@ -64,6 +64,8 @@ Invoke-Native $wixExe @(
     $wxs,
     "-d",
     "SourceDir=$(Join-Path $root 'dist')",
+    "-d",
+    "AssetsDir=$(Join-Path $root 'assets')",
     "-d",
     "ProductVersion=$Version",
     "-out",

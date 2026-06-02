@@ -31,6 +31,7 @@ a = Analysis(
         # 把 src/ 目录全部纳入（避免 hidden import 漏掉子模块）
         ('src', 'src'),
         ('gui_desktop', 'gui_desktop'),
+        ('assets', 'assets'),
         # 默认 .env.example 给用户参考（用户需自己创建 .env）
         ('.env.example', '.'),
     ],
@@ -161,5 +162,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,               # TODO: 添加 .ico 文件后启用
+    icon=str(PROJ_ROOT / 'assets' / 'city_safety_iot.ico'),
 )

@@ -274,7 +274,7 @@ with st.sidebar:
         llm_model = st.text_input(
             "模型",
             value=st.session_state.get("cfg_llm_model",
-                                       os.getenv("LLM_MODEL", "MiniMax-M2.7-highspeed")),
+                                       os.getenv("LLM_MODEL", "deepseek-v4-flash")),
             key="cfg_llm_model",
         )
 
