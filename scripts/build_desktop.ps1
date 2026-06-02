@@ -1,6 +1,7 @@
 param(
     [switch]$BuildMsi,
-    [string]$Version = "2.1.0"
+    [string]$Version = "2.1.0",
+    [string]$WixToolPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -8,8 +9,22 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $root
 
+function Invoke-Native {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+        [Parameter(Mandatory = $true)]
+        [string[]]$ArgumentList
+    )
+
+    & $FilePath @ArgumentList
+    if ($LASTEXITCODE -ne 0) {
+        throw "Command failed with exit code ${LASTEXITCODE}: $FilePath $($ArgumentList -join ' ')"
+    }
+}
+
 Write-Host "==> Building desktop executable"
-python -m PyInstaller build_desktop.spec --clean --noconfirm
+Invoke-Native "python" @("-m", "PyInstaller", "build_desktop.spec", "--clean", "--noconfirm")
 
 $exe = Join-Path $root "dist\BuildingDeformationChecker.exe"
 if (-not (Test-Path -LiteralPath $exe)) {
@@ -23,16 +38,37 @@ if (-not $BuildMsi) {
     exit 0
 }
 
-$wix = Get-Command wix.exe -ErrorAction SilentlyContinue
-if (-not $wix) {
-    throw "WiX Toolset is required for MSI. Install it first, for example: dotnet tool install --global wix"
+$wixExe = $null
+if ($WixToolPath) {
+    if (-not (Test-Path -LiteralPath $WixToolPath)) {
+        throw "WiX Toolset path was provided but not found: $WixToolPath"
+    }
+    $wixExe = (Resolve-Path -LiteralPath $WixToolPath).Path
+} else {
+    $wix = Get-Command wix.exe -ErrorAction SilentlyContinue
+    if ($wix) {
+        $wixExe = $wix.Source
+    } elseif (Test-Path -LiteralPath "G:\dev-cache\dotnet-tools\wix.exe") {
+        $wixExe = "G:\dev-cache\dotnet-tools\wix.exe"
+    } else {
+        throw "WiX Toolset 4 is required for MSI. Install it first, for example: dotnet tool install --tool-path G:\dev-cache\dotnet-tools wix --version 4.0.6"
+    }
 }
 
 $msi = Join-Path $root "dist\BuildingDeformationChecker-$Version.msi"
 $wxs = Join-Path $root "packaging\BuildingDeformationChecker.wxs"
 
 Write-Host "==> Building MSI installer"
-& $wix.Source build $wxs -d "SourceDir=$(Join-Path $root 'dist')" -d "ProductVersion=$Version" -out $msi
+Invoke-Native $wixExe @(
+    "build",
+    $wxs,
+    "-d",
+    "SourceDir=$(Join-Path $root 'dist')",
+    "-d",
+    "ProductVersion=$Version",
+    "-out",
+    $msi
+)
 
 if (-not (Test-Path -LiteralPath $msi)) {
     throw "WiX finished but MSI was not found: $msi"

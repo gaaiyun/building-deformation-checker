@@ -191,9 +191,9 @@ python desktop.py
 # 生成 dist/BuildingDeformationChecker.exe
 powershell -ExecutionPolicy Bypass -File scripts/build_desktop.ps1
 
-# 如需生成 MSI，先安装 WiX Toolset，再加 -BuildMsi
-dotnet tool install --global wix
-powershell -ExecutionPolicy Bypass -File scripts/build_desktop.ps1 -BuildMsi -Version 2.1.0
+# 如需生成 MSI，先安装 .NET 8 SDK + WiX 4，再加 -BuildMsi
+dotnet tool install --tool-path G:\dev-cache\dotnet-tools wix --version 4.0.6
+powershell -ExecutionPolicy Bypass -File scripts/build_desktop.ps1 -BuildMsi -Version 2.1.0 -WixToolPath G:\dev-cache\dotnet-tools\wix.exe
 ```
 
 安装包不内置任何 API Key。交付给甲方/复核员后，由对方在桌面版左侧配置面板自行输入 OpenAI 兼容 `API Key`、`Base URL`、模型名和 PaddleOCR Token；敏感字段保存到系统 keyring，不写入仓库或安装包。
@@ -377,7 +377,7 @@ sequenceDiagram
 ## 测试与质量
 
 ```bash
-# 跑全部 313 个测试（当前基线：311 passed, 2 skipped）
+# 跑全部 315 个测试（当前基线：313 passed, 2 skipped）
 python -m pytest tests/ -v
 
 # 跑单个模块
@@ -387,7 +387,7 @@ python -m pytest tests/test_text_normalize.py -v
 python smoke_test_v2.py
 ```
 
-`tests/` 目录覆盖（当前 `313 collected / 311 passed / 2 skipped`，约 5 秒跑完）：
+`tests/` 目录覆盖（当前 `315 collected / 313 passed / 2 skipped`，约 5 秒跑完）：
 
 | 文件 | 用例数 | 重点覆盖 |
 |------|-------|----------|
@@ -396,7 +396,8 @@ python smoke_test_v2.py
 | `test_export_formats.py` | 18 | DOCX 字节流/ZIP 签名/Microsoft YaHei 字体、HTML doctype/lang/中文项目名/print 媒体样式 |
 | `test_settings_store.py` | 17 | keyring 隔离、JSON 损坏容错、env var 回退、敏感字段不落 JSON |
 | `test_worker.py` | 9 | PipelineWorker.cancel()、SignalLogHandler、make_worker_thread 生命周期 |
-| `test_desktop_main_window.py` | 4 | PySide6 offscreen 实例化、配置面板到 RuntimeConfig、三态主窗、结果面板渲染 |
+| `test_desktop_main_window.py` | 6 | PySide6 offscreen 实例化、专业主题样式、配置面板到 RuntimeConfig、三态主窗、结果面板渲染 |
+| `test_packaging_assets.py` | 2 | 桌面打包脚本、WiX MSI 模板、密钥不内置、per-user 安装范围 |
 | `test_pdf_extractor.py` | 6 | OCR/文本层路由、清洗、缓存命中 |
 | `test_llm_parser.py` | 4 | JSON 提取容错、分块策略、`_extract_json_from_response` |
 | `test_calculation_checker.py` | 9 | 单位换算、间隔仲裁、跨期连续性、深层位移 abs 比较 |
@@ -440,7 +441,9 @@ python smoke_test_v2.py
 |------|----------|------|
 | CLI | `python main.py missing.pdf` | 正常返回“文件不存在”错误路径，无 traceback |
 | Streamlit | 本地启动 `streamlit run app.py --server.headless=true --server.port=8765` 并访问 `http://127.0.0.1:8765` | HTTP 200 |
-| 桌面端 | `tests/test_desktop_main_window.py` 在 `QT_QPA_PLATFORM=offscreen` 下实例化主窗和结果面板 | 4 passed |
+| 桌面端 UI | `tests/test_desktop_main_window.py` 在 `QT_QPA_PLATFORM=offscreen` 下实例化主窗、专业主题、配置和结果面板 | 6 passed |
+| 桌面端 EXE | PyInstaller 构建 `dist/BuildingDeformationChecker.exe` 并启动 8 秒 | `EXE_SMOKE_OK` |
+| 桌面端 MSI | WiX 4 构建 `dist/BuildingDeformationChecker-2.1.0.msi`，静默安装、启动安装后 EXE、静默卸载 | install/uninstall exit 0 |
 
 ---
 
@@ -485,7 +488,7 @@ building-deformation-checker/
 │   ├── worker.py                    #   - QThread + Signal worker
 │   └── settings_store.py            #   - 配置持久化
 │
-├── tests/                           # 313 个 pytest 用例（311 passed, 2 skipped）
+├── tests/                           # 315 个 pytest 用例（313 passed, 2 skipped）
 ├── docs/
 │   ├── specs/
 │   │   └── 2026-05-16-v2-redesign-design.md
@@ -544,12 +547,12 @@ building-deformation-checker/
 - 单文件场景为主，未做多文件批处理 UI（CLI 可脚本化批量）。
 - 不做数据库持久化，所有结果落盘为文件。
 - LLM 调用未本地化，离线场景仅可跑规则层（Step 1/3/4/8）。
-- 桌面 GUI 已有 `build_desktop.spec` 与 `scripts/build_desktop.ps1`，源码方式、配置面板和结果面板已通过 offscreen 自动化测试；正式 `.exe` / `.msi` 交付前仍需在目标 Windows 机器做一次打包产物 smoke。
+- 桌面 GUI 已有 `build_desktop.spec`、`scripts/build_desktop.ps1` 和 WiX MSI 模板；源码方式、配置面板、专业主题和结果面板已通过 offscreen 自动化测试；本机已完成 `.exe` 启动 smoke、`.msi` 静默安装/启动/卸载 smoke。
 
 **路线图（按优先级）**
 
 - [x] PyInstaller 打包 `.exe` 脚本，支持零依赖分发
-- [x] 可选 WiX `.msi` 安装包模板
+- [x] WiX `.msi` 安装包模板与 per-user 安装验证
 - [ ] PaddleOCR-VL 本地推理选项（去 API 依赖）
 - [ ] 多文件并发批处理面板（桌面版）
 - [ ] 内嵌 PDF 预览定位异常字段（QPdfView 已在主窗框架内）

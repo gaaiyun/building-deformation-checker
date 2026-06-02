@@ -5,7 +5,7 @@
     Manufacturer="gaaiyun"
     Version="$(var.ProductVersion)"
     UpgradeCode="B60F87E3-11C7-4B29-BD19-2218FD64B5AE"
-    Scope="perMachine">
+    Scope="perUser">
     <MajorUpgrade DowngradeErrorMessage="A newer version is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
@@ -15,7 +15,7 @@
   </Package>
 
   <Fragment>
-    <StandardDirectory Id="ProgramFilesFolder">
+    <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="INSTALLFOLDER" Name="Building Deformation Checker" />
     </StandardDirectory>
   </Fragment>

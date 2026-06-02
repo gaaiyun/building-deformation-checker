@@ -75,6 +75,108 @@ from src.core import PipelineResult, RuntimeConfig
 logger = logging.getLogger(__name__)
 
 
+PROFESSIONAL_STYLESHEET = """
+QWidget {
+    font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 12px;
+}
+QMainWindow#AppShell {
+    background: #f4f7fb;
+}
+QWidget#Sidebar {
+    background: #ffffff;
+    border-right: 1px solid #d9e2ec;
+}
+QLabel#SidebarTitle {
+    color: #152238;
+    font-size: 18px;
+    font-weight: 700;
+    padding: 4px 2px 8px 2px;
+}
+QGroupBox#ConfigCard {
+    background: #ffffff;
+    border: 1px solid #d9e2ec;
+    border-radius: 8px;
+    margin-top: 14px;
+    padding: 12px 10px 10px 10px;
+    font-weight: 700;
+    color: #1f2a44;
+}
+QGroupBox#ConfigCard::title {
+    subcontrol-origin: margin;
+    left: 10px;
+    padding: 0 6px;
+}
+QLineEdit, QComboBox, QSpinBox {
+    min-height: 30px;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    padding: 4px 8px;
+    background: #ffffff;
+    color: #172033;
+}
+QLineEdit:focus, QComboBox:focus {
+    border: 1px solid #2563eb;
+}
+QPushButton {
+    min-height: 30px;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    padding: 6px 12px;
+    background: #ffffff;
+    color: #172033;
+}
+QPushButton:hover {
+    background: #eef4ff;
+    border-color: #9db7f6;
+}
+QPushButton#PrimaryButton {
+    background: #1d4ed8;
+    border-color: #1d4ed8;
+    color: #ffffff;
+    font-weight: 700;
+}
+QPushButton#PrimaryButton:hover {
+    background: #1e40af;
+}
+QProgressBar {
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    background: #edf2f7;
+    text-align: center;
+    color: #172033;
+}
+QProgressBar::chunk {
+    border-radius: 7px;
+    background: #16a34a;
+}
+QTabWidget::pane {
+    border: 1px solid #d9e2ec;
+    border-radius: 8px;
+    background: #ffffff;
+}
+QTabBar::tab {
+    padding: 8px 14px;
+    margin-right: 2px;
+    border: 1px solid #d9e2ec;
+    border-bottom: none;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    background: #edf2f7;
+}
+QTabBar::tab:selected {
+    background: #ffffff;
+    color: #1d4ed8;
+    font-weight: 700;
+}
+QStatusBar {
+    background: #ffffff;
+    border-top: 1px solid #d9e2ec;
+    color: #475569;
+}
+"""
+
+
 # ─── 配置面板（左侧栏）────────────────────────────────────
 class ConfigPanel(QWidget):
     """API key + 模型 + OCR 设置面板，持久化到本地"""
@@ -88,6 +190,7 @@ class ConfigPanel(QWidget):
 
         # LLM 设置
         llm_box = QGroupBox("LLM 设置")
+        llm_box.setObjectName("ConfigCard")
         llm_form = QFormLayout(llm_box)
         self.llm_api_key = QLineEdit(settings.get("llm_api_key", ""))
         self.llm_api_key.setEchoMode(QLineEdit.Password)
@@ -115,6 +218,7 @@ class ConfigPanel(QWidget):
 
         # PaddleOCR 设置
         ocr_box = QGroupBox("PaddleOCR 设置（可选）")
+        ocr_box.setObjectName("ConfigCard")
         ocr_form = QFormLayout(ocr_box)
         self.paddle_ocr_token = QLineEdit(settings.get("paddle_ocr_token", ""))
         self.paddle_ocr_token.setEchoMode(QLineEdit.Password)
@@ -135,6 +239,7 @@ class ConfigPanel(QWidget):
 
         # 流水线开关
         pipeline_box = QGroupBox("流水线选项")
+        pipeline_box.setObjectName("ConfigCard")
         pipeline_layout = QVBoxLayout(pipeline_box)
         self.use_ocr = QCheckBox("强制优先 OCR（扫描件）")
         self.use_ocr.setChecked(settings.get("use_ocr", False))
@@ -152,6 +257,7 @@ class ConfigPanel(QWidget):
 
         # 保存按钮
         save_btn = QPushButton("保存配置")
+        save_btn.setObjectName("PrimaryButton")
         save_btn.clicked.connect(self.persist)
         layout.addWidget(save_btn)
 
@@ -566,8 +672,12 @@ class IdlePanel(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.setObjectName("AppShell")
         self.setWindowTitle("建筑变形监测报告核验台 v2 · 桌面版")
+        self.setMinimumSize(1180, 760)
         self.resize(1280, 820)
+        self.setFont(QFont("Microsoft YaHei UI", 9))
+        self.setStyleSheet(PROFESSIONAL_STYLESHEET)
         self._settings = load_settings()
 
         self._worker: Optional[PipelineWorker] = None
@@ -589,9 +699,12 @@ class MainWindow(QMainWindow):
         # 左侧：配置面板
         self.config_panel = ConfigPanel(self._settings)
         config_wrap = QWidget()
+        config_wrap.setObjectName("Sidebar")
         cw = QVBoxLayout(config_wrap)
-        cw.setContentsMargins(8, 8, 8, 8)
-        cw.addWidget(QLabel("⚙ 配置"))
+        cw.setContentsMargins(12, 12, 12, 12)
+        sidebar_title = QLabel("配置")
+        sidebar_title.setObjectName("SidebarTitle")
+        cw.addWidget(sidebar_title)
         cw.addWidget(self.config_panel)
         splitter.addWidget(config_wrap)
 
@@ -613,7 +726,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.results_panel)
 
         splitter.addWidget(self.stack)
-        splitter.setSizes([320, 960])
+        splitter.setSizes([380, 900])
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
 

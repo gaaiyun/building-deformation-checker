@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QGroupBox, QPushButton
 
     from gui_desktop.main_window import ConfigPanel, MainWindow, ResultsPanel
     from src.core.pipeline import PipelineResult
@@ -87,6 +87,30 @@ class DesktopMainWindowTests(unittest.TestCase):
             self.assertEqual(win.stack.count(), 3)
         finally:
             win.close()
+
+    def test_main_window_applies_professional_theme_and_layout_metrics(self):
+        win = MainWindow()
+        try:
+            style = win.styleSheet()
+            self.assertEqual(win.objectName(), "AppShell")
+            self.assertGreaterEqual(win.minimumWidth(), 1180)
+            self.assertIn("QMainWindow#AppShell", style)
+            self.assertIn("Microsoft YaHei UI", style)
+            self.assertIn("QGroupBox#ConfigCard", style)
+            self.assertIn("QPushButton#PrimaryButton", style)
+            self.assertIn("QProgressBar::chunk", style)
+        finally:
+            win.close()
+
+    def test_config_panel_marks_cards_and_primary_action_for_styling(self):
+        panel = ConfigPanel({})
+
+        cards = panel.findChildren(QGroupBox, "ConfigCard")
+        primary_buttons = panel.findChildren(QPushButton, "PrimaryButton")
+
+        self.assertGreaterEqual(len(cards), 3)
+        self.assertEqual(len(primary_buttons), 1)
+        self.assertEqual(primary_buttons[0].text(), "保存配置")
 
     def test_results_panel_renders_summary_and_issue_trees(self):
         panel = ResultsPanel()

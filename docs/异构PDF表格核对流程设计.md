@@ -63,7 +63,7 @@
 - 跨期累计连续性新增防误报规则：同一日历日（含 AM/PM、上午/下午等不同标签）不做跨期递推；当 `累计_N - 本次_{N+1}` 可解释报告累计时，标记为 info，说明该表本次变化方向约定可能与累计增量相反。
 - 宽表统计新增口径识别：若正/负方向最大值与同测点“本次变化”一致，或深层位移最大变化值与同深度“当前累计”一致，不再作为确定 error，而降为 info/warning 供复核。
 - 简报汇总一致性降为 warning：该步骤依赖语义映射、监测期选择和汇总口径，不能替代分表硬校验。
-- 当前单元测试基线：`313 collected / 311 passed / 2 skipped`；桌面端新增 PySide6 offscreen 主窗/配置/结果面板验证，Streamlit 已做本地 HTTP smoke。
+- 当前单元测试基线：`315 collected / 313 passed / 2 skipped`；桌面端新增 PySide6 offscreen 主窗/专业主题/配置/结果面板验证，Streamlit 已做本地 HTTP smoke；桌面 EXE/MSI 已完成本机打包产物 smoke。
 
 ## 当前批量回归结论
 
