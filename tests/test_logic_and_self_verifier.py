@@ -60,6 +60,33 @@ class LogicCheckerTests(unittest.TestCase):
         self.assertTrue(any(issue.field_name == "正方向最大" for issue in issues))
         self.assertFalse(any(issue.field_name == "负方向最大" for issue in issues if issue.severity == "error"))
 
+    def test_summary_mismatch_is_warning_due_mapping_and_period_ambiguity(self):
+        table = MonitoringTable(
+            monitoring_item="支护结构顶部水平位移",
+            category=MonitoringCategory.HORIZONTAL_DISP,
+            points=[
+                MeasurementPoint(point_id="W7", cumulative_change=6.50),
+                MeasurementPoint(point_id="W17", cumulative_change=0.46),
+            ],
+        )
+        report = MonitoringReport(
+            summary_items=[
+                ReportSummaryItem(
+                    monitoring_item="支护结构顶部水平位移",
+                    positive_max="0.46",
+                    positive_max_id="W17",
+                )
+            ],
+            tables=[table],
+            threshold_map={"_": []},
+            summary_map={"支护结构顶部水平位移": ["支护结构顶部水平位移"]},
+        )
+
+        issues = run_logic_checks(report)
+
+        self.assertFalse(any(issue.field_name == "正方向最大" and issue.severity == "error" for issue in issues))
+        self.assertTrue(any(issue.field_name == "正方向最大" and issue.severity == "warning" for issue in issues))
+
 
 class SelfVerifierTests(unittest.TestCase):
     def test_self_verifier_processes_more_than_twenty_errors_and_writes_origin(self):

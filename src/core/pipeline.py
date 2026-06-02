@@ -60,7 +60,7 @@ class RuntimeConfig:
 
     # ── PaddleOCR 配置 ──────────────────────────
     paddle_ocr_token: str = ""
-    paddle_ocr_model: str = "PaddleOCR-VL-1.5"
+    paddle_ocr_model: str = "PaddleOCR-VL-1.6"
     paddle_ocr_use_async: bool = True
     paddle_ocr_use_cache: bool = True
     paddle_ocr_enable_legacy_fallback: bool = True

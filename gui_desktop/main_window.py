@@ -120,7 +120,7 @@ class ConfigPanel(QWidget):
         self.paddle_ocr_token.setEchoMode(QLineEdit.Password)
         ocr_form.addRow("Token", self.paddle_ocr_token)
 
-        self.paddle_ocr_model = QLineEdit(settings.get("paddle_ocr_model", "PaddleOCR-VL-1.5"))
+        self.paddle_ocr_model = QLineEdit(settings.get("paddle_ocr_model", "PaddleOCR-VL-1.6"))
         ocr_form.addRow("模型", self.paddle_ocr_model)
 
         self.paddle_ocr_use_async = QCheckBox("使用异步 OCR API")

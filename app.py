@@ -286,6 +286,14 @@ with st.sidebar:
             type="password",
             key="cfg_paddle_token",
         )
+        paddle_ocr_model = st.text_input(
+            "模型",
+            value=st.session_state.get(
+                "cfg_paddle_model",
+                os.getenv("PADDLE_OCR_MODEL", cfg.PADDLE_OCR_MODEL),
+            ),
+            key="cfg_paddle_model",
+        )
         paddle_ocr_use_cache = st.toggle(
             "复用 OCR 缓存", value=st.session_state.get("cfg_paddle_cache", True),
             key="cfg_paddle_cache",
@@ -326,6 +334,7 @@ def _build_runtime_config(pdf_path: str) -> RuntimeConfig:
         llm_base_url=llm_base_url,
         llm_model=llm_model,
         paddle_ocr_token=paddle_ocr_token,
+        paddle_ocr_model=paddle_ocr_model,
         paddle_ocr_use_async=paddle_ocr_use_async,
         paddle_ocr_use_cache=paddle_ocr_use_cache,
         use_ocr=use_ocr_flag,

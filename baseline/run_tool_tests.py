@@ -35,6 +35,7 @@ from src.core import PipelineResult, RuntimeConfig, run_pipeline
 
 RESULTS_DIR = ROOT / "baseline" / "results"
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+LEGACY_SAMPLE_ROOT = Path("C:/Users/gaaiy/Desktop/建筑变形监测Agent")
 
 TEST_CASES = [
     # (PDF 文件名, ground truth diff 文件名, 预期错误数)
@@ -45,6 +46,20 @@ TEST_CASES = [
     ("展誉模板-错误版.pdf", "展誉_diff.md", 16),
     ("展誉模板-正确版.pdf", None, 0),
 ]
+
+
+def _resolve_pdf_path(pdf_name: str) -> Path:
+    """Find a test PDF in the current repo or the legacy local sample folder."""
+    candidates = [
+        ROOT / "test_pdfs" / pdf_name,
+        ROOT / pdf_name,
+        LEGACY_SAMPLE_ROOT / "test_pdfs" / pdf_name,
+        LEGACY_SAMPLE_ROOT / pdf_name,
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]
 
 
 def build_runtime_config(pdf_path: str, quick: bool) -> RuntimeConfig:
@@ -66,9 +81,9 @@ def build_runtime_config(pdf_path: str, quick: bool) -> RuntimeConfig:
 
 
 def run_single(pdf_name: str, quick: bool) -> dict:
-    pdf_path = ROOT / "test_pdfs" / pdf_name
+    pdf_path = _resolve_pdf_path(pdf_name)
     if not pdf_path.exists():
-        return {"error": f"PDF 不存在: {pdf_path}"}
+        return {"pdf": pdf_name, "success": False, "error": f"PDF 不存在: {pdf_path}"}
 
     print(f"\n{'─' * 70}")
     print(f"🔍 跑工具: {pdf_name}")

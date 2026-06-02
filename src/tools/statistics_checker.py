@@ -84,6 +84,49 @@ def _get_table_point_ids(table: MonitoringTable) -> set[str]:
     return ids
 
 
+def _stat_matches_current_change(
+    table: MonitoringTable,
+    stat_id: str,
+    stat_value: Optional[float],
+    tol: float,
+) -> bool:
+    """统计摘要疑似取自本次变化列时返回 True。"""
+    if not stat_id or stat_value is None:
+        return False
+    for pt in table.points:
+        if (
+            pt.point_id == stat_id
+            and pt.current_change is not None
+            and _close(pt.current_change, stat_value, tol)
+        ):
+            return True
+    return False
+
+
+def _depth_id_matches(stat_id: str, depth: float) -> bool:
+    label = f"深度{depth}m"
+    return stat_id == str(depth) or stat_id == label or stat_id in label
+
+
+def _deep_stat_matches_current_cumulative(
+    table: MonitoringTable,
+    stat_id: str,
+    stat_value: Optional[float],
+    tol: float,
+) -> bool:
+    """深层位移摘要疑似取自当前累计列时返回 True。"""
+    if not stat_id or stat_value is None:
+        return False
+    for dp in table.deep_points:
+        if (
+            _depth_id_matches(stat_id, dp.depth)
+            and dp.current_cumulative is not None
+            and _close(dp.current_cumulative, stat_value, tol)
+        ):
+            return True
+    return False
+
+
 def _get_group_key(table: MonitoringTable) -> tuple[str, str, str]:
     """同一监测项的多页表按 (monitoring_item + borehole_id + monitor_date) 归组。
 
@@ -316,13 +359,31 @@ def check_table_statistics(
                 else:
                     actual_pos_id, actual_pos_val = max(pos_vals, key=lambda x: x[1])
                     if not _close(actual_pos_val, stats.positive_max_value, tol):
-                        issues.append(CheckIssue(
-                            severity="error", table_name=table_label,
-                            point_id=actual_pos_id, field_name="正方向最大统计",
-                            expected_value=_fmt(actual_pos_val, 2),
-                            actual_value=_fmt(stats.positive_max_value, 2),
-                            message=f"正方向最大不符: 实际 {actual_pos_id}={_fmt(actual_pos_val, 2)}, 报告 {stats.positive_max_id}={_fmt(stats.positive_max_value, 2)}",
-                        ))
+                        if _stat_matches_current_change(
+                            table,
+                            stats.positive_max_id,
+                            stats.positive_max_value,
+                            tol,
+                        ):
+                            issues.append(CheckIssue(
+                                severity="info", table_name=table_label,
+                                point_id=stats.positive_max_id or "N/A",
+                                field_name="正方向最大统计",
+                                expected_value=f"累计最大: {actual_pos_id}={_fmt(actual_pos_val, 2)}",
+                                actual_value=f"本次变化口径: {stats.positive_max_id}={_fmt(stats.positive_max_value, 2)}",
+                                message=(
+                                    "正方向最大统计值与同测点本次变化量一致，疑似报告摘要采用本次变化口径，"
+                                    "已跳过累计最大值错误判定"
+                                ),
+                            ))
+                        else:
+                            issues.append(CheckIssue(
+                                severity="error", table_name=table_label,
+                                point_id=actual_pos_id, field_name="正方向最大统计",
+                                expected_value=_fmt(actual_pos_val, 2),
+                                actual_value=_fmt(stats.positive_max_value, 2),
+                                message=f"正方向最大不符: 实际 {actual_pos_id}={_fmt(actual_pos_val, 2)}, 报告 {stats.positive_max_id}={_fmt(stats.positive_max_value, 2)}",
+                            ))
 
         # ── 负方向最大统计 ────────────────────────────────
         if stats.negative_max_value is not None:
@@ -376,13 +437,31 @@ def check_table_statistics(
                 else:
                     actual_neg_id, actual_neg_val = min(neg_vals, key=lambda x: x[1])
                     if not _close(actual_neg_val, stats.negative_max_value, tol):
-                        issues.append(CheckIssue(
-                            severity="error", table_name=table_label,
-                            point_id=actual_neg_id, field_name="负方向最大统计",
-                            expected_value=_fmt(actual_neg_val, 2),
-                            actual_value=_fmt(stats.negative_max_value, 2),
-                            message=f"负方向最大不符: 实际 {actual_neg_id}={_fmt(actual_neg_val, 2)}, 报告 {stats.negative_max_id}={_fmt(stats.negative_max_value, 2)}",
-                        ))
+                        if _stat_matches_current_change(
+                            table,
+                            stats.negative_max_id,
+                            stats.negative_max_value,
+                            tol,
+                        ):
+                            issues.append(CheckIssue(
+                                severity="info", table_name=table_label,
+                                point_id=stats.negative_max_id or "N/A",
+                                field_name="负方向最大统计",
+                                expected_value=f"累计最大: {actual_neg_id}={_fmt(actual_neg_val, 2)}",
+                                actual_value=f"本次变化口径: {stats.negative_max_id}={_fmt(stats.negative_max_value, 2)}",
+                                message=(
+                                    "负方向最大统计值与同测点本次变化量一致，疑似报告摘要采用本次变化口径，"
+                                    "已跳过累计最大值错误判定"
+                                ),
+                            ))
+                        else:
+                            issues.append(CheckIssue(
+                                severity="error", table_name=table_label,
+                                point_id=actual_neg_id, field_name="负方向最大统计",
+                                expected_value=_fmt(actual_neg_val, 2),
+                                actual_value=_fmt(stats.negative_max_value, 2),
+                                message=f"负方向最大不符: 实际 {actual_neg_id}={_fmt(actual_neg_val, 2)}, 报告 {stats.negative_max_id}={_fmt(stats.negative_max_value, 2)}",
+                            ))
 
     # ── 最大速率统计 ──────────────────────────────────────
     if rate_vals and stats.max_rate_value is not None:
@@ -423,7 +502,7 @@ def check_table_statistics(
             if (actual_rate_val * stats.max_rate_value < 0
                     and abs(stats.max_rate_value) >= _MAX_RATE_MIN_ABS):
                 issues.append(CheckIssue(
-                    severity="error", table_name=table_label,
+                    severity="warning", table_name=table_label,
                     point_id=actual_rate_id, field_name="最大速率统计",
                     expected_value=_fmt(actual_rate_val),
                     actual_value=_fmt(stats.max_rate_value),
@@ -445,18 +524,37 @@ def check_table_statistics(
     if change_vals and stats.max_change_value is not None:
         actual_change_id, actual_change_val = max(change_vals, key=lambda x: abs(x[1]))
         if not _close(abs(actual_change_val), abs(stats.max_change_value), FLOAT_TOLERANCE):
-            issues.append(CheckIssue(
-                severity="error",
-                table_name=table_label,
-                point_id=actual_change_id,
-                field_name="最大变化位移统计",
-                expected_value=_fmt(actual_change_val),
-                actual_value=_fmt(stats.max_change_value),
-                message=(
-                    f"最大变化位移不符: 实际 {actual_change_id}={_fmt(actual_change_val)}, "
-                    f"报告 {stats.max_change_id}={_fmt(stats.max_change_value)}"
-                ),
-            ))
+            if is_deep and _deep_stat_matches_current_cumulative(
+                table,
+                stats.max_change_id,
+                stats.max_change_value,
+                FLOAT_TOLERANCE,
+            ):
+                issues.append(CheckIssue(
+                    severity="info",
+                    table_name=table_label,
+                    point_id=stats.max_change_id or "N/A",
+                    field_name="最大变化位移统计",
+                    expected_value=f"本期变化最大: {actual_change_id}={_fmt(actual_change_val)}",
+                    actual_value=f"当前累计口径: {stats.max_change_id}={_fmt(stats.max_change_value)}",
+                    message=(
+                        "最大变化位移统计值与同深度当前累计位移一致，疑似深层宽表列口径错位，"
+                        "已跳过本期变化最大值错误判定"
+                    ),
+                ))
+            else:
+                issues.append(CheckIssue(
+                    severity="error",
+                    table_name=table_label,
+                    point_id=actual_change_id,
+                    field_name="最大变化位移统计",
+                    expected_value=_fmt(actual_change_val),
+                    actual_value=_fmt(stats.max_change_value),
+                    message=(
+                        f"最大变化位移不符: 实际 {actual_change_id}={_fmt(actual_change_val)}, "
+                        f"报告 {stats.max_change_id}={_fmt(stats.max_change_value)}"
+                    ),
+                ))
 
 
 def run_statistics_checks(report: MonitoringReport) -> list[CheckIssue]:

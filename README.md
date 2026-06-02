@@ -4,7 +4,7 @@
 [![PySide6](https://img.shields.io/badge/PySide6-6.5%2B-41CD52?logo=qt&logoColor=white)](https://doc.qt.io/qtforpython-6/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.30%2B-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-138%20passing-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-309%20passing%20%2F%202%20skipped-brightgreen)](tests/)
 
 > 基于 LLM + 规则引擎的建筑变形监测报告自动审核系统。一份 PDF 进，一份带问题清单的检查报告出。
 
@@ -219,6 +219,7 @@ python main.py "报告.pdf" --model MiniMax-M2.7-highspeed -o output/my_check.md
 |------|----------|------|
 | **DashScope (阿里云)** | https://dashscope.aliyuncs.com/ | 默认 Base URL，支持 `qwen3.5-plus` |
 | **MiniMax** | https://api.minimaxi.com/ | 用 `MiniMax-M2.7-highspeed` 提速 |
+| **DeepSeek** | https://api.deepseek.com | OpenAI 兼容端点，当前批量回归使用 `deepseek-v4-flash` |
 | **PaddleOCR-VL** | https://aistudio.baidu.com/ | 仅扫描件/复杂版式时需要 |
 
 ### 三种配置注入方式（优先级从高到低）
@@ -235,10 +236,12 @@ $env:LLM_API_KEY = "sk-..."
 $env:LLM_BASE_URL = "https://coding.dashscope.aliyuncs.com/v1"
 $env:LLM_MODEL = "qwen3.5-plus"
 $env:PADDLE_OCR_TOKEN = "..."           # 可选
+$env:PADDLE_OCR_MODEL = "PaddleOCR-VL-1.6"
 
 # bash / zsh
 export LLM_API_KEY="sk-..."
 export LLM_MODEL="qwen3.5-plus"
+export PADDLE_OCR_MODEL="PaddleOCR-VL-1.6"
 ```
 
 **3) 桌面版 settings.json + 系统 keyring**
@@ -361,7 +364,7 @@ sequenceDiagram
 ## 测试与质量
 
 ```bash
-# 跑全部 138 个测试
+# 跑全部 311 个测试（当前基线：309 passed, 2 skipped）
 python -m pytest tests/ -v
 
 # 跑单个模块
@@ -371,7 +374,7 @@ python -m pytest tests/test_text_normalize.py -v
 python smoke_test_v2.py
 ```
 
-`tests/` 目录覆盖（共 138 个用例，1.2 秒跑完）：
+`tests/` 目录覆盖（当前 `311 collected / 309 passed / 2 skipped`，约 5 秒跑完）：
 
 | 文件 | 用例数 | 重点覆盖 |
 |------|-------|----------|
@@ -380,16 +383,51 @@ python smoke_test_v2.py
 | `test_export_formats.py` | 18 | DOCX 字节流/ZIP 签名/Microsoft YaHei 字体、HTML doctype/lang/中文项目名/print 媒体样式 |
 | `test_settings_store.py` | 17 | keyring 隔离、JSON 损坏容错、env var 回退、敏感字段不落 JSON |
 | `test_worker.py` | 9 | PipelineWorker.cancel()、SignalLogHandler、make_worker_thread 生命周期 |
+| `test_desktop_main_window.py` | 4 | PySide6 offscreen 实例化、配置面板到 RuntimeConfig、三态主窗、结果面板渲染 |
 | `test_pdf_extractor.py` | 6 | OCR/文本层路由、清洗、缓存命中 |
 | `test_llm_parser.py` | 4 | JSON 提取容错、分块策略、`_extract_json_from_response` |
-| `test_calculation_checker.py` | 4 | 单位换算、容差动态调整、深层位移 abs 比较 |
-| `test_statistics_checker.py` | 4 | 正/负方向最大、跨表引用、水位放宽容差 |
-| `test_logic_and_self_verifier.py` | 6 | 安全状态语义匹配、Two-LLM 复核流程 |
+| `test_calculation_checker.py` | 9 | 单位换算、间隔仲裁、跨期连续性、深层位移 abs 比较 |
+| `test_cross_period_continuity.py` | 13 | 多期累计递推、同日 AM/PM 跳过、反向符号口径 |
+| `test_statistics_checker.py` | 6 | 正/负方向最大、跨表引用、宽表本次变化/当前累计口径 |
+| `test_logic_and_self_verifier.py` | 7 | 安全状态语义匹配、汇总口径 warning、Two-LLM 复核流程 |
 | `test_table_recognition_fixes.py` | 8 | 异常表识别、单位推断回归 |
 | `test_step78_timeout_fix.py` | 9 | Step 6 / Step 7 LLM 超时与降级 |
 | `test_report_generator.py` | 1 | Markdown 渲染快照 |
 
 仓库还附带 5 份样本 PDF + OCR 缓存（`output/*_ocr_debug/`），可在无 API key 情况下做离线回归。
+
+### 真实 PDF 回归基线
+
+当前批量回归使用 OpenAI 兼容接口 `LLM_BASE_URL=https://api.deepseek.com`、`LLM_MODEL=deepseek-v4-flash`，OCR 模型环境变量为 `PaddleOCR-VL-1.6`；`--quick` 会跳过 Step 6/7 以便稳定比较规则层结果。
+
+模板 PDF（`python baseline/run_tool_tests.py --quick`）：
+
+| PDF | error | warning | 说明 |
+|-----|------:|--------:|------|
+| 质安模板-错误版.pdf | 18 | 5 | 人工错误可检出 |
+| 质安模板-正确版.pdf | 0 | 3 | 正确版无 error |
+| 深工勘模板-错误版.pdf | 8 | 10 | 部分宽表/汇总口径降为 warning 复核 |
+| 深工勘模板-正确版.pdf | 0 | 29 | 正确版无 error |
+| 展誉模板-错误版.pdf | 14 | 17 | 跨期累计递推错误可检出 |
+| 展誉模板-正确版.pdf | 0 | 21 | 正确版无 error |
+
+原始 PDF（`python baseline/run_original_pdfs.py --quick`）：
+
+| 样本 | error | warning | 备注 |
+|------|------:|--------:|------|
+| 鱼珠乐天 | 0 | 20 | proximity/anomaly 以 warning 呈现 |
+| 监测报告测试 | 0 | 22 | 人工复核提示保留为 warning |
+| 红土创新广场 | 0 | 0 | 干净通过 |
+| 恒大中心 | 0 | 14 | 大 PDF 汇总口径提示 |
+| 设计说明 | 0 | 1 | 负样本：无可计算监测表 |
+
+入口 smoke：
+
+| 入口 | 验证方式 | 结果 |
+|------|----------|------|
+| CLI | `python main.py missing.pdf` | 正常返回“文件不存在”错误路径，无 traceback |
+| Streamlit | 本地启动 `streamlit run app.py --server.headless=true --server.port=8765` 并访问 `http://127.0.0.1:8765` | HTTP 200 |
+| 桌面端 | `tests/test_desktop_main_window.py` 在 `QT_QPA_PLATFORM=offscreen` 下实例化主窗和结果面板 | 4 passed |
 
 ---
 
@@ -434,7 +472,7 @@ building-deformation-checker/
 │   ├── worker.py                    #   - QThread + Signal worker
 │   └── settings_store.py            #   - 配置持久化
 │
-├── tests/                           # 69 个测试
+├── tests/                           # 311 个 pytest 用例（309 passed, 2 skipped）
 ├── docs/
 │   ├── specs/
 │   │   └── 2026-05-16-v2-redesign-design.md
@@ -493,7 +531,7 @@ building-deformation-checker/
 - 单文件场景为主，未做多文件批处理 UI（CLI 可脚本化批量）。
 - 不做数据库持久化，所有结果落盘为文件。
 - LLM 调用未本地化，离线场景仅可跑规则层（Step 1/3/4/8）。
-- 桌面 GUI 暂未提供 PyInstaller 打包脚本，需手工跑 Python。
+- 桌面 GUI 已有 `build_desktop.spec`，源码方式与 offscreen 自动化测试已验证；正式 `.exe` 交付前仍需在目标 Windows 机器做一次打包产物 smoke。
 
 **路线图（按优先级）**
 

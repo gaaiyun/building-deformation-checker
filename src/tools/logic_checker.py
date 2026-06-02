@@ -447,11 +447,11 @@ def check_summary_consistency(report: MonitoringReport, issues: list[CheckIssue]
                 actual_pos_id, actual_pos = max(pos_vals, key=lambda x: x[1])
                 if abs(actual_pos - summary_pos) > tol:
                     issues.append(CheckIssue(
-                        severity="error", table_name="简报汇总",
+                        severity="warning", table_name="简报汇总",
                         point_id=si.monitoring_item, field_name="正方向最大",
                         expected_value=f"{actual_pos_id}={_fmt(actual_pos)}",
                         actual_value=f"{si.positive_max_id}={si.positive_max}",
-                        message="汇总表正方向最大与分表不一致",
+                        message="汇总表正方向最大与分表不一致，请复核汇总口径/监测期映射",
                         suspected_source="report",
                     ))
 
@@ -491,11 +491,11 @@ def check_summary_consistency(report: MonitoringReport, issues: list[CheckIssue]
                 actual_neg_id, actual_neg = min(neg_vals, key=lambda x: x[1])
                 if abs(actual_neg - summary_neg) > tol:
                     issues.append(CheckIssue(
-                        severity="error", table_name="简报汇总",
+                        severity="warning", table_name="简报汇总",
                         point_id=si.monitoring_item, field_name="负方向最大",
                         expected_value=f"{actual_neg_id}={_fmt(actual_neg)}",
                         actual_value=f"{si.negative_max_id}={si.negative_max}",
-                        message="汇总表负方向最大与分表不一致",
+                        message="汇总表负方向最大与分表不一致，请复核汇总口径/监测期映射",
                         suspected_source="report",
                     ))
 

@@ -1,23 +1,21 @@
-"""
-建筑变形监测报告检查智能体 — 主入口
+"""建筑变形监测报告检查智能体 CLI 入口。
 
 用法:
   python main.py <PDF文件路径> [--ocr | --no-ocr] [--no-ai-review] [--output <输出路径>]
-
-示例:
-  python main.py "监测报告检查（测试）.pdf"
-  python main.py report.pdf --ocr --output output/check_report.md
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
-# 必须最先加载 .env（其它模块导入时会读 os.environ）
-from src.utils.dotenv_loader import load_dotenv  # noqa: E402
+from src.core.pipeline import RuntimeConfig, run_pipeline
+from src.utils.dotenv_loader import load_dotenv
+
+
 load_dotenv()
 
 logging.basicConfig(
@@ -28,10 +26,15 @@ logging.basicConfig(
 logger = logging.getLogger("main")
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="建筑变形监测报告检查智能体",
-    )
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.lower() not in {"0", "false", "no", "off"}
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="建筑变形监测报告检查智能体")
     parser.add_argument("pdf_path", help="待检查的 PDF 文件路径")
     ocr_group = parser.add_mutually_exclusive_group()
     ocr_group.add_argument("--ocr", action="store_true", help="优先使用 PaddleOCR，失败时回退 pdfplumber")
@@ -39,238 +42,87 @@ def main():
     parser.add_argument("--no-ai-review", action="store_true", help="跳过 AI 最终审核")
     parser.add_argument("--no-self-verify", action="store_true", help="跳过自验证")
     parser.add_argument("--output", "-o", default=None, help="输出报告路径")
-    parser.add_argument("--model", "-m", default=None,
-                        help="指定 LLM 模型 (如 qwen3.5-plus, kimi-k2.5, glm-5)")
+    parser.add_argument(
+        "--model",
+        "-m",
+        default=None,
+        help="指定 LLM 模型 (如 qwen3.5-plus, deepseek-v4-flash, MiniMax-M2.7)",
+    )
+    return parser
 
-    args = parser.parse_args()
 
-    if args.model:
-        from src.config import set_model
-        set_model(args.model)
-        logger.info("使用模型: %s", args.model)
+def _make_runtime_config(args: argparse.Namespace) -> RuntimeConfig:
+    pdf_name = Path(args.pdf_path).stem
+    output_path = args.output or str(Path("output") / f"{pdf_name}_检查报告.md")
 
-    pdf_path = args.pdf_path
-    if not Path(pdf_path).exists():
-        logger.error("文件不存在: %s", pdf_path)
-        sys.exit(1)
-
-    pdf_name = Path(pdf_path).stem
-    output_path = args.output or f"output/{pdf_name}_检查报告.md"
-
-    # ── Step 1: PDF 提取 ─────────────────────────────────
-    logger.info("=" * 60)
-    logger.info("Step 1: 提取 PDF 内容")
-    logger.info("=" * 60)
-
-    from src.tools.pdf_extractor import extract_pdf
-
-    extraction_result = extract_pdf(
-        pdf_path,
+    return RuntimeConfig(
+        pdf_path=args.pdf_path,
+        llm_api_key=os.getenv("LLM_API_KEY", ""),
+        llm_base_url=os.getenv("LLM_BASE_URL", "https://coding.dashscope.aliyuncs.com/v1"),
+        llm_model=args.model or os.getenv("LLM_MODEL", "qwen3.5-plus"),
+        llm_timeout_normal=int(os.getenv("LLM_TIMEOUT_NORMAL", "120")),
+        llm_parse_chunk_chars=int(os.getenv("LLM_PARSE_CHUNK_CHARS", "18000")),
+        llm_parse_max_tokens=int(os.getenv("LLM_PARSE_MAX_TOKENS", "24000")),
+        llm_parse_timeout_sec=int(os.getenv("LLM_PARSE_TIMEOUT_SEC", "300")),
+        paddle_ocr_token=os.getenv("PADDLE_OCR_TOKEN", ""),
+        paddle_ocr_model=os.getenv("PADDLE_OCR_MODEL", "PaddleOCR-VL-1.6"),
+        paddle_ocr_use_async=_env_bool("PADDLE_OCR_USE_ASYNC", True),
+        paddle_ocr_use_cache=_env_bool("PADDLE_OCR_USE_CACHE", True),
+        paddle_ocr_enable_legacy_fallback=_env_bool("PADDLE_OCR_ENABLE_LEGACY_FALLBACK", True),
+        paddle_ocr_poll_timeout_sec=float(os.getenv("PADDLE_OCR_POLL_TIMEOUT_SEC", "900")),
         use_ocr=args.ocr,
         prefer_ocr=args.ocr,
         auto_fallback=not args.no_ocr,
-        ocr_output_dir=f"output/{pdf_name}_ocr_debug",
-        return_details=True,
+        skip_self_verify=args.no_self_verify,
+        skip_ai_review=args.no_ai_review,
+        output_path=output_path,
     )
-    raw_text = extraction_result.text
-    extraction_result.diagnostics.setdefault("method", extraction_result.method)
-    extraction_result.diagnostics.setdefault("selected_profile", extraction_result.selected_profile)
-    extraction_result.diagnostics.setdefault("debug_dir", extraction_result.debug_output_dir)
-    logger.info("提取完成，文本长度: %d 字符", len(raw_text))
-    logger.info(
-        "  - 提取方式: %s (%s), 原始字符=%s, 清洗后字符=%s, 压缩率=%s",
-        extraction_result.method,
-        extraction_result.selected_profile,
-        extraction_result.diagnostics.get("raw_chars"),
-        extraction_result.diagnostics.get("clean_chars"),
-        extraction_result.diagnostics.get("compression_ratio"),
-    )
-    if extraction_result.debug_output_dir:
-        logger.info("  - OCR 调试目录: %s", extraction_result.debug_output_dir)
 
-    # ── Step 2: LLM 结构化解析 ────────────────────────────
-    logger.info("=" * 60)
-    logger.info("Step 2: LLM 结构化解析 + 动态配置")
-    logger.info("=" * 60)
 
-    from src.tools.llm_parser import parse_report_with_llm
+def _log_progress(step_id: str, label: str, percent: int, detail: str) -> None:
+    logger.info("[%3d%%] %s: %s", percent, label or step_id, detail)
 
-    report = parse_report_with_llm(raw_text)
-    report.raw_text = raw_text
-    report.extraction_diagnostics = extraction_result.diagnostics
 
-    from src.tools.extraction_quality import analyze_extraction_quality
-    analyze_extraction_quality(report)
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
 
-    logger.info("解析结果: %s", report.project_name)
-    logger.info("  - 阈值配置: %d 项", len(report.thresholds))
-    logger.info("  - 汇总项: %d 项", len(report.summary_items))
-    logger.info("  - 数据表: %d 张", len(report.tables))
-    if report.extraction_diagnostics:
-        logger.info(
-            "  - 提取诊断: 高 markup 页=%d, 疑似异常表=%d",
-            len(report.extraction_diagnostics.get("high_markup_pages", [])),
-            report.extraction_diagnostics.get("abnormal_table_count", 0),
-        )
-    for t in report.tables:
-        pts = len(t.points) if t.points else len(t.deep_points)
-        label = t.monitoring_item
-        if t.borehole_id:
-            label += f" ({t.borehole_id})"
-        cfg = t.verification_config
-        logger.info(
-            "    * %s — %d 个测点 [unit=%s, tol=%.2f, severity=%s]",
-            label, pts, cfg.unit, cfg.cumulative_tolerance, cfg.severity_for_cumulative,
-        )
+    if not Path(args.pdf_path).exists():
+        logger.error("文件不存在: %s", args.pdf_path)
+        return 1
 
-    # ── Step 2b: LLM Config Enrichment ────────────────────
-    import src.config as cfg
-    step_delay = getattr(cfg, "LLM_STEP_DELAY_SEC", 0)
-    if step_delay > 0:
-        logger.info("等待 %d 秒以避免限流...", step_delay)
-        import time
-        time.sleep(step_delay)
+    config = _make_runtime_config(args)
+    if args.model:
+        logger.info("使用模型: %s", config.llm_model)
 
-    from src.tools.table_analyzer import enrich_configs_with_llm
-    enrich_configs_with_llm(report)
+    result = run_pipeline(config, progress_callback=_log_progress)
 
-    # ── Step 2.5: 表格分析计划 ─────────────────────────────
-    logger.info("=" * 60)
-    logger.info("Step 2.5: 表格分析计划 (ReAct)")
-    logger.info("=" * 60)
+    if result.cancelled:
+        logger.warning("检查已取消: %s", result.error_message)
+        return 130
 
-    from src.tools.table_analyzer import generate_analysis_plan
-    analysis_plan = generate_analysis_plan(report)
-    for plan in analysis_plan:
-        methods_str = ", ".join(m["name"] for m in plan["verification_methods"])
-        notes_str = (" ⚠️ " + "; ".join(plan["special_notes"])) if plan["special_notes"] else ""
-        logger.info(
-            "  [%s] unit=%s, tol=%.2f, severity=%s → %s%s",
-            plan["table_name"], plan["unit"], plan["tolerance"],
-            plan["severity"], methods_str, notes_str,
-        )
-
-    # ── Step 3: 计算验证 ──────────────────────────────────
-    logger.info("=" * 60)
-    logger.info("Step 3: 计算验证")
-    logger.info("=" * 60)
-
-    from src.tools.calculation_checker import run_calculation_checks
-
-    calc_issues = run_calculation_checks(report)
-    logger.info("计算验证完成: %d 个问题", len(calc_issues))
-
-    # ── Step 4: 统计验证 ──────────────────────────────────
-    logger.info("=" * 60)
-    logger.info("Step 4: 统计验证")
-    logger.info("=" * 60)
-
-    from src.tools.statistics_checker import run_statistics_checks
-
-    stats_issues = run_statistics_checks(report)
-    logger.info("统计验证完成: %d 个问题", len(stats_issues))
-
-    # ── Step 5: 逻辑检查 (with LLM semantic matching) ────
-    logger.info("=" * 60)
-    logger.info("Step 5: 逻辑检查 (语义匹配)")
-    logger.info("=" * 60)
-
-    from src.tools.logic_checker import run_logic_checks
-
-    logic_issues = run_logic_checks(report)
-    logger.info("逻辑检查完成: %d 个问题", len(logic_issues))
-
-    # ── Step 6: 自验证 ────────────────────────────────────
-    all_issues = calc_issues + stats_issues + logic_issues
-    process_notes: list[str] = []
-    if not args.no_self_verify:
-        errors = [i for i in all_issues if i.severity == "error"]
-        if errors:
-            step_delay = getattr(cfg, "LLM_STEP_DELAY_SEC", 0)
-            if step_delay > 0:
-                logger.info("等待 %d 秒以避免限流...", step_delay)
-                time.sleep(step_delay)
-
-            logger.info("=" * 60)
-            logger.info("Step 6: AI 自验证 (%d 个错误)", len(errors))
-            logger.info("=" * 60)
-
-            from src.tools.self_verifier import verify_errors_with_llm
-
-            try:
-                all_issues = verify_errors_with_llm(report, all_issues)
-                calc_issues = [i for i in all_issues if i in calc_issues]
-                stats_issues = [i for i in all_issues if i in stats_issues]
-                logic_issues = [i for i in all_issues if i in logic_issues]
-            except Exception as exc:
-                logger.exception("Step 6 自验证失败，已跳过并继续生成结果")
-                process_notes.append(f"错误复核未完成，已跳过。原因: {exc}")
-        else:
-            process_notes.append("错误复核未执行：没有 error 级问题。")
-    else:
-        process_notes.append("错误复核未执行：用户关闭了该步骤。")
-
-    # ── Step 7: AI 最终审核（可选）──────────────────────────
-    ai_review = ""
-    if not args.no_ai_review:
-        logger.info("=" * 60)
-        logger.info("Step 7: AI 最终审核")
-        logger.info("=" * 60)
-
-        from src.tools.report_generator import generate_report_md
-        from src.tools.llm_parser import verify_report_with_llm
-
-        preliminary_md = generate_report_md(
-            report,
-            calc_issues,
-            stats_issues,
-            logic_issues,
-            analysis_plan=analysis_plan,
-            process_notes=process_notes,
-        )
-        try:
-            ai_review = verify_report_with_llm(preliminary_md, raw_text)
-            logger.info("AI 审核完成")
-        except Exception as exc:
-            logger.exception("Step 7 最终审核失败，已跳过并继续生成结果")
-            process_notes.append(f"最终审核未完成，已跳过。原因: {exc}")
-    else:
-        process_notes.append("最终审核未执行：用户关闭了该步骤。")
-
-    # ── Step 8: 生成检查报告 ──────────────────────────────
-    logger.info("=" * 60)
-    logger.info("Step 8: 生成检查报告")
-    logger.info("=" * 60)
-
-    from src.tools.report_generator import generate_report_md, save_report
-
-    final_md = generate_report_md(
-        report,
-        calc_issues,
-        stats_issues,
-        logic_issues,
-        ai_review,
-        analysis_plan,
-        process_notes=process_notes,
-    )
-    save_report(final_md, output_path)
-
-    # ── 汇总输出 ──────────────────────────────────────────
-    all_issues = calc_issues + stats_issues + logic_issues
-    errors = [i for i in all_issues if i.severity == "error"]
-    warnings = [i for i in all_issues if i.severity == "warning"]
+    if not result.success:
+        logger.error("检查失败: %s", result.error_message)
+        return 1
 
     logger.info("=" * 60)
     logger.info("检查完成!")
-    logger.info("  错误: %d  |  警告: %d  |  提示: %d", len(errors), len(warnings), len(all_issues) - len(errors) - len(warnings))
-    logger.info("  报告已保存至: %s", output_path)
+    logger.info(
+        "  错误: %d  |  警告: %d  |  提示: %d",
+        len(result.errors),
+        len(result.warnings),
+        len(result.infos),
+    )
+    logger.info("  报告已保存至: %s", result.output_path)
     logger.info("=" * 60)
 
-    if errors:
+    if result.errors:
         logger.info("发现的错误:")
-        for i, e in enumerate(errors, 1):
-            logger.info("  %d. %s", i, e)
+        for index, issue in enumerate(result.errors, 1):
+            logger.info("  %d. %s", index, issue)
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

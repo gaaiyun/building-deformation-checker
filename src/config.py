@@ -35,7 +35,7 @@ PADDLE_OCR_ASYNC_JOB_URL = os.getenv(
     "PADDLE_OCR_ASYNC_JOB_URL",
     "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs",
 )
-PADDLE_OCR_MODEL = os.getenv("PADDLE_OCR_MODEL", "PaddleOCR-VL-1.5")
+PADDLE_OCR_MODEL = os.getenv("PADDLE_OCR_MODEL", "PaddleOCR-VL-1.6")
 PADDLE_OCR_USE_ASYNC = os.getenv("PADDLE_OCR_USE_ASYNC", "1").lower() not in {"0", "false", "no", "off"}
 PADDLE_OCR_ENABLE_LEGACY_FALLBACK = os.getenv("PADDLE_OCR_ENABLE_LEGACY_FALLBACK", "1").lower() not in {"0", "false", "no", "off"}
 PADDLE_OCR_POLL_INTERVAL_SEC = float(os.getenv("PADDLE_OCR_POLL_INTERVAL_SEC", "5"))

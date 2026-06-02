@@ -13,6 +13,7 @@ instead of hardcoded category branches.
 from __future__ import annotations
 
 import logging
+import re
 from collections import Counter
 from statistics import median
 from typing import Optional
@@ -28,6 +29,16 @@ from src.models.data_models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _calendar_date_key(date_text: str) -> str:
+    """从监测日期文本中提取日历日，用于避免同日 AM/PM 被误配成跨期。"""
+    text = (date_text or "").strip()
+    match = re.search(r"(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})", text)
+    if not match:
+        return text
+    year, month, day = match.groups()
+    return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
 
 
 def _close_enough(a: Optional[float], b: Optional[float], tol: float) -> bool:
@@ -228,7 +239,7 @@ def check_change_rate(
         if not _close_enough(expected_rate, pt.change_rate, rate_tol):
             pt_interval = abs(pt.current_change / pt.change_rate) if abs(pt.change_rate) > 1e-6 else 0
             pt_interval_r = round(pt_interval)
-            interval_is_clean = abs(pt_interval - pt_interval_r) < 0.3
+            interval_is_clean = abs(pt_interval - pt_interval_r) <= 0.5
             if pt_interval_r != interval_days and 1 <= pt_interval_r <= 365 and interval_is_clean:
                 severity = "warning"
                 msg = (
@@ -479,7 +490,9 @@ def check_cross_period_continuity(
             n1_date = (n1_tbl.monitor_date or "").strip()
             n_count = (n_tbl.monitor_count or "").strip()
             n1_count = (n1_tbl.monitor_count or "").strip()
-            if n_date and n_date == n1_date and (not n_count or n_count == n1_count):
+            n_date_key = _calendar_date_key(n_date)
+            n1_date_key = _calendar_date_key(n1_date)
+            if n_date_key and n_date_key == n1_date_key:
                 continue
 
             n_cums = {
@@ -505,9 +518,25 @@ def check_cross_period_continuity(
                     continue
 
                 expected = prev_cum + pt.current_change
+                opposite_sign_expected = prev_cum - pt.current_change
                 tol = max(0.15, abs(pt.cumulative_change) * 0.05)
 
                 if not _close_enough(expected, pt.cumulative_change, tol):
+                    if _close_enough(opposite_sign_expected, pt.cumulative_change, tol):
+                        issues.append(CheckIssue(
+                            severity="info",
+                            table_name=item or "未命名表",
+                            point_id=pt.point_id,
+                            field_name="跨期累计连续性",
+                            expected_value=_fmt(opposite_sign_expected, 2),
+                            actual_value=_fmt(pt.cumulative_change, 2),
+                            message=(
+                                f"跨期累计按相反本次变化符号可连续: "
+                                f"{label_n}累计({_fmt(prev_cum, 2)}) - {label_n1}本次({_fmt(pt.current_change, 2)}) "
+                                f"= {_fmt(opposite_sign_expected, 2)}，疑似该表本次变化方向约定与累计增量相反"
+                            ),
+                        ))
+                        continue
                     issues.append(CheckIssue(
                         severity="error",
                         table_name=item or "未命名表",

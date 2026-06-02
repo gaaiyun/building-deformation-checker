@@ -107,6 +107,28 @@ class CalculationCheckerTests(unittest.TestCase):
 
         self.assertFalse(any(issue.field_name == "变化速率" for issue in issues))
 
+    def test_rounded_point_specific_interval_is_warning_not_error(self):
+        """报告速率保留两位时，0.20/0.030≈6.67 天应识别为约 7 天的点级间隔差异。"""
+        table = MonitoringTable(
+            monitoring_item="地面沉降",
+            category=MonitoringCategory.SETTLEMENT,
+            verification_config=TableVerificationConfig(interval_days=1),
+            points=[
+                MeasurementPoint(point_id="SM1", current_change=0.10, change_rate=0.10),
+                MeasurementPoint(point_id="SM2", current_change=-0.20, change_rate=-0.20),
+                MeasurementPoint(point_id="SM7", current_change=0.20, change_rate=0.030),
+            ],
+        )
+        report = MonitoringReport(tables=[table])
+
+        issues = run_calculation_checks(report)
+        sm7_rate = [
+            issue for issue in issues
+            if issue.point_id == "SM7" and issue.field_name == "变化速率"
+        ]
+
+        self.assertEqual([issue.severity for issue in sm7_rate], ["warning"])
+
 
 class IntervalInferenceArbitrationTests(unittest.TestCase):
     """v2 修复：configured 与 inferred 显著差距时，按行级支持率仲裁。

@@ -145,6 +145,25 @@ class CrossPeriodContinuityTests(unittest.TestCase):
         self.assertEqual(len(cross), 1)
         self.assertIn("5.00", cross[0].message)
 
+    def test_opposite_sign_current_change_convention_is_not_error(self):
+        """部分沉降表本次变化方向与累计增量相反，若反向递推成立则不应报错。"""
+        t1 = _make_period_table(
+            "基坑顶沉降", "2026-05-13",
+            [MeasurementPoint(point_id="WY8", cumulative_change=-2.99, current_change=-0.12)],
+        )
+        t2 = _make_period_table(
+            "基坑顶沉降", "2026-05-14",
+            [MeasurementPoint(point_id="WY8", cumulative_change=-2.83, current_change=-0.16)],
+        )
+        report = MonitoringReport(tables=[t1, t2])
+        issues = []
+        check_cross_period_continuity(report, issues)
+        cross_errors = [
+            i for i in issues
+            if i.field_name == "跨期累计连续性" and i.severity == "error"
+        ]
+        self.assertEqual(len(cross_errors), 0)
+
     def test_relative_tolerance_for_large_cumulative(self):
         """累计 > 10mm 时 5% 相对容差启动；小偏差不应误报"""
         t1 = _make_period_table(
@@ -194,6 +213,40 @@ class CrossPeriodContinuityTests(unittest.TestCase):
         check_cross_period_continuity(report, issues)
         cross = [i for i in issues if i.field_name == "跨期累计连续性"]
         self.assertEqual(len(cross), 0, "同日期重复表不应触发跨期检查")
+
+    def test_same_calendar_date_with_am_pm_labels_not_paired(self):
+        """同一日历日的上午/下午标签不是可靠的相邻期，不应触发跨期连续性误报。"""
+        t1 = _make_period_table(
+            "基坑顶水平位移", "2026-05-14 AM",
+            [MeasurementPoint(point_id="WY24", cumulative_change=0.19, current_change=0.03)],
+        )
+        t2 = _make_period_table(
+            "基坑顶水平位移", "2026-05-14 PM",
+            [MeasurementPoint(point_id="WY24", cumulative_change=1.08, current_change=0.01)],
+        )
+        report = MonitoringReport(tables=[t1, t2])
+        issues = []
+        check_cross_period_continuity(report, issues)
+        cross = [i for i in issues if i.field_name == "跨期累计连续性"]
+        self.assertEqual(len(cross), 0, "同一日历日 AM/PM 不应触发跨期检查")
+
+    def test_same_calendar_date_with_different_monitor_count_not_paired(self):
+        """同一日历日即使 monitor_count 不同，也不能当成跨日连续期。"""
+        t1 = _make_period_table(
+            "基坑顶水平位移", "2026-05-14",
+            [MeasurementPoint(point_id="WY2", cumulative_change=2.40, current_change=-0.30)],
+        )
+        t1.monitor_count = "上午"
+        t2 = _make_period_table(
+            "基坑顶水平位移", "2026-05-14",
+            [MeasurementPoint(point_id="WY2", cumulative_change=2.40, current_change=-0.30)],
+        )
+        t2.monitor_count = "下午"
+        report = MonitoringReport(tables=[t1, t2])
+        issues = []
+        check_cross_period_continuity(report, issues)
+        cross = [i for i in issues if i.field_name == "跨期累计连续性"]
+        self.assertEqual(len(cross), 0, "同一日历日不同监测次数不应触发跨期检查")
 
     def test_deep_displacement_table_not_affected(self):
         """深层位移走自己的 prev/current 路径，不应被本函数检查"""
