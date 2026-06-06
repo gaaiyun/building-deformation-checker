@@ -1,5 +1,5 @@
 param(
-    [string]$MsiPath = "dist\BuildingDeformationChecker-2.1.1.msi",
+    [string]$MsiPath = "dist\BuildingDeformationChecker.msi",
     [switch]$Install,
     [string]$InstallLog = "output\msi_install_verify.log",
     [string]$UninstallLog = "output\msi_uninstall_verify.log"
@@ -46,6 +46,15 @@ if (-not (Test-Path -LiteralPath $exe)) {
     throw "Installed EXE not found: $exe"
 }
 Write-Host "Installed EXE: $exe"
+
+Write-Host "Launching installed EXE smoke..."
+$app = Start-Process -FilePath $exe -WindowStyle Hidden -PassThru
+Start-Sleep -Seconds 8
+if ($app.HasExited) {
+    throw "Installed EXE exited early with code $($app.ExitCode)"
+}
+Stop-Process -Id $app.Id -Force
+Write-Host "Installed EXE launch smoke passed."
 
 Write-Host "Uninstalling MSI silently..."
 $uninstallArgs = @("/x", $resolvedMsi, "/qn", "/norestart", "/L*v", $uninstallLogPath)

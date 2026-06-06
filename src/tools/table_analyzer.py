@@ -526,11 +526,15 @@ def enrich_configs_with_llm(report: MonitoringReport) -> None:
     if not tables_needing_review:
         return
 
-    from openai import OpenAI
     import src.config as cfg
+    from src.utils.llm_client import create_openai_client
 
     # 关闭 SDK 隐式重试，避免配置增强步骤在网络抖动时长时间卡住主流程。
-    client = OpenAI(api_key=cfg.LLM_API_KEY, base_url=cfg.LLM_BASE_URL, max_retries=0)
+    try:
+        client = create_openai_client(max_retries=0)
+    except Exception as exc:
+        logger.warning("LLM配置增强客户端初始化失败，跳过配置增强: %s", exc)
+        return
 
     table_summaries = []
     for idx in tables_needing_review:

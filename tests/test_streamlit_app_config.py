@@ -24,6 +24,9 @@ def test_streamlit_app_uses_branded_deepseek_and_paddle_defaults():
     assert "output\") / \"streamlit_uploads" in text
     assert 'st.expander("PaddleOCR（可选）", expanded=True)' in text
     assert "cfg_fresh_run" in text
+    assert "正在启动后台检查任务" in text
+    assert "已开始检查，后台任务运行中" in text
+    assert "任务启动失败" in text
 
 
 def test_streamlit_app_keeps_report_download_exports_available():

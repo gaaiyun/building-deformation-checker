@@ -106,10 +106,11 @@ class RuntimeConfig:
 
         import src.config as cfg
         from src.tools import pdf_extractor as pe
+        from src.utils.llm_client import normalize_openai_base_url
 
         with _CONFIG_LOCK:
             cfg.LLM_API_KEY = self.llm_api_key
-            cfg.LLM_BASE_URL = self.llm_base_url.rstrip("/")
+            cfg.LLM_BASE_URL = normalize_openai_base_url(self.llm_base_url)
             cfg.LLM_MODEL = self.llm_model
             cfg.LLM_PARSE_CHUNK_CHARS = self.llm_parse_chunk_chars
             cfg.LLM_PARSE_MAX_TOKENS = self.llm_parse_max_tokens
@@ -124,7 +125,7 @@ class RuntimeConfig:
 
             # 环境变量同步（避免 OpenAI SDK 等 fork 出来读不到）
             os.environ["LLM_API_KEY"] = self.llm_api_key
-            os.environ["LLM_BASE_URL"] = self.llm_base_url
+            os.environ["LLM_BASE_URL"] = cfg.LLM_BASE_URL
             os.environ["LLM_MODEL"] = self.llm_model
             os.environ["PADDLE_OCR_TOKEN"] = self.paddle_ocr_token
 

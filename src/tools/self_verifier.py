@@ -176,10 +176,10 @@ def _verify_batch_task(
     context_chars: int,
 ) -> dict:
     """Verify one batch and fall back to single-item verification if needed."""
-    from openai import OpenAI
     import src.config as cfg
+    from src.utils.llm_client import create_openai_client
 
-    client = OpenAI(api_key=cfg.LLM_API_KEY, base_url=cfg.LLM_BASE_URL, max_retries=0)
+    client = create_openai_client(max_retries=0)
     prompt = _build_prompt(batch, raw_text, context_chars)
     verdicts, last_exc = _request_verdicts(
         client,
@@ -209,7 +209,7 @@ def _verify_batch_task(
 
     logger.warning("自验证批次失败，拆分为单条重试")
     segments: list[tuple[list[CheckIssue], list[dict]]] = []
-    single_client = OpenAI(api_key=cfg.LLM_API_KEY, base_url=cfg.LLM_BASE_URL, max_retries=0)
+    single_client = create_openai_client(max_retries=0)
     final_exc = last_exc
     for single_issue in batch:
         single_verdicts, single_exc = _request_verdicts(

@@ -11,11 +11,66 @@ import json
 import logging
 import re
 import time
-from typing import Optional
+from typing import Any, Optional
 
-from openai import OpenAI
+import httpx
 
 logger = logging.getLogger(__name__)
+
+# Test hook: unit tests patch ``src.utils.llm_client.OpenAI`` directly.
+# Production keeps it as None and imports the real class lazily in
+# ``create_openai_client``.
+OpenAI = None
+
+
+def normalize_openai_base_url(base_url: str) -> str:
+    """Normalize and validate an OpenAI-compatible base URL.
+
+    Users often paste bare hosts or values with trailing slashes. We normalize
+    those harmless cases here, but keep truly malformed values visible with a
+    clear error message.
+    """
+    value = (base_url or "").strip()
+    if not value:
+        value = "https://api.deepseek.com"
+    if not re.match(r"^https?://", value, flags=re.IGNORECASE):
+        value = f"https://{value}"
+    value = value.rstrip("/")
+
+    try:
+        httpx.URL(value)
+    except Exception as exc:
+        raise ValueError(f"LLM Base URL 无效：{value!r}，请检查是否多写冒号、端口或空格。") from exc
+    return value
+
+
+def create_openai_client(
+    *,
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+    max_retries: int = 0,
+) -> Any:
+    """Create an OpenAI client that is insulated from broken proxy env vars.
+
+    httpx parses HTTP(S)_PROXY/NO_PROXY during client initialization. Some
+    Windows environments contain bare IPv6 entries like ``::1`` in no_proxy,
+    which newer httpx versions can parse as an invalid ``:1`` port. Passing a
+    client with ``trust_env=False`` prevents local proxy settings from breaking
+    otherwise valid DeepSeek/MiniMax/OpenAI-compatible endpoints.
+    """
+    import src.config as cfg
+    global OpenAI
+    client_cls = OpenAI
+    if client_cls is None:
+        from openai import OpenAI as real_openai
+        client_cls = real_openai
+
+    return client_cls(
+        api_key=api_key if api_key is not None else cfg.LLM_API_KEY,
+        base_url=normalize_openai_base_url(base_url if base_url is not None else cfg.LLM_BASE_URL),
+        max_retries=max_retries,
+        http_client=httpx.Client(trust_env=False),
+    )
 
 
 def call_chat_completion(
@@ -66,7 +121,7 @@ def call_chat_completion(
             return cached
 
     # 统一关闭 SDK 隐式重试，避免与本模块显式重试叠加导致长时间阻塞。
-    client = OpenAI(api_key=cfg.LLM_API_KEY, base_url=cfg.LLM_BASE_URL, max_retries=0)
+    client = create_openai_client(max_retries=0)
 
     last_exc = None
     for attempt in range(1 + retries):

@@ -621,13 +621,34 @@ if st.session_state.task_state == "idle":
             if _has_running_tasks():
                 st.warning("当前进程已有任务运行。为避免不同用户配置互相覆盖，请等待当前任务结束。")
                 st.stop()
-            cfg = _build_runtime_config(st.session_state.pdf_path)
-            task_id = _start_pipeline(cfg, llm_use_cache=bool(llm_use_cache and not fresh_run))
+            try:
+                with st.spinner("正在启动后台检查任务..."):
+                    cfg = _build_runtime_config(st.session_state.pdf_path)
+                    task_id = _start_pipeline(cfg, llm_use_cache=bool(llm_use_cache and not fresh_run))
+            except Exception as exc:
+                st.session_state.result = PipelineResult(
+                    success=False,
+                    error_message=f"任务启动失败：{type(exc).__name__}: {exc}",
+                )
+                st.session_state.task_state = "failed"
+                st.session_state.progress = {
+                    "step_id": "error",
+                    "label": "启动失败",
+                    "percent": 0,
+                    "detail": str(exc),
+                }
+                st.rerun()
             st.session_state.task_id = task_id
             st.session_state.task_state = "running"
             st.session_state.result = None
-            st.session_state.progress = {"step_id": "init", "label": "启动", "percent": 0, "detail": ""}
+            st.session_state.progress = {
+                "step_id": "init",
+                "label": "启动后台任务",
+                "percent": 1,
+                "detail": "任务已提交，正在进入 PDF 提取",
+            }
             st.session_state.log_lines = []
+            st.toast("已开始检查，后台任务运行中")
             st.rerun()
     else:
         st.info("👆 请先上传 PDF 文件")

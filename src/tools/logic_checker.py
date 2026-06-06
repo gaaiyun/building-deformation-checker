@@ -78,13 +78,18 @@ def _build_semantic_maps(report: MonitoringReport) -> None:
         '"深层水平位移"/"支护桩测斜"/"测斜"是同一类。'
     )
 
-    from openai import OpenAI
     import src.config as cfg
+    from src.utils.llm_client import create_openai_client
 
     timeout_sec = getattr(cfg, "LLM_TIMEOUT_NORMAL", 90)
     max_retries = getattr(cfg, "LLM_MAX_RETRIES", 2)
     backoff_sec = getattr(cfg, "LLM_RETRY_BACKOFF_SEC", 10)
-    client = OpenAI(api_key=cfg.LLM_API_KEY, base_url=cfg.LLM_BASE_URL, max_retries=0)
+    try:
+        client = create_openai_client(max_retries=0)
+    except Exception as exc:
+        logger.warning("LLM语义匹配客户端初始化失败，回退到关键词匹配: %s", exc)
+        _build_fallback_maps(report, threshold_names, table_names, summary_names)
+        return
 
     for attempt in range(1 + max_retries):
         try:
