@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QSize, Qt, QThread, QUrl, Signal
-from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent, QFont, QIcon, QPixmap
+from PySide6.QtGui import QAction, QCloseEvent, QDragEnterEvent, QDropEvent, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -915,6 +915,7 @@ class MainWindow(QMainWindow):
         self._worker.log_line.connect(self._on_log_line)
         self._worker.finished.connect(self._on_pipeline_finished)
         self._thread = make_worker_thread(self._worker)
+        self._thread.finished.connect(self._on_worker_thread_finished)
         self._thread.start()
 
     def _on_log_line(self, line: str) -> None:
@@ -923,8 +924,6 @@ class MainWindow(QMainWindow):
 
     def _on_pipeline_finished(self, result: PipelineResult) -> None:
         self._result = result
-        self._thread = None
-        self._worker = None
 
         if result.cancelled:
             self.statusBar().showMessage("已取消")
@@ -949,10 +948,40 @@ class MainWindow(QMainWindow):
             f"完成 - 用时 {result.duration_sec:.1f}s, 错误 {len(result.errors)} / 警告 {len(result.warnings)}"
         )
 
+    def _on_worker_thread_finished(self) -> None:
+        """Release QThread references only after Qt confirms the thread stopped."""
+        self._thread = None
+        self._worker = None
+
     def cancel_pipeline(self) -> None:
         if self._worker:
             self._worker.cancel()
             self.statusBar().showMessage("已请求取消，等待当前步骤结束...")
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self._thread is not None and self._thread.isRunning():
+            ret = QMessageBox.question(
+                self,
+                "任务仍在运行",
+                "当前检查任务仍在运行。是否取消任务并退出？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if ret != QMessageBox.Yes:
+                event.ignore()
+                return
+            if self._worker:
+                self._worker.cancel()
+            self._thread.quit()
+            if not self._thread.wait(3000):
+                QMessageBox.information(
+                    self,
+                    "正在取消",
+                    "已请求取消当前任务。请等待当前步骤结束后再关闭窗口。",
+                )
+                event.ignore()
+                return
+        super().closeEvent(event)
 
     def reset_to_idle(self) -> None:
         self._result = None

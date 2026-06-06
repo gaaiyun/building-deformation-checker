@@ -141,6 +141,27 @@ class DesktopMainWindowTests(unittest.TestCase):
         finally:
             win.close()
 
+    def test_main_window_keeps_qthread_reference_until_thread_finished(self):
+        win = MainWindow()
+        try:
+            thread_sentinel = object()
+            worker_sentinel = object()
+            win._thread = thread_sentinel
+            win._worker = worker_sentinel
+
+            result = PipelineResult(success=False, error_message="boom")
+            with patch("gui_desktop.main_window.QMessageBox.critical", return_value=None):
+                win._on_pipeline_finished(result)
+
+            self.assertIs(win._thread, thread_sentinel)
+            self.assertIs(win._worker, worker_sentinel)
+
+            win._on_worker_thread_finished()
+            self.assertIsNone(win._thread)
+            self.assertIsNone(win._worker)
+        finally:
+            win.close()
+
     def test_city_safety_iot_brand_assets_are_used(self):
         self.assertTrue(APP_ICON_PATH.exists())
         self.assertEqual(APP_ICON_PATH.suffix.lower(), ".ico")
