@@ -131,7 +131,7 @@ class DesktopMainWindowTests(unittest.TestCase):
     def test_main_window_constructs_three_state_panels(self):
         win = MainWindow()
         try:
-            self.assertEqual(win.windowTitle(), "建筑变形监测报告核验台 v2 · 桌面版")
+            self.assertEqual(win.windowTitle(), "建筑变形监测报告核验台 · 桌面版")
             self.assertFalse(win.windowIcon().isNull())
             self.assertIsNotNone(win.config_panel)
             self.assertIsNotNone(win.idle_panel)

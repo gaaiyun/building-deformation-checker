@@ -1,6 +1,6 @@
-"""建筑变形监测报告检查智能体 — Streamlit Web UI v2
+"""建筑变形监测报告检查智能体 — Streamlit Web UI
 
-重写要点（修复 v1 全部 3 个 bug）：
+稳态要点：
 1. 全状态走 st.session_state，浏览器 tab 切换 / 重连不丢
 2. 后台 threading.Thread 跑流水线，主脚本 rerun 不会杀任务
 3. st.download_button 触发 rerun 后界面保持完成态，可继续导出/换 PDF
@@ -9,9 +9,9 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import logging
 import os
-import tempfile
 import threading
 import time
 import uuid
@@ -25,9 +25,53 @@ load_dotenv()
 
 import streamlit as st
 
+import src.config as cfg
+from gui_desktop.settings_store import load_settings, save_settings
 from src.core import PipelineResult, RuntimeConfig, run_pipeline
 from src.tools.export_formats import generate_docx, generate_html
 from src.tools.extraction_quality import append_issue_source_hint
+
+
+APP_TITLE = "建筑变形监测报告核验台"
+APP_SUBTITLE = "城安物联 · PDF 监测报告智能核验"
+ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+APP_LOGO_PATH = ASSETS_DIR / "city_safety_iot_logo.png"
+APP_ICON_PATH = ASSETS_DIR / "city_safety_iot_icon.png"
+
+LLM_PROVIDER_PRESETS = {
+    "DeepSeek": {
+        "base_url": "https://api.deepseek.com",
+        "model": "deepseek-v4-flash",
+        "models": ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"],
+    },
+    "MiniMax": {
+        "base_url": "https://api.minimaxi.com/v1",
+        "model": "MiniMax-M2.7",
+        "models": ["MiniMax-M2.7", "MiniMax-M2.7-highspeed"],
+    },
+    "自定义 OpenAI 兼容": {
+        "base_url": "",
+        "model": "",
+        "models": [],
+    },
+}
+
+LLM_MODEL_OPTIONS = list(dict.fromkeys([
+    "deepseek-v4-flash",
+    "deepseek-v4-pro",
+    "deepseek-chat",
+    "deepseek-reasoner",
+    *getattr(cfg, "AVAILABLE_MODELS", []),
+]))
+CUSTOM_MODEL_LABEL = "自定义模型 ID"
+
+PADDLE_MODEL_OPTIONS = [
+    "PaddleOCR-VL-1.6",
+    "PaddleOCR-VL-1.5",
+    "PaddleOCR-VL",
+    "PP-StructureV3",
+    "PP-OCRv5",
+]
 
 
 # ── 日志：通过 list 串接到 session_state ──────────────────────
@@ -65,9 +109,39 @@ def _delete_task(task_id: str) -> None:
         _BACKGROUND_TASKS.pop(task_id, None)
 
 
+def _has_running_tasks() -> bool:
+    with _TASKS_LOCK:
+        return any(task["thread"].is_alive() for task in _BACKGROUND_TASKS.values())
+
+
 # ── Session State 初始化 ─────────────────────────────────────
 def _init_state() -> None:
     ss = st.session_state
+    if "settings_loaded" not in ss:
+        saved = load_settings()
+        ss.cfg_llm_base_url = saved.get("llm_base_url", cfg.LLM_BASE_URL)
+        ss.cfg_llm_api_key = saved.get("llm_api_key", cfg.LLM_API_KEY)
+        ss.cfg_llm_model = saved.get("llm_model", cfg.LLM_MODEL)
+        ss.cfg_paddle_token = saved.get("paddle_ocr_token", cfg.PADDLE_OCR_TOKEN)
+        ss.cfg_paddle_model = saved.get("paddle_ocr_model", cfg.PADDLE_OCR_MODEL)
+        ss.cfg_paddle_cache = bool(saved.get("paddle_ocr_use_cache", True))
+        ss.cfg_paddle_async = bool(saved.get("paddle_ocr_use_async", True))
+        ss.cfg_skip_self_verify = bool(saved.get("skip_self_verify", False))
+        ss.cfg_skip_ai_review = bool(saved.get("skip_ai_review", False))
+        ss.cfg_ocr_mode = _ocr_mode_from_settings(saved)
+        ss.cfg_llm_provider = _infer_llm_provider(ss.cfg_llm_base_url)
+        ss.cfg_llm_model_choice = (
+            ss.cfg_llm_model if ss.cfg_llm_model in LLM_MODEL_OPTIONS else CUSTOM_MODEL_LABEL
+        )
+        ss.cfg_paddle_model_choice = (
+            ss.cfg_paddle_model if ss.cfg_paddle_model in PADDLE_MODEL_OPTIONS else PADDLE_MODEL_OPTIONS[0]
+        )
+        ss.cfg_llm_cache = bool(saved.get(
+            "llm_use_cache",
+            os.environ.get("LLM_USE_CACHE", "1").lower() not in {"0", "false", "no", "off"},
+        ))
+        ss.cfg_fresh_run = False
+        ss.settings_loaded = True
     if "task_id" not in ss:
         ss.task_id = None
     if "task_state" not in ss:
@@ -78,14 +152,56 @@ def _init_state() -> None:
         ss.pdf_path = None
     if "pdf_name" not in ss:
         ss.pdf_name = None
+    if "pdf_signature" not in ss:
+        ss.pdf_signature = None
     if "log_lines" not in ss:
         ss.log_lines = []
     if "progress" not in ss:
         ss.progress = {"step_id": "", "label": "", "percent": 0, "detail": ""}
 
 
+def _infer_llm_provider(base_url: str) -> str:
+    base = (base_url or "").rstrip("/")
+    if base == "https://api.deepseek.com":
+        return "DeepSeek"
+    if base == "https://api.minimaxi.com/v1":
+        return "MiniMax"
+    return "自定义 OpenAI 兼容"
+
+
+def _ocr_mode_from_settings(settings: dict) -> str:
+    if settings.get("use_ocr"):
+        return "强制 PaddleOCR"
+    if settings.get("prefer_ocr"):
+        return "优先 PaddleOCR"
+    return "优先 pdfplumber"
+
+
+def _apply_llm_provider() -> None:
+    provider = st.session_state.get("cfg_llm_provider", "DeepSeek")
+    preset = LLM_PROVIDER_PRESETS.get(provider, {})
+    if preset.get("base_url"):
+        st.session_state.cfg_llm_base_url = preset["base_url"]
+    if preset.get("model"):
+        st.session_state.cfg_llm_model = preset["model"]
+        st.session_state.cfg_llm_model_choice = (
+            preset["model"] if preset["model"] in LLM_MODEL_OPTIONS else CUSTOM_MODEL_LABEL
+        )
+
+
+def _apply_llm_model_choice() -> None:
+    choice = st.session_state.get("cfg_llm_model_choice", CUSTOM_MODEL_LABEL)
+    if choice != CUSTOM_MODEL_LABEL:
+        st.session_state.cfg_llm_model = choice
+
+
+def _apply_paddle_model_choice() -> None:
+    choice = st.session_state.get("cfg_paddle_model_choice", PADDLE_MODEL_OPTIONS[0])
+    st.session_state.cfg_paddle_model = choice
+
+
 # ── 启动后台任务 ─────────────────────────────────────────────
-def _start_pipeline(cfg: RuntimeConfig) -> str:
+def _start_pipeline(cfg: RuntimeConfig, *, llm_use_cache: bool) -> str:
     task_id = uuid.uuid4().hex
     progress_box = {"step_id": "init", "label": "排队中", "percent": 0, "detail": ""}
     logs: list[str] = []
@@ -99,6 +215,10 @@ def _start_pipeline(cfg: RuntimeConfig) -> str:
         progress_box["detail"] = detail
 
     def worker():
+        old_llm_cache = os.environ.get("LLM_USE_CACHE")
+        old_paddle_cache = os.environ.get("PADDLE_OCR_USE_CACHE")
+        os.environ["LLM_USE_CACHE"] = "1" if llm_use_cache else "0"
+        os.environ["PADDLE_OCR_USE_CACHE"] = "1" if cfg.paddle_ocr_use_cache else "0"
         log_handler = _ListLogHandler(logs)
         log_handler.setLevel(logging.INFO)
         log_handler.setFormatter(
@@ -117,6 +237,14 @@ def _start_pipeline(cfg: RuntimeConfig) -> str:
             result_box["result"] = r
         finally:
             root.removeHandler(log_handler)
+            if old_llm_cache is None:
+                os.environ.pop("LLM_USE_CACHE", None)
+            else:
+                os.environ["LLM_USE_CACHE"] = old_llm_cache
+            if old_paddle_cache is None:
+                os.environ.pop("PADDLE_OCR_USE_CACHE", None)
+            else:
+                os.environ["PADDLE_OCR_USE_CACHE"] = old_paddle_cache
 
     thread = threading.Thread(target=worker, daemon=True, name=f"pipeline-{task_id[:8]}")
     thread.start()
@@ -128,6 +256,7 @@ def _start_pipeline(cfg: RuntimeConfig) -> str:
         "result_box": result_box,
         "cancel_event": cancel_event,
         "started_at": time.time(),
+        "llm_use_cache": llm_use_cache,
     })
     return task_id
 
@@ -139,6 +268,57 @@ def _cancel_current_task() -> None:
     task = _get_task(tid)
     if task:
         task["cancel_event"].set()
+
+
+def _uploads_dir() -> Path:
+    path = Path("output") / "streamlit_uploads"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _store_uploaded_pdf(uploaded_file) -> None:
+    data = uploaded_file.getvalue()
+    signature = hashlib.sha256(data).hexdigest()
+    if (
+        st.session_state.pdf_path
+        and st.session_state.pdf_name == uploaded_file.name
+        and st.session_state.get("pdf_signature") == signature
+    ):
+        return
+
+    old_path = st.session_state.get("pdf_path")
+    if old_path:
+        try:
+            old = Path(old_path)
+            if old.exists() and old.parent == _uploads_dir():
+                old.unlink()
+        except Exception:
+            pass
+
+    safe_suffix = Path(uploaded_file.name).suffix or ".pdf"
+    tmp_path = _uploads_dir() / f"{uuid.uuid4().hex}{safe_suffix}"
+    tmp_path.write_bytes(data)
+    st.session_state.pdf_path = str(tmp_path)
+    st.session_state.pdf_name = uploaded_file.name
+    st.session_state.pdf_signature = signature
+
+
+def _current_settings_payload() -> dict:
+    ocr_mode = st.session_state.get("cfg_ocr_mode", "优先 pdfplumber")
+    return {
+        "llm_api_key": st.session_state.get("cfg_llm_api_key", ""),
+        "llm_base_url": st.session_state.get("cfg_llm_base_url", "https://api.deepseek.com"),
+        "llm_model": st.session_state.get("cfg_llm_model", "deepseek-v4-flash"),
+        "paddle_ocr_token": st.session_state.get("cfg_paddle_token", ""),
+        "paddle_ocr_model": st.session_state.get("cfg_paddle_model", "PaddleOCR-VL-1.6"),
+        "paddle_ocr_use_async": bool(st.session_state.get("cfg_paddle_async", True)),
+        "paddle_ocr_use_cache": bool(st.session_state.get("cfg_paddle_cache", True)),
+        "use_ocr": ocr_mode == "强制 PaddleOCR",
+        "prefer_ocr": ocr_mode == "优先 PaddleOCR",
+        "skip_self_verify": bool(st.session_state.get("cfg_skip_self_verify", False)),
+        "skip_ai_review": bool(st.session_state.get("cfg_skip_ai_review", False)),
+        "llm_use_cache": bool(st.session_state.get("cfg_llm_cache", True)),
+    }
 
 
 # ── UI 辅助 ──────────────────────────────────────────────────
@@ -224,7 +404,7 @@ def _render_analysis_plan(plan: list[dict]) -> None:
 
 # ─── Streamlit 主流程 ────────────────────────────────────────
 st.set_page_config(
-    page_title="建筑变形监测报告核验台 v2",
+    page_title=APP_TITLE,
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -233,65 +413,88 @@ _init_state()
 
 st.markdown("""
 <style>
-.stApp { background: linear-gradient(180deg, #f4f7fb 0%, #eef3f8 100%); }
-.app-hero { background: linear-gradient(135deg, #ffffff 0%, #f4f8ff 100%);
-            border: 1px solid #d8dee9; border-radius: 18px; padding: 22px 24px;
-            margin-bottom: 16px; box-shadow: 0 10px 28px rgba(15, 23, 42, 0.05); }
-.app-hero h1 { margin: 0; font-size: 28px; }
-.app-hero p { margin: 6px 0 0 0; color: #5b6472; }
-.app-hero .badge { display:inline-block; background:#e0f2fe; color:#075985;
-                   padding:2px 8px; border-radius:6px; font-size:11px; margin-left:8px; }
+.stApp { background: #f4f7fb; }
+.block-container { padding-top: 1.4rem; }
+.app-hero { background: #ffffff; border: 1px solid #d8dee9; border-radius: 12px;
+            padding: 18px 22px; margin-bottom: 16px;
+            box-shadow: 0 8px 24px rgba(15, 23, 42, 0.05); }
+.app-hero h1 { margin: 0; font-size: 28px; color: #0f2f5f; }
+.app-hero p { margin: 6px 0 0 0; color: #4b5563; }
+.app-kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
+.app-kpi { border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px 12px; background: #f8fafc; }
+.app-kpi b { display:block; color:#0f2f5f; }
+.app-kpi span { color:#6b7280; font-size: 12px; }
+section[data-testid="stSidebar"] { background: #ffffff; border-right: 1px solid #e5e7eb; }
 </style>
 """, unsafe_allow_html=True)
 
 st.markdown("""
 <div class="app-hero">
-  <h1>建筑变形监测报告核验台 <span class="badge">v2 修复版</span></h1>
-  <p>支持后台运行：切换 tab、下载报告、上传新 PDF 都不会中断或丢失结果。</p>
+  <h1>建筑变形监测报告核验台</h1>
+  <p>支持后台运行、实时进度、日志追踪、AI 复核，以及 Markdown / Word / HTML 报告下载。</p>
+  <div class="app-kpis">
+    <div class="app-kpi"><b>OpenAI 兼容</b><span>DeepSeek / MiniMax / 自定义模型</span></div>
+    <div class="app-kpi"><b>PaddleOCR-VL</b><span>扫描件与图片型 PDF 备选</span></div>
+    <div class="app-kpi"><b>规则核算</b><span>累计值、速率、统计、逻辑一致性</span></div>
+    <div class="app-kpi"><b>本机密钥保存</b><span>敏感信息优先进入系统 keyring</span></div>
+  </div>
 </div>
 """, unsafe_allow_html=True)
 
 
 # ── 侧边栏 ───────────────────────────────────────────────────
 with st.sidebar:
-    import src.config as cfg
-    st.header("⚙ 运行设置")
+    if APP_LOGO_PATH.exists():
+        st.image(str(APP_LOGO_PATH), use_container_width=True)
+    st.caption(APP_SUBTITLE)
+    st.header("运行设置")
 
     with st.expander("LLM 接口", expanded=True):
+        st.selectbox(
+            "服务商",
+            list(LLM_PROVIDER_PRESETS.keys()),
+            key="cfg_llm_provider",
+            on_change=_apply_llm_provider,
+        )
         llm_base_url = st.text_input(
             "Base URL",
-            value=st.session_state.get("cfg_llm_base_url",
-                                       os.getenv("LLM_BASE_URL", cfg.LLM_BASE_URL)),
             key="cfg_llm_base_url",
         )
         llm_api_key = st.text_input(
             "API Key",
-            value=st.session_state.get("cfg_llm_api_key",
-                                       os.getenv("LLM_API_KEY", cfg.LLM_API_KEY)),
             type="password",
             key="cfg_llm_api_key",
         )
+        st.selectbox(
+            "常用模型",
+            [*LLM_MODEL_OPTIONS, CUSTOM_MODEL_LABEL],
+            key="cfg_llm_model_choice",
+            on_change=_apply_llm_model_choice,
+        )
         llm_model = st.text_input(
-            "模型",
-            value=st.session_state.get("cfg_llm_model",
-                                       os.getenv("LLM_MODEL", "deepseek-v4-flash")),
+            "模型 ID",
             key="cfg_llm_model",
         )
+        llm_use_cache = st.toggle(
+            "复用 LLM 缓存",
+            value=st.session_state.get("cfg_llm_cache", True),
+            key="cfg_llm_cache",
+        )
 
-    with st.expander("PaddleOCR（可选）", expanded=False):
+    with st.expander("PaddleOCR（可选）", expanded=True):
         paddle_ocr_token = st.text_input(
             "Token",
-            value=st.session_state.get("cfg_paddle_token",
-                                       os.getenv("PADDLE_OCR_TOKEN", cfg.PADDLE_OCR_TOKEN)),
             type="password",
             key="cfg_paddle_token",
         )
+        st.selectbox(
+            "常用模型",
+            PADDLE_MODEL_OPTIONS,
+            key="cfg_paddle_model_choice",
+            on_change=_apply_paddle_model_choice,
+        )
         paddle_ocr_model = st.text_input(
-            "模型",
-            value=st.session_state.get(
-                "cfg_paddle_model",
-                os.getenv("PADDLE_OCR_MODEL", cfg.PADDLE_OCR_MODEL),
-            ),
+            "模型 ID",
             key="cfg_paddle_model",
         )
         paddle_ocr_use_cache = st.toggle(
@@ -302,6 +505,16 @@ with st.sidebar:
             "使用异步 API", value=st.session_state.get("cfg_paddle_async", True),
             key="cfg_paddle_async",
         )
+        st.caption("实测建议：数字型表格 PDF 默认走 pdfplumber；扫描件或文本层质量差时再启用 PaddleOCR。")
+
+    c_save, c_reset = st.columns(2)
+    if c_save.button("保存配置", use_container_width=True):
+        save_settings(_current_settings_payload())
+        st.success("已保存。API Key/Token 优先进入系统 keyring。")
+    if c_reset.button("DeepSeek 默认", use_container_width=True):
+        st.session_state.cfg_llm_provider = "DeepSeek"
+        _apply_llm_provider()
+        st.rerun()
 
     st.divider()
     ocr_mode = st.radio(
@@ -325,9 +538,15 @@ with st.sidebar:
         value=st.session_state.get("cfg_skip_ai_review", False),
         key="cfg_skip_ai_review",
     )
+    fresh_run = st.checkbox(
+        "从头测试（禁用 LLM/OCR 缓存）",
+        value=st.session_state.get("cfg_fresh_run", False),
+        key="cfg_fresh_run",
+    )
 
 
 def _build_runtime_config(pdf_path: str) -> RuntimeConfig:
+    effective_paddle_cache = bool(paddle_ocr_use_cache and not fresh_run)
     return RuntimeConfig(
         pdf_path=pdf_path,
         llm_api_key=llm_api_key,
@@ -336,7 +555,7 @@ def _build_runtime_config(pdf_path: str) -> RuntimeConfig:
         paddle_ocr_token=paddle_ocr_token,
         paddle_ocr_model=paddle_ocr_model,
         paddle_ocr_use_async=paddle_ocr_use_async,
-        paddle_ocr_use_cache=paddle_ocr_use_cache,
+        paddle_ocr_use_cache=effective_paddle_cache,
         use_ocr=use_ocr_flag,
         prefer_ocr=prefer_ocr_flag,
         auto_fallback=auto_fallback_flag,
@@ -373,9 +592,8 @@ def _sync_task_state() -> None:
             st.session_state.task_state = "done"
         else:
             st.session_state.task_state = "failed"
-        # 任务完成后保留少量时间窗口可访问，再删除
-        # 这里直接保留到 session_state，但移除 _BACKGROUND_TASKS 中的引用以释放线程对象
-        # （logs/result 已经拷贝到 session_state）
+        # 结果与日志已经复制到 session_state，可以释放后台线程对象和日志引用。
+        _delete_task(tid)
 
 
 # ── 主区 ────────────────────────────────────────────────────
@@ -390,11 +608,8 @@ uploaded = st.file_uploader(
 if st.session_state.task_state == "idle":
     if uploaded is not None:
         # 把上传的 PDF 写到临时文件并记到 session_state
-        if st.session_state.pdf_path is None or st.session_state.pdf_name != uploaded.name:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                tmp.write(uploaded.read())
-                st.session_state.pdf_path = tmp.name
-            st.session_state.pdf_name = uploaded.name
+        _store_uploaded_pdf(uploaded)
+        st.session_state.pdf_name = uploaded.name
         st.success(f"已载入：**{uploaded.name}** ({uploaded.size / 1024:.0f} KB)")
 
         can_run = bool(llm_api_key.strip() and llm_base_url.strip() and llm_model.strip())
@@ -403,8 +618,11 @@ if st.session_state.task_state == "idle":
 
         if st.button("🚀 开始检查", type="primary", use_container_width=True,
                      disabled=not can_run):
+            if _has_running_tasks():
+                st.warning("当前进程已有任务运行。为避免不同用户配置互相覆盖，请等待当前任务结束。")
+                st.stop()
             cfg = _build_runtime_config(st.session_state.pdf_path)
-            task_id = _start_pipeline(cfg)
+            task_id = _start_pipeline(cfg, llm_use_cache=bool(llm_use_cache and not fresh_run))
             st.session_state.task_id = task_id
             st.session_state.task_state = "running"
             st.session_state.result = None
@@ -417,30 +635,30 @@ if st.session_state.task_state == "idle":
 
 # Running 态：进度面板 + 自动刷新
 elif st.session_state.task_state == "running":
-    _sync_task_state()
-
-    progress = st.session_state.progress
-    st.markdown(f"### {progress.get('label') or '正在处理...'}")
-    if detail := progress.get("detail"):
-        st.caption(detail)
-    st.progress(min(max(progress.get("percent", 0), 0), 100))
-
-    log_container = st.empty()
-    _render_log_tail(log_container, st.session_state.log_lines)
-
-    cancel_col, _, refresh_col = st.columns([1, 4, 1])
-    if cancel_col.button("取消", use_container_width=True):
-        _cancel_current_task()
-        st.info("已请求取消")
-
-    # 关键：使用 fragment 每秒自动刷新进度，不需要用户操作
+    # 关键：fragment 内部渲染可见元素，确保每秒刷新的是进度条和日志本身。
     @st.fragment(run_every=1.0)
-    def _auto_refresh():
+    def _render_running_status():
         _sync_task_state()
         if st.session_state.task_state != "running":
             st.rerun()  # 任务结束，立刻重跑切换到 done 视图
+            return
 
-    _auto_refresh()
+        progress = st.session_state.progress
+        st.markdown(f"### {progress.get('label') or '正在处理...'}")
+        if detail := progress.get("detail"):
+            st.caption(detail)
+        st.progress(min(max(progress.get("percent", 0), 0), 100))
+        st.caption("后台任务仍在运行。切换浏览器标签页或下载历史结果不会中断当前任务。")
+
+        log_container = st.empty()
+        _render_log_tail(log_container, st.session_state.log_lines)
+
+        cancel_col, _ = st.columns([1, 5])
+        if cancel_col.button("取消", use_container_width=True, key="btn_cancel_running"):
+            _cancel_current_task()
+            st.info("已请求取消，当前 LLM/OCR 请求返回后会停止。")
+
+    _render_running_status()
 
 
 # Done 态：完整结果展示 + 可反复导出
@@ -449,15 +667,13 @@ elif st.session_state.task_state == "done":
 
     # 关键修复：完成后所有结果都在 session_state，下载触发 rerun 不丢
     # 同时可以再次上传 PDF（uploader 已显示在顶部）
-    if uploaded is not None and uploaded.name != st.session_state.pdf_name:
+    uploaded_signature = hashlib.sha256(uploaded.getvalue()).hexdigest() if uploaded is not None else None
+    if uploaded is not None and uploaded_signature != st.session_state.get("pdf_signature"):
         # 用户上传了新 PDF，提示重新运行
         st.info(f"已检测到新文件：**{uploaded.name}** — 点击下方按钮处理新 PDF。")
         if st.button("🔄 处理新 PDF", type="primary", use_container_width=True):
             # 重置状态准备启动新任务
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                tmp.write(uploaded.read())
-                st.session_state.pdf_path = tmp.name
-            st.session_state.pdf_name = uploaded.name
+            _store_uploaded_pdf(uploaded)
             st.session_state.task_state = "idle"
             st.session_state.result = None
             st.rerun()
@@ -526,7 +742,7 @@ elif st.session_state.task_state == "done":
 
     with dl1:
         st.download_button(
-            "📄 Markdown",
+            "下载 Markdown",
             data=result.final_md,
             file_name=f"{pdf_stem}_检查报告.md",
             mime="text/markdown",
@@ -535,7 +751,7 @@ elif st.session_state.task_state == "done":
         )
     with dl2:
         st.download_button(
-            "📝 Word",
+            "下载 Word",
             data=docx_bytes,
             file_name=f"{pdf_stem}_检查报告.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -544,7 +760,7 @@ elif st.session_state.task_state == "done":
         )
     with dl3:
         st.download_button(
-            "🌐 HTML",
+            "下载 HTML",
             data=html_content,
             file_name=f"{pdf_stem}_检查报告.html",
             mime="text/html",

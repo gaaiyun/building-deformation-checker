@@ -239,10 +239,6 @@ class ConfigPanel(QWidget):
             "deepseek-reasoner",
             "MiniMax-M2.7-highspeed",
             "MiniMax-M2.7",
-            "qwen3.5-plus",
-            "kimi-k2.5",
-            "glm-5",
-            "qwen3-coder-plus",
         ])
         saved_model = settings.get("llm_model") or "deepseek-v4-flash"
         if saved_model == "MiniMax-M2.7-highspeed":
@@ -763,7 +759,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setObjectName("AppShell")
-        self.setWindowTitle("建筑变形监测报告核验台 v2 · 桌面版")
+        self.setWindowTitle("建筑变形监测报告核验台 · 桌面版")
         self.setWindowIcon(QIcon(str(APP_ICON_PATH)))
         self.setMinimumSize(1180, 760)
         self.resize(1280, 820)
@@ -871,7 +867,7 @@ class MainWindow(QMainWindow):
         QMessageBox.about(
             self,
             "关于",
-            "<b>建筑变形监测报告核验台 v2</b><br>"
+            "<b>建筑变形监测报告核验台</b><br>"
             "桌面版 (PySide6) · QThread 流水线<br>"
             "<br>"
             "8 步自动核查：PDF → LLM 解析 → 计算/统计/逻辑核校 → AI 自验证 → 报告生成",

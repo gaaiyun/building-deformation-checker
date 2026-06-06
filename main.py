@@ -46,7 +46,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--model",
         "-m",
         default=None,
-        help="指定 LLM 模型 (如 qwen3.5-plus, deepseek-v4-flash, MiniMax-M2.7)",
+        help="指定 LLM 模型 (如 deepseek-v4-flash, deepseek-v4-pro, MiniMax-M2.7)",
     )
     return parser
 
@@ -58,8 +58,8 @@ def _make_runtime_config(args: argparse.Namespace) -> RuntimeConfig:
     return RuntimeConfig(
         pdf_path=args.pdf_path,
         llm_api_key=os.getenv("LLM_API_KEY", ""),
-        llm_base_url=os.getenv("LLM_BASE_URL", "https://coding.dashscope.aliyuncs.com/v1"),
-        llm_model=args.model or os.getenv("LLM_MODEL", "qwen3.5-plus"),
+        llm_base_url=os.getenv("LLM_BASE_URL", "https://api.deepseek.com"),
+        llm_model=args.model or os.getenv("LLM_MODEL", "deepseek-v4-flash"),
         llm_timeout_normal=int(os.getenv("LLM_TIMEOUT_NORMAL", "120")),
         llm_parse_chunk_chars=int(os.getenv("LLM_PARSE_CHUNK_CHARS", "18000")),
         llm_parse_max_tokens=int(os.getenv("LLM_PARSE_MAX_TOKENS", "24000")),
