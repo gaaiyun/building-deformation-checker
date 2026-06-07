@@ -139,21 +139,21 @@ def generate_report_md(
         lines.append("")
         if report.table_extraction_flags:
             lines.append("### 提取质量提示\n")
-            for table_index, flags in sorted(report.table_extraction_flags.items()):
-                if table_index >= len(report.tables):
-                    continue
-                table = report.tables[table_index]
-                table_name = table.monitoring_item
-                if table.borehole_id:
-                    table_name += f" ({table.borehole_id})"
-                lines.append(f"- {table_name}: {'；'.join(flags)}")
+            for item in _group_extraction_flags(report):
+                lines.append(
+                    f"- {item['table_name']}{item['period_suffix']}: "
+                    f"{'；'.join(item['flags'])}"
+                )
             lines.append("")
 
     # ── 表格理解与验证策略 ────────────────────────────
     if analysis_plan:
         lines.append("## 表格理解与验证策略\n")
-        for plan in analysis_plan:
-            header = f"### {plan['table_name']} ({plan['category']} | {plan['point_count']}个测点)\n"
+        for plan in _group_analysis_plans(analysis_plan):
+            header = (
+                f"### {plan['table_name']} "
+                f"({plan['category']} | {plan['period_label']} | {plan['point_count_label']})\n"
+            )
             lines.append(header)
 
             unit_desc = f"**{plan['unit']}**"
@@ -261,6 +261,99 @@ def _section(lines: list[str], title: str, issues: list[CheckIssue]) -> None:
 
 def _issue_message(issue: CheckIssue) -> str:
     return append_issue_source_hint(issue.message, issue.suspected_source)
+
+
+def _group_extraction_flags(report: MonitoringReport) -> list[dict]:
+    groups: dict[tuple[str, tuple[str, ...]], dict] = {}
+    for table_index, flags in sorted(report.table_extraction_flags.items()):
+        if table_index >= len(report.tables):
+            continue
+        table = report.tables[table_index]
+        table_name = table.monitoring_item
+        if table.borehole_id:
+            table_name += f" ({table.borehole_id})"
+        key = (table_name, tuple(flags))
+        item = groups.setdefault(
+            key,
+            {
+                "table_name": table_name,
+                "flags": list(flags),
+                "periods": [],
+            },
+        )
+        item["periods"].append(table.monitor_date or table.monitor_count or f"表{table_index + 1}")
+
+    output = []
+    for item in groups.values():
+        periods = [p for p in item["periods"] if p]
+        if len(periods) <= 1:
+            item["period_suffix"] = f"（{periods[0]}）" if periods else ""
+        else:
+            item["period_suffix"] = f"（{len(periods)} 期，{_format_period_summary(periods)}）"
+        output.append(item)
+    return output
+
+
+def _format_period_summary(periods: list[str]) -> str:
+    unique = list(dict.fromkeys(periods))
+    if len(unique) <= 2:
+        return "、".join(unique)
+    return f"{unique[0]} 至 {unique[-1]}"
+
+
+def _group_analysis_plans(analysis_plan: list[dict]) -> list[dict]:
+    groups: dict[tuple, dict] = {}
+    for plan in analysis_plan:
+        key = _analysis_plan_signature(plan)
+        item = groups.setdefault(
+            key,
+            {
+                **plan,
+                "point_counts": [],
+                "table_count": 0,
+            },
+        )
+        item["table_count"] += 1
+        item["point_counts"].append(plan.get("point_count", 0))
+
+    output = []
+    for item in groups.values():
+        table_count = item.pop("table_count")
+        point_counts = item.pop("point_counts")
+        item["period_label"] = "1 张表" if table_count == 1 else f"{table_count} 张表"
+        if not point_counts:
+            item["point_count_label"] = "0个测点"
+        elif min(point_counts) == max(point_counts):
+            item["point_count_label"] = f"{point_counts[0]}个测点"
+        else:
+            item["point_count_label"] = f"{min(point_counts)}-{max(point_counts)}个测点"
+        output.append(item)
+    return output
+
+
+def _analysis_plan_signature(plan: dict) -> tuple:
+    methods = tuple(
+        (
+            method.get("name", ""),
+            method.get("formula", ""),
+            method.get("tolerance", ""),
+            method.get("severity", ""),
+        )
+        for method in plan.get("verification_methods", [])
+    )
+    return (
+        plan.get("table_name", ""),
+        plan.get("category", ""),
+        plan.get("unit", ""),
+        plan.get("unit_conversion", 1.0),
+        plan.get("conversion_note", ""),
+        bool(plan.get("initial_reliable")),
+        plan.get("reliability_reason", ""),
+        plan.get("interval_days"),
+        plan.get("interval_source", ""),
+        methods,
+        tuple(plan.get("special_notes", [])),
+    )
 
 
 def _md_cell(value: object) -> str:

@@ -125,16 +125,16 @@ flowchart LR
 | Step | 名称 | 耗时 | 说明 |
 |------|------|------|------|
 | 1 | PDF 提取 | 5–30 s | PyMuPDF 文本层先判，质量不足回退 pdfplumber 再回退 PaddleOCR-VL。OCR 结果按 PDF SHA256 + profile 指纹缓存。同时扫描 OCR 缓存目录识别损毁（连续 200+ 同字符 blob、行重复 50+ 次）。 |
-| 2 | LLM 结构化解析 | 60–180 s | 多策略分块（页 / 表 / 字符），每块单独发 LLM，合并为统一 JSON。响应按 SHA256(messages+params) 磁盘缓存（temperature ≤ 0.3 时），开发迭代可达 **9× 速度提升**。 |
+| 2 | LLM 结构化解析 | 60–300 s | 多策略分块（页 / 表 / 字符），按 `LLM_PARSE_MAX_PARALLEL` 并发发送给 LLM，结果按原 chunk 顺序合并为统一 JSON。响应按 SHA256(messages+params) 磁盘缓存（temperature ≤ 0.3 时），开发迭代可达 **9× 速度提升**。若分块失败，报告会给出“LLM 分块解析”警告，不能视作完整通过。 |
 | 2.5 | 分析计划 (ReAct) | <1 s | 纯 Python，把对每张表的字段识别、单位推断、容差选择、将要执行的验证规则**显式输出**，供用户审查 AI 理解过程。 |
 | 3 | 计算验证 | <1 s | 累计变化 = 本次 − 初始；变化速率 = 本次变化 / 间隔天数。容差按表动态调整。**符号一致性检查**：sign(current − initial) 应与 sign(cumulative) 同号（量级悬殊 >10× 时跳过避免误报）。**单期变化幅度异常**：测点本次变化 > 3× 中位数（离群）或 \|本次\| > 3 × \|累计\|（不协调）。 |
 | 4 | 统计验证 | <1 s | 正/负方向最大、最大速率、最大/最小内力；深层位移表豁免跨表引用。**真实最大速率掩盖检测**：报告值 < 30% × max(\|rate\|) 时告警（避免"行业口径"掩盖关键风险）。 |
-| 5 | 逻辑检查 | 30–60 s | 安全状态匹配（LLM 语义） + 简报与分表汇总一致性。**接近预警值告警**：累计 ≥ 80% 预警值 + 状态标"正常" → 建议加密观测。 |
+| 5 | 逻辑检查 | <1 s | 默认使用本地启发式语义映射，避免每份报告额外等待一次 LLM；如需更强语义映射可设 `LOGIC_USE_LLM_SEMANTIC_MATCH=1`。**接近预警值告警**：累计 ≥ 80% 预警值 + 状态标"正常" → 建议加密观测。 |
 | 6 | AI 自验证 | 30–120 s | 仅对 `error` 级问题发起 Two-LLM 复核：confirm / downgrade / dismiss，可关闭。 |
 | 7 | AI 最终审核 | 30–90 s | 把初步报告 + 原文交给 LLM 整体复读，可关闭。 |
 | 8 | 报告生成 | <1 s | 输出标准化 Markdown，可一键转 Word / HTML。 |
 
-**总耗时**：完整流水线 3–8 分钟；跳过 Step 6 + 7 后通常 60–120 秒；
+**总耗时**：完整流水线 3–8 分钟；跳过 Step 6 + 7 后通常 3–6 分钟（取决于 PDF 页数、LLM 服务速度和余额/限流状态）；
 **LLM 响应缓存**激活后重跑同一 PDF 可降至 20–40 秒。
 
 ---
@@ -457,6 +457,19 @@ python -m pytest tests/test_default_provider_config.py tests/test_streamlit_app_
 | 打包 EXE | 通过 | `dist/BuildingDeformationChecker.exe` 启动后窗口标题为“建筑变形监测报告核验台 · 桌面版”，进程响应正常 |
 | MSI 安装包 | 通过 | `scripts/verify_msi.ps1 -Install` 静默安装、启动安装后 EXE、静默卸载通过；SHA256 由 `verify_msi.ps1` 输出 |
 
+### 交付验证回归（2026-06-08）
+
+本轮针对恒大中心 99 页真实 PDF 做无缓存性能与报告效果复测，并同步检查 Streamlit/桌面配置链路：
+
+| 项目 | 结果 | 证据 |
+|------|------|------|
+| pytest 全量回归 | 通过 | `354 passed, 4 skipped` |
+| Streamlit UI smoke | 通过 | Playwright 启动 `app.py`，检查城安物联品牌、DeepSeek/PaddleOCR、`LLM 分块并发数`、上传入口；截图 `output/streamlit_smoke_20260608/streamlit_home.png` |
+| 恒大 PDF 基线（无缓存） | 完成 | `output/hengda_speed_effect_20260608_baseline/`；总耗时 560.12s，Step 2 为 422.44s，Step 5 为 84.74s，39 张表，25 个 warning |
+| 恒大 PDF 快速优化（无缓存） | 完成 | `output/hengda_speed_effect_20260608_optimized/`；总耗时约 305s，Step 5 降到 <1s，报告噪声显著降低；但该轮只抽到 29 张表，不能作为最终准确性基线 |
+| 恒大 PDF 平衡复测（无缓存） | 部分完成 | `output/hengda_speed_effect_20260608_balanced/`；总耗时 469.23s，36 张表；DeepSeek 后段返回 402 Insufficient Balance / 连接错误，分块解析不完整，报告会以 warning 暴露 |
+| 打包 EXE/MSI | 通过 | `dist/BuildingDeformationChecker.exe` 启动烟测通过；`dist/BuildingDeformationChecker-2.1.6.msi` 静默安装、启动安装后 EXE、静默卸载通过，SHA256 `F335FC144962A60DFE8131FF27CC48CBA9AB2BB4FB9821FA258C0F0C3CDE71B0` |
+
 辅助工具：`scripts/mock_openai_server.py` 提供本地 OpenAI 兼容 mock 服务，只用于 UI/打包烟测，不包含任何真实 key。
 
 ---
@@ -504,8 +517,8 @@ building-deformation-checker/
 ├── tests/                           # pytest 测试套件
 ├── docs/
 │   ├── specs/
-│   ├── 异构PDF表格核对流程设计.md
-│   └── 老板汇报_提取与误报治理设计说明.md
+│   ├── 计算核验逻辑说明.md
+│   └── 异构PDF表格核对流程设计.md
 │
 └── output/                          # 检查报告输出（git ignore）
     └── *_ocr_debug/                 # OCR 调试与缓存目录

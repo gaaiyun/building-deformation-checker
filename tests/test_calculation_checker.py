@@ -129,6 +129,43 @@ class CalculationCheckerTests(unittest.TestCase):
 
         self.assertEqual([issue.severity for issue in sm7_rate], ["warning"])
 
+    def test_first_period_without_initial_uses_current_change_as_initial_baseline(self):
+        """无初始值列时，监测时间段第一天的累计值应等于本次变化。"""
+        table = MonitoringTable(
+            monitoring_item="基坑顶水平位移",
+            category=MonitoringCategory.HORIZONTAL_DISP,
+            monitor_date="2022-05-16",
+            verification_config=TableVerificationConfig(interval_days=1),
+            points=[
+                MeasurementPoint(point_id="WY1", current_change=0.30, cumulative_change=0.30),
+                MeasurementPoint(point_id="WY2", current_change=-0.20, cumulative_change=-0.20),
+            ],
+        )
+        report = MonitoringReport(monitoring_period="2022-05-16至2022-05-22", tables=[table])
+
+        issues = run_calculation_checks(report)
+
+        self.assertFalse(any(issue.field_name == "首期累计基准" for issue in issues))
+
+    def test_first_period_without_initial_detects_bad_cumulative_baseline(self):
+        """无初始值列时，首日累计不等于本次变化应作为计算错误。"""
+        table = MonitoringTable(
+            monitoring_item="基坑顶水平位移",
+            category=MonitoringCategory.HORIZONTAL_DISP,
+            monitor_date="2022-05-16",
+            verification_config=TableVerificationConfig(interval_days=1),
+            points=[
+                MeasurementPoint(point_id="WY1", current_change=0.30, cumulative_change=1.20),
+            ],
+        )
+        report = MonitoringReport(monitoring_period="2022-05-16至2022-05-22", tables=[table])
+
+        issues = run_calculation_checks(report)
+        first_period = [issue for issue in issues if issue.field_name == "首期累计基准"]
+
+        self.assertEqual(len(first_period), 1)
+        self.assertEqual(first_period[0].severity, "error")
+
 
 class IntervalInferenceArbitrationTests(unittest.TestCase):
     """v2 修复：configured 与 inferred 显著差距时，按行级支持率仲裁。

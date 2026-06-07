@@ -19,6 +19,8 @@ def test_streamlit_app_uses_branded_deepseek_and_paddle_defaults():
     assert "PaddleOCR-VL-1.6" in text
     assert "save_settings(_current_settings_payload())" in text
     assert "LLM_USE_CACHE" in text
+    assert "cfg_llm_parse_max_parallel" in text
+    assert "LLM 分块并发数" in text
     assert "PADDLE_OCR_USE_CACHE" in text
     assert "hashlib.sha256" in text
     assert "output\") / \"streamlit_uploads" in text

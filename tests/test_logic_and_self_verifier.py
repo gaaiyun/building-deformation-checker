@@ -36,6 +36,29 @@ class LogicCheckerTests(unittest.TestCase):
         self.assertEqual(issues[0].field_name, "数据表识别")
         self.assertEqual(issues[0].suspected_source, "extraction")
 
+    def test_partial_llm_parse_failure_is_reported_as_extraction_warning(self):
+        report = MonitoringReport(
+            tables=[
+                MonitoringTable(
+                    monitoring_item="支护结构顶部水平位移",
+                    category=MonitoringCategory.HORIZONTAL_DISP,
+                    points=[MeasurementPoint(point_id="P1", cumulative_change=1.0)],
+                )
+            ],
+            extraction_diagnostics={
+                "llm_chunk_count": 8,
+                "llm_chunk_success_count": 7,
+                "llm_chunk_parse_failures": 1,
+            },
+            threshold_map={"_": []},
+            summary_map={},
+        )
+
+        issues = run_logic_checks(report)
+
+        self.assertTrue(any(issue.field_name == "LLM 分块解析" for issue in issues))
+        self.assertTrue(any(issue.suspected_source == "extraction" for issue in issues))
+
     def test_summary_consistency_respects_positive_negative_direction(self):
         table = MonitoringTable(
             monitoring_item="支护结构顶部水平位移",
@@ -91,6 +114,40 @@ class LogicCheckerTests(unittest.TestCase):
 
         self.assertFalse(any(issue.field_name == "正方向最大" and issue.severity == "error" for issue in issues))
         self.assertTrue(any(issue.field_name == "正方向最大" and issue.severity == "warning" for issue in issues))
+
+    def test_unmatched_summary_item_is_info_not_warning(self):
+        report = MonitoringReport(
+            summary_items=[
+                ReportSummaryItem(monitoring_item="11号线下行线沉降累计变化最大值")
+            ],
+            tables=[
+                MonitoringTable(
+                    monitoring_item="5号点X方向位移",
+                    category=MonitoringCategory.HORIZONTAL_DISP,
+                    points=[MeasurementPoint(point_id="P1", cumulative_change=1.0)],
+                )
+            ],
+            threshold_map={"_": []},
+            summary_map={"11号线下行线沉降累计变化最大值": []},
+        )
+
+        issues = run_logic_checks(report)
+        unmatched = [issue for issue in issues if issue.field_name == "11号线下行线沉降累计变化最大值"]
+
+        self.assertEqual([issue.severity for issue in unmatched], ["info"])
+
+    def test_minor_point_count_gap_is_not_logic_warning(self):
+        table = MonitoringTable(
+            monitoring_item="地铁沉降",
+            category=MonitoringCategory.SETTLEMENT,
+            point_count=31,
+            points=[MeasurementPoint(point_id=f"P{i}", cumulative_change=0.1) for i in range(27)],
+        )
+        report = MonitoringReport(tables=[table], threshold_map={"_": []}, summary_map={})
+
+        issues = run_logic_checks(report)
+
+        self.assertFalse(any(issue.field_name == "监测点数量" for issue in issues))
 
 
 class SelfVerifierTests(unittest.TestCase):

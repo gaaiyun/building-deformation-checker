@@ -163,6 +163,66 @@ def _non_null_ratio(values: list[object]) -> float:
     return non_null / len(values)
 
 
+def _should_flag_row_count_mismatch(declared_count: int, actual_count: int) -> bool:
+    """判断表头测点数与解析行数差异是否足以视为提取风险。
+
+    不同模板会把停测点、统计行、空白行写进表头数量，轻微差异不一定是 OCR
+    或列解析失败。这里仅在缺失/冗余比例明显时告警，避免大批无效噪声。
+    """
+    if not declared_count or not actual_count or declared_count == actual_count:
+        return False
+    diff = abs(declared_count - actual_count)
+    ratio = diff / max(declared_count, actual_count)
+    return ratio >= 0.2
+
+
+def _required_point_fields(
+    table: MonitoringTable,
+    field_values: dict[str, list[object]],
+) -> set[str]:
+    """按表格画像推断应检查的关键列。
+
+    传统绝对值表：初始值/本次值/累计值是核心。
+    横向多期或变化量表：天然没有初始值/本次测值，核心是本次变化/累计变化，
+    只有当速率列已有证据时才把 change_rate 作为必需列。
+    """
+    ratios = {field: _non_null_ratio(values) for field, values in field_values.items()}
+    is_force = table.category in {
+        MonitoringCategory.ANCHOR_FORCE,
+        MonitoringCategory.STRUT_FORCE,
+    }
+
+    has_absolute_schema = (
+        ratios["initial_value"] >= 0.2
+        or ratios["current_value"] >= 0.2
+    )
+    has_change_schema = (
+        ratios["current_change"] >= 0.2
+        or ratios["change_rate"] >= 0.2
+    )
+    has_cumulative_only_schema = (
+        ratios["cumulative_change"] >= 0.5
+        and ratios["initial_value"] < 0.2
+        and ratios["current_value"] < 0.2
+        and ratios["current_change"] < 0.2
+        and ratios["change_rate"] < 0.2
+    )
+
+    required: set[str] = set()
+    if has_absolute_schema:
+        required.update({"initial_value", "current_value", "cumulative_change"})
+
+    if has_change_schema:
+        required.update({"current_change", "cumulative_change"})
+        if not is_force and ratios["change_rate"] > 0:
+            required.add("change_rate")
+
+    if has_cumulative_only_schema:
+        required.add("cumulative_change")
+
+    return required
+
+
 def _normalize_text(text: str) -> str:
     return " ".join(text.split())
 
@@ -221,8 +281,13 @@ def analyze_extraction_quality(report: MonitoringReport) -> MonitoringReport:
     for idx, table in enumerate(report.tables):
         flags: list[str] = []
         actual_count = len(table.points) if table.points else len(table.deep_points)
-        if table.point_count and actual_count and table.point_count != actual_count:
-            flags.append(f"表头测点数 {table.point_count} 与实际解析行数 {actual_count} 不一致")
+        if _should_flag_row_count_mismatch(table.point_count, actual_count):
+            diff = abs(table.point_count - actual_count)
+            ratio = diff / max(table.point_count, actual_count)
+            flags.append(
+                f"表头测点数 {table.point_count} 与实际解析行数 {actual_count} 差异较大"
+                f"（差 {diff} 行，约 {ratio:.0%}）"
+            )
 
         if table.points:
             field_values = {
@@ -233,9 +298,7 @@ def analyze_extraction_quality(report: MonitoringReport) -> MonitoringReport:
                 "change_rate": [pt.change_rate for pt in table.points],
             }
 
-            required_fields = {"initial_value", "current_value", "cumulative_change"}
-            if table.category not in {MonitoringCategory.ANCHOR_FORCE, MonitoringCategory.STRUT_FORCE}:
-                required_fields.add("change_rate")
+            required_fields = _required_point_fields(table, field_values)
 
             sparse_fields = []
             for field in required_fields:

@@ -41,6 +41,31 @@ def _calendar_date_key(date_text: str) -> str:
     return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
 
 
+def _extract_date_keys(date_text: str) -> list[str]:
+    """提取文本里的所有日历日期，返回 YYYY-MM-DD。"""
+    keys: list[str] = []
+    for match in re.finditer(r"(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})", date_text or ""):
+        year, month, day = match.groups()
+        keys.append(f"{int(year):04d}-{int(month):02d}-{int(day):02d}")
+    return keys
+
+
+def _first_monitoring_date_key(report: MonitoringReport) -> str:
+    """确定报告监测时间段的第一天。
+
+    优先使用 report.monitoring_period 的首个日期；若元数据缺失，则退化为所有
+    表格 monitor_date 中最早的日期。
+    """
+    period_dates = _extract_date_keys(report.monitoring_period)
+    if period_dates:
+        return period_dates[0]
+
+    table_dates: list[str] = []
+    for table in report.tables:
+        table_dates.extend(_extract_date_keys(table.monitor_date))
+    return min(table_dates) if table_dates else ""
+
+
 def _close_enough(a: Optional[float], b: Optional[float], tol: float) -> bool:
     if a is None or b is None:
         return True
@@ -466,6 +491,73 @@ def _is_value_copy(t1: MonitoringTable, t2: MonitoringTable) -> bool:
     return common >= 2
 
 
+def check_first_period_baseline(
+    report: MonitoringReport,
+    issues: list[CheckIssue],
+) -> None:
+    """首期无初始值表校验：监测时间段第一天的累计变化应等于本次变化。
+
+    适用场景：
+        - 横向多期布局拆分后的第一期表；
+        - 表中没有显式 initial_value；
+        - 每行有 current_change 与 cumulative_change。
+
+    业务口径：如果报告没有写明初始值，则监测时间段第一天视为初始基准日。
+    因此首期累计变化应从 0 开始累加，等价于本次变化。
+    """
+    first_date_key = _first_monitoring_date_key(report)
+    if not first_date_key:
+        return
+
+    for table_index, table in enumerate(report.tables):
+        if not table.points:
+            continue
+
+        table_dates = _extract_date_keys(table.monitor_date)
+        table_date_key = table_dates[0] if table_dates else ""
+        if table_date_key != first_date_key:
+            continue
+
+        # 已有显式初始值时走常规 cumulative = current - initial，不重复套首期规则。
+        if any(pt.initial_value is not None for pt in table.points):
+            continue
+
+        valid_pts = [
+            pt for pt in table.points
+            if pt.current_change is not None and pt.cumulative_change is not None
+        ]
+        if not valid_pts:
+            continue
+
+        table_issues: list[CheckIssue] = []
+        for pt in valid_pts:
+            expected = pt.current_change
+            tol = max(
+                table.verification_config.cumulative_tolerance,
+                0.15,
+                abs(pt.cumulative_change or 0.0) * 0.05,
+            )
+            if _close_enough(expected, pt.cumulative_change, tol):
+                continue
+
+            table_issues.append(CheckIssue(
+                severity="error",
+                table_name=table.monitoring_item or "未命名表",
+                point_id=pt.point_id,
+                field_name="首期累计基准",
+                expected_value=_fmt(expected, 2),
+                actual_value=_fmt(pt.cumulative_change, 2),
+                message=(
+                    f"监测时间段首日({first_date_key})未写明初始值，按首日为初始基准，"
+                    f"累计变化应等于本次变化: {_fmt(expected, 2)}，"
+                    f"报告累计 = {_fmt(pt.cumulative_change, 2)}"
+                ),
+            ))
+
+        annotate_issues_for_table(report, table_issues, table_index, default_source="report")
+        issues.extend(table_issues)
+
+
 def check_cross_period_continuity(
     report: MonitoringReport,
     issues: list[CheckIssue],
@@ -683,6 +775,11 @@ def run_calculation_checks(report: MonitoringReport) -> list[CheckIssue]:
 
         annotate_issues_for_table(report, table_issues, table_index, default_source="report")
         issues.extend(table_issues)
+
+    # 首期基准：无初始值列时，监测时间段第一天的累计变化应等于本次变化
+    first_period_issues: list[CheckIssue] = []
+    check_first_period_baseline(report, first_period_issues)
+    issues.extend(first_period_issues)
 
     # 跨表检查：跨期累计连续性（对横向多期布局且无独立初始值列的模板特别有用）
     cross_period_issues: list[CheckIssue] = []

@@ -55,6 +55,7 @@ class DesktopMainWindowTests(unittest.TestCase):
                 "paddle_ocr_use_async": True,
                 "paddle_ocr_use_cache": False,
                 "use_ocr": True,
+                "llm_parse_max_parallel": 6,
                 "skip_self_verify": True,
                 "skip_ai_review": True,
             }
@@ -74,6 +75,7 @@ class DesktopMainWindowTests(unittest.TestCase):
         self.assertTrue(cfg.prefer_ocr)
         self.assertTrue(cfg.skip_self_verify)
         self.assertTrue(cfg.skip_ai_review)
+        self.assertEqual(cfg.llm_parse_max_parallel, 6)
         self.assertFalse(cfg.paddle_ocr_use_cache)
 
     def test_config_panel_default_ocr_model_is_vl_16(self):

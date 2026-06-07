@@ -26,7 +26,7 @@ from src.models.data_models import (
     MonitoringTable,
     ThresholdConfig,
 )
-from src.tools.extraction_quality import annotate_issues_for_table
+from src.tools.extraction_quality import annotate_issues_for_table, _should_flag_row_count_mismatch
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +64,11 @@ def _build_semantic_maps(report: MonitoringReport) -> None:
     if not threshold_names and not summary_names:
         return
 
+    import src.config as cfg
+    if not getattr(cfg, "LOGIC_USE_LLM_SEMANTIC_MATCH", False):
+        _build_fallback_maps(report, threshold_names, table_names, summary_names)
+        return
+
     prompt = (
         "以下是一份建筑变形监测报告中提取的三组名称，请建立它们之间的对应关系。\n\n"
         f"阈值配置项: {json.dumps(threshold_names, ensure_ascii=False)}\n"
@@ -78,7 +83,6 @@ def _build_semantic_maps(report: MonitoringReport) -> None:
         '"深层水平位移"/"支护桩测斜"/"测斜"是同一类。'
     )
 
-    import src.config as cfg
     from src.utils.llm_client import create_openai_client
 
     timeout_sec = getattr(cfg, "LLM_TIMEOUT_NORMAL", 90)
@@ -257,6 +261,33 @@ def check_report_extractability(report: MonitoringReport, issues: list[CheckIssu
     ))
 
 
+def check_partial_llm_parse(report: MonitoringReport, issues: list[CheckIssue]) -> None:
+    """当 LLM 分块结构化解析有失败段时，明确提示结果不完整。"""
+    diagnostics = report.extraction_diagnostics or {}
+    chunk_count = int(diagnostics.get("llm_chunk_count") or 0)
+    success_count = int(diagnostics.get("llm_chunk_success_count") or 0)
+    failures = int(diagnostics.get("llm_chunk_parse_failures") or 0)
+    if chunk_count <= 0:
+        return
+    if failures <= 0 and success_count >= chunk_count:
+        return
+
+    failed_count = failures or max(chunk_count - success_count, 0)
+    issues.append(CheckIssue(
+        severity="warning",
+        table_name="报告整体",
+        point_id="LLM",
+        field_name="LLM 分块解析",
+        expected_value=f"{chunk_count}/{chunk_count} 段成功",
+        actual_value=f"{success_count}/{chunk_count} 段成功，失败 {failed_count} 段",
+        message=(
+            "LLM 结构化解析未覆盖全部文本分块，后续计算只基于成功解析出的表格。"
+            "请重试、换模型/余额充足的 API Key，或启用缓存后复跑确认。"
+        ),
+        suspected_source="extraction",
+    ))
+
+
 _PROXIMITY_THRESHOLD = 0.80
 """触发"接近预警值"warning 的最低比例：|值| / 限值 >= 0.80 即提示"""
 
@@ -363,10 +394,10 @@ def check_summary_consistency(report: MonitoringReport, issues: list[CheckIssue]
         matched = _find_matched_tables(report, si.monitoring_item)
         if not matched:
             issues.append(CheckIssue(
-                severity="warning", table_name="简报汇总", point_id="N/A",
+                severity="info", table_name="简报汇总", point_id="N/A",
                 field_name=si.monitoring_item,
                 expected_value="有对应分表", actual_value="未找到",
-                message=f"汇总项 [{si.monitoring_item}] 未找到对应分表",
+                message=f"汇总项 [{si.monitoring_item}] 未找到对应分表，已跳过一致性核验",
                 suspected_source="logic",
             ))
             continue
@@ -511,7 +542,7 @@ def check_point_count(report: MonitoringReport, issues: list[CheckIssue]) -> Non
         if table.point_count <= 0:
             continue
         actual = len(table.points) if table.points else len(table.deep_points)
-        if actual != table.point_count:
+        if _should_flag_row_count_mismatch(table.point_count, actual):
             name = table.monitoring_item
             if table.borehole_id:
                 name += f"({table.borehole_id})"
@@ -532,6 +563,7 @@ def run_logic_checks(report: MonitoringReport) -> list[CheckIssue]:
     check_ocr_damage(report, issues)  # Gap 3: OCR 损毁警告
     if not report.tables:
         return issues
+    check_partial_llm_parse(report, issues)
 
     logger.info("=== 语义匹配 ===")
     _build_semantic_maps(report)

@@ -298,6 +298,15 @@ class ConfigPanel(QWidget):
         self.skip_ai_review.setChecked(settings.get("skip_ai_review", False))
         pipeline_layout.addWidget(self.skip_ai_review)
 
+        parallel_row = QHBoxLayout()
+        parallel_row.addWidget(QLabel("LLM 分块并发"))
+        self.llm_parse_max_parallel = QSpinBox()
+        self.llm_parse_max_parallel.setRange(1, 8)
+        self.llm_parse_max_parallel.setValue(int(settings.get("llm_parse_max_parallel", 4) or 4))
+        self.llm_parse_max_parallel.setToolTip("长 PDF 会拆成多段并行解析；DeepSeek 默认建议 4，遇到限流可调低。")
+        parallel_row.addWidget(self.llm_parse_max_parallel)
+        pipeline_layout.addLayout(parallel_row)
+
         layout.addWidget(pipeline_box)
 
         # 保存按钮
@@ -322,6 +331,7 @@ class ConfigPanel(QWidget):
             paddle_ocr_model=self.paddle_ocr_model.currentText().strip(),
             paddle_ocr_use_async=self.paddle_ocr_use_async.isChecked(),
             paddle_ocr_use_cache=self.paddle_ocr_use_cache.isChecked(),
+            llm_parse_max_parallel=self.llm_parse_max_parallel.value(),
             use_ocr=self.use_ocr.isChecked(),
             prefer_ocr=self.use_ocr.isChecked(),
             auto_fallback=True,
@@ -338,6 +348,7 @@ class ConfigPanel(QWidget):
             "paddle_ocr_model": self.paddle_ocr_model.currentText(),
             "paddle_ocr_use_async": self.paddle_ocr_use_async.isChecked(),
             "paddle_ocr_use_cache": self.paddle_ocr_use_cache.isChecked(),
+            "llm_parse_max_parallel": self.llm_parse_max_parallel.value(),
             "use_ocr": self.use_ocr.isChecked(),
             "skip_self_verify": self.skip_self_verify.isChecked(),
             "skip_ai_review": self.skip_ai_review.isChecked(),
@@ -357,6 +368,7 @@ class ConfigPanel(QWidget):
             "paddle_ocr_model": self.paddle_ocr_model.currentText(),
             "paddle_ocr_use_async": self.paddle_ocr_use_async.isChecked(),
             "paddle_ocr_use_cache": self.paddle_ocr_use_cache.isChecked(),
+            "llm_parse_max_parallel": self.llm_parse_max_parallel.value(),
             "use_ocr": self.use_ocr.isChecked(),
             "skip_self_verify": self.skip_self_verify.isChecked(),
             "skip_ai_review": self.skip_ai_review.isChecked(),

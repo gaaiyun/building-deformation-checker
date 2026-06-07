@@ -57,6 +57,7 @@ class RuntimeConfig:
     llm_parse_chunk_chars: int = 18000
     llm_parse_max_tokens: int = 24000
     llm_parse_timeout_sec: int = 300
+    llm_parse_max_parallel: int = 4
 
     # ── PaddleOCR 配置 ──────────────────────────
     paddle_ocr_token: str = ""
@@ -115,6 +116,7 @@ class RuntimeConfig:
             cfg.LLM_PARSE_CHUNK_CHARS = self.llm_parse_chunk_chars
             cfg.LLM_PARSE_MAX_TOKENS = self.llm_parse_max_tokens
             cfg.LLM_PARSE_TIMEOUT_SEC = self.llm_parse_timeout_sec
+            cfg.LLM_PARSE_MAX_PARALLEL = self.llm_parse_max_parallel
             cfg.LLM_TIMEOUT_NORMAL = self.llm_timeout_normal
             cfg.PADDLE_OCR_TOKEN = self.paddle_ocr_token
             cfg.PADDLE_OCR_MODEL = self.paddle_ocr_model
@@ -127,6 +129,7 @@ class RuntimeConfig:
             os.environ["LLM_API_KEY"] = self.llm_api_key
             os.environ["LLM_BASE_URL"] = cfg.LLM_BASE_URL
             os.environ["LLM_MODEL"] = self.llm_model
+            os.environ["LLM_PARSE_MAX_PARALLEL"] = str(self.llm_parse_max_parallel)
             os.environ["PADDLE_OCR_TOKEN"] = self.paddle_ocr_token
 
             # pdf_extractor 模块使用 from-config 导入常量，须显式同步
@@ -283,9 +286,14 @@ def run_pipeline(
 
         report = parse_report_with_llm(raw_text)
         report.raw_text = raw_text
-        report.extraction_diagnostics = extraction_result.diagnostics
+        parser_diagnostics = dict(report.extraction_diagnostics or {})
+        report.extraction_diagnostics = {
+            **(extraction_result.diagnostics or {}),
+            **parser_diagnostics,
+        }
         analyze_extraction_quality(report)
         result.report = report
+        result.extraction_diagnostics = dict(report.extraction_diagnostics or {})
         result.step_timings["step2"] = time.time() - step_start
         callback(
             "step2",

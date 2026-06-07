@@ -11,6 +11,7 @@ Architecture:
 
 from __future__ import annotations
 import json, logging, re, time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Optional
 import src.config as cfg
 from src.models.data_models import (
@@ -29,10 +30,14 @@ SYSTEM_PROMPT = """\
 1. 必须提取报告中的每一张监测数据表格，不能遗漏。数值必须原样提取。
 2. 通过语义理解识别监测项类型（不同公司表述差异大，不要硬套名称）：
    识别后填入category字段，可选值: "水平位移","竖向位移","沉降","水位","锚索拉力","支撑轴力","深层水平位移","测斜","裂缝","其他"
+3. 输出前必须在内部逐页逐表清点：每个表题、每条线路/方向、每个监测点编号组、每个监测日期都要形成独立 table。
+4. 连续出现的同类表格不能抽样、省略或只输出最后一期。例如 3号点X方向、4号点X方向、5号点X方向是三组不同表；2022-05-16 至 2022-05-22 是 7 张独立表。
+5. 只提取真实数据表。不要把“成果曲线图”的坐标刻度、图例、曲线说明当成监测数据表；除非曲线图附近同时有完整测点编号和数值行。
 
 ## 关于初始值
 - 有些表没有"初始值"列，只有"本次变化量"和"累计变化量"，此时 initial_value 设 null
 - 累计变化量是从项目首测以来的总变化，不一定能通过表中两列算出
+- 如果没有写明初始值，监测时间段第一天视为初始基准日；第一天的累计变化量应等于本次变化量
 
 ## 关于横向多期布局（重要）
 - 某些模板把多次监测（如"第220次/第221次/第222次"或"第172次..第177次"）**横向**排列
@@ -514,63 +519,112 @@ def _merge_records(existing: list[dict], new_items: list[dict], key_fields: tupl
     return merged
 
 
+def _dump_failed_llm_response(
+    chunk_index: int,
+    total_chunks: int,
+    raw: str,
+    error: Exception,
+) -> None:
+    """保存解析失败的原始 LLM 输出，便于排查具体 chunk。"""
+    try:
+        from pathlib import Path
+        debug_dir = Path("output") / "llm_debug"
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        from time import strftime
+        ts = strftime("%Y%m%d_%H%M%S")
+        dump_path = debug_dir / f"chunk{chunk_index + 1}_failed_{ts}.txt"
+        dump_path.write_text(
+            f"# LLM 调用失败的原始响应\n"
+            f"# 错误: {error}\n"
+            f"# Chunk index: {chunk_index + 1}/{total_chunks}\n"
+            f"# 长度: {len(raw)} 字符\n\n"
+            f"{raw}",
+            encoding="utf-8",
+        )
+        logger.info("已保存失败的 LLM 响应到: %s", dump_path)
+    except Exception as dump_exc:
+        logger.warning("无法保存调试 dump: %s", dump_exc)
+
+
+def _parse_chunk_with_llm(
+    chunk_index: int,
+    total_chunks: int,
+    chunk: str,
+) -> dict[str, Any] | None:
+    """调用 LLM 解析单个文本片段，返回 JSON dict；失败返回 None。"""
+    logger.info(
+        "正在处理第 %d/%d 段 (%d字符)...",
+        chunk_index + 1,
+        total_chunks,
+        len(chunk),
+    )
+    msg = (
+        f"以下是监测报告第{chunk_index + 1}/{total_chunks}段，请提取所有监测数据表格。"
+        "请先在内部清点本段所有表题、监测点组和日期，再输出 JSON；"
+        "相似表不能只抽一张代表，缺失一张日期表也视为错误。"
+        "无表格则tables返回空列表。\n\n"
+        f"```\n{chunk}\n```"
+    )
+    raw = call_chat_completion(
+        [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": msg},
+        ],
+        timeout=getattr(cfg, "LLM_PARSE_TIMEOUT_SEC", 300),
+        max_tokens=getattr(cfg, "LLM_PARSE_MAX_TOKENS", 24000),
+        max_retries=getattr(cfg, "LLM_MAX_RETRIES", 2),
+        temperature=0.1,
+    )
+    if raw is None:
+        logger.error("第%d段LLM调用失败: 所有重试均未成功", chunk_index + 1)
+        return None
+    try:
+        parsed = _extract_json_from_response(raw)
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.error("第%d段JSON解析失败: %s", chunk_index + 1, e)
+        _dump_failed_llm_response(chunk_index, total_chunks, raw, e)
+        return None
+    if not isinstance(parsed, dict):
+        logger.error(
+            "第%d段解析结果非 JSON 对象 (%s)，跳过",
+            chunk_index + 1,
+            type(parsed).__name__,
+        )
+        return None
+    return parsed
+
+
 def parse_report_with_llm(raw_text: str) -> MonitoringReport:
     chunks = _split_chunks(raw_text)
-    logger.info("文本分为 %d 个片段发送给 LLM", len(chunks))
+    max_parallel = max(1, min(
+        len(chunks),
+        int(getattr(cfg, "LLM_PARSE_MAX_PARALLEL", 1) or 1),
+    ))
+    logger.info("文本分为 %d 个片段发送给 LLM，并发数=%d", len(chunks), max_parallel)
     all_tables, first = [], {}
     success_count = 0
     parse_failures = 0
-    for i, chunk in enumerate(chunks):
-        logger.info("正在处理第 %d/%d 段 (%d字符)...", i + 1, len(chunks), len(chunk))
-        msg = (
-            f"以下是监测报告第{i + 1}/{len(chunks)}段，请提取所有监测数据表格。"
-            f"无表格则tables返回空列表。\n\n```\n{chunk}\n```"
-        )
-        raw = call_chat_completion(
-            [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": msg},
-            ],
-            timeout=getattr(cfg, "LLM_PARSE_TIMEOUT_SEC", 300),
-            max_tokens=getattr(cfg, "LLM_PARSE_MAX_TOKENS", 24000),
-            max_retries=getattr(cfg, "LLM_MAX_RETRIES", 2),
-            temperature=0.1,
-        )
-        if raw is None:
-            logger.error("第%d段LLM调用失败: 所有重试均未成功", i + 1)
-            parse_failures += 1
-            continue
-        try:
-            parsed = _extract_json_from_response(raw)
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.error("第%d段JSON解析失败: %s", i + 1, e)
-            # 调试 dump：把失败的原始 LLM 输出写到磁盘以便排查
-            try:
-                from pathlib import Path
-                debug_dir = Path("output") / "llm_debug"
-                debug_dir.mkdir(parents=True, exist_ok=True)
-                from time import strftime
-                ts = strftime("%Y%m%d_%H%M%S")
-                dump_path = debug_dir / f"chunk{i + 1}_failed_{ts}.txt"
-                dump_path.write_text(
-                    f"# LLM 调用失败的原始响应\n"
-                    f"# 错误: {e}\n"
-                    f"# Chunk index: {i + 1}/{len(chunks)}\n"
-                    f"# 长度: {len(raw)} 字符\n\n"
-                    f"{raw}",
-                    encoding="utf-8",
-                )
-                logger.info("已保存失败的 LLM 响应到: %s", dump_path)
-            except Exception as dump_exc:
-                logger.warning("无法保存调试 dump: %s", dump_exc)
-            parse_failures += 1
-            continue
-        if not isinstance(parsed, dict):
-            logger.error(
-                "第%d段解析结果非 JSON 对象 (%s)，跳过",
-                i + 1,
-                type(parsed).__name__,
-            )
+
+    results: list[tuple[int, dict[str, Any] | None]] = []
+    if max_parallel == 1:
+        for i, chunk in enumerate(chunks):
+            results.append((i, _parse_chunk_with_llm(i, len(chunks), chunk)))
+    else:
+        with ThreadPoolExecutor(max_workers=max_parallel) as executor:
+            future_to_index = {
+                executor.submit(_parse_chunk_with_llm, i, len(chunks), chunk): i
+                for i, chunk in enumerate(chunks)
+            }
+            for future in as_completed(future_to_index):
+                i = future_to_index[future]
+                try:
+                    results.append((i, future.result()))
+                except Exception as exc:  # 防御性兜底：单个 chunk 不应拖垮全局
+                    logger.exception("第%d段LLM解析任务异常: %s", i + 1, exc)
+                    results.append((i, None))
+
+    for i, parsed in sorted(results, key=lambda item: item[0]):
+        if parsed is None:
             parse_failures += 1
             continue
         success_count += 1

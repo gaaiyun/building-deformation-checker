@@ -49,6 +49,7 @@ _DEFAULTS: dict[str, Any] = {
     "llm_parse_chunk_chars": 18000,
     "llm_parse_max_tokens": 24000,
     "llm_parse_timeout_sec": 300,
+    "llm_parse_max_parallel": 4,
     "llm_timeout_normal": 120,
     "use_ocr": False,
     "prefer_ocr": False,
@@ -188,10 +189,17 @@ def load_settings() -> dict[str, Any]:
             "LLM_BASE_URL": "llm_base_url",
             "LLM_MODEL": "llm_model",
             "PADDLE_OCR_TOKEN": "paddle_ocr_token",
+            "LLM_PARSE_MAX_PARALLEL": "llm_parse_max_parallel",
         }
         for env_name, settings_key in env_map.items():
             val = os.environ.get(env_name)
             if not val:
+                continue
+            if settings_key == "llm_parse_max_parallel":
+                try:
+                    out[settings_key] = int(val)
+                except ValueError:
+                    continue
                 continue
             # 敏感字段：若 keyring 已提供则保留 keyring 值；否则用环境变量
             if settings_key in _SENSITIVE_KEYS and out.get(settings_key):

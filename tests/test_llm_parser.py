@@ -1,12 +1,19 @@
 import json
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
 from src.models.data_models import MonitoringCategory
-from src.tools.llm_parser import _split_chunks, parse_report_with_llm
+from src.tools.llm_parser import SYSTEM_PROMPT, _split_chunks, parse_report_with_llm
 
 
 class LlmParserTests(unittest.TestCase):
+    def test_system_prompt_guards_against_representative_table_omissions(self):
+        self.assertIn("逐页逐表清点", SYSTEM_PROMPT)
+        self.assertIn("不能抽样、省略", SYSTEM_PROMPT)
+        self.assertIn("3号点X方向、4号点X方向、5号点X方向", SYSTEM_PROMPT)
+
     def test_split_chunks_never_returns_oversized_single_page(self):
         raw_text = "--- 第 1 页 ---\n" + ("A" * 23000) + "\n--- 第 2 页 ---\nB"
 
@@ -54,6 +61,7 @@ class LlmParserTests(unittest.TestCase):
 
         with (
             patch("src.tools.llm_parser._split_chunks", return_value=["chunk-1", "chunk-2"]),
+            patch("src.tools.llm_parser.cfg.LLM_PARSE_MAX_PARALLEL", 1),
             patch(
                 "src.tools.llm_parser.call_chat_completion",
                 side_effect=[
@@ -67,6 +75,43 @@ class LlmParserTests(unittest.TestCase):
         self.assertEqual(len(report.thresholds), 2)
         self.assertEqual(len(report.summary_items), 2)
         self.assertEqual(report.tables[0].category, MonitoringCategory.DEEP_HORIZONTAL)
+
+    def test_parse_report_calls_chunks_concurrently_when_configured(self):
+        base_chunk = {
+            "project_name": "并发项目",
+            "monitoring_company": "",
+            "report_number": "",
+            "monitoring_period": "",
+            "monitoring_date": "",
+            "interval_days": None,
+            "thresholds": [],
+            "summary_items": [],
+            "tables": [],
+            "conclusion": "",
+        }
+        active = 0
+        max_active = 0
+        lock = threading.Lock()
+
+        def fake_completion(*args, **kwargs):
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.08)
+            with lock:
+                active -= 1
+            return json.dumps(base_chunk, ensure_ascii=False)
+
+        with (
+            patch("src.tools.llm_parser._split_chunks", return_value=["chunk-1", "chunk-2", "chunk-3", "chunk-4"]),
+            patch("src.tools.llm_parser.cfg.LLM_PARSE_MAX_PARALLEL", 4),
+            patch("src.tools.llm_parser.call_chat_completion", side_effect=fake_completion),
+        ):
+            report = parse_report_with_llm("ignored")
+
+        self.assertGreater(max_active, 1)
+        self.assertEqual(report.extraction_diagnostics["llm_chunk_success_count"], 4)
 
     def test_parse_report_with_llm_builds_report_from_successful_chunk(self):
         raw_text = "【支护结构顶部水平位移】监测数据成果表\nS1 0.0 1.0 1.0 0.1"
@@ -177,6 +222,7 @@ class LlmParserTests(unittest.TestCase):
         }
         with (
             patch("src.tools.llm_parser._split_chunks", return_value=["chunk-1", "chunk-2"]),
+            patch("src.tools.llm_parser.cfg.LLM_PARSE_MAX_PARALLEL", 1),
             patch(
                 "src.tools.llm_parser.call_chat_completion",
                 side_effect=[json.dumps(good_chunk, ensure_ascii=False), "null"],

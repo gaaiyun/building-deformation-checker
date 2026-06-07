@@ -64,6 +64,7 @@ def _make_runtime_config(args: argparse.Namespace) -> RuntimeConfig:
         llm_parse_chunk_chars=int(os.getenv("LLM_PARSE_CHUNK_CHARS", "18000")),
         llm_parse_max_tokens=int(os.getenv("LLM_PARSE_MAX_TOKENS", "24000")),
         llm_parse_timeout_sec=int(os.getenv("LLM_PARSE_TIMEOUT_SEC", "300")),
+        llm_parse_max_parallel=int(os.getenv("LLM_PARSE_MAX_PARALLEL", "4")),
         paddle_ocr_token=os.getenv("PADDLE_OCR_TOKEN", ""),
         paddle_ocr_model=os.getenv("PADDLE_OCR_MODEL", "PaddleOCR-VL-1.6"),
         paddle_ocr_use_async=_env_bool("PADDLE_OCR_USE_ASYNC", True),

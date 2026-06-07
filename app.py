@@ -154,6 +154,10 @@ def _init_state() -> None:
             "llm_use_cache",
             os.environ.get("LLM_USE_CACHE", "1").lower() not in {"0", "false", "no", "off"},
         ))
+        ss.cfg_llm_parse_max_parallel = int(saved.get(
+            "llm_parse_max_parallel",
+            getattr(cfg, "LLM_PARSE_MAX_PARALLEL", 4),
+        ) or 4)
         ss.cfg_fresh_run = False
         ss.settings_loaded = True
     if "task_id" not in ss:
@@ -340,6 +344,7 @@ def _current_settings_payload() -> dict:
         "skip_self_verify": bool(st.session_state.get("cfg_skip_self_verify", False)),
         "skip_ai_review": bool(st.session_state.get("cfg_skip_ai_review", False)),
         "llm_use_cache": bool(st.session_state.get("cfg_llm_cache", True)),
+        "llm_parse_max_parallel": int(st.session_state.get("cfg_llm_parse_max_parallel", 4) or 4),
     }
 
 
@@ -566,6 +571,15 @@ with st.sidebar:
         "跳过 AI 最终审核 (Step 7)",
         key="cfg_skip_ai_review",
     )
+    llm_parse_max_parallel = int(st.number_input(
+        "LLM 分块并发数",
+        min_value=1,
+        max_value=8,
+        value=int(st.session_state.get("cfg_llm_parse_max_parallel", 4) or 4),
+        step=1,
+        key="cfg_llm_parse_max_parallel",
+        help="长 PDF 会拆成多段并行解析；DeepSeek 默认建议 4，遇到限流可调低。",
+    ))
     fresh_run = st.checkbox(
         "从头测试（禁用 LLM/OCR 缓存）",
         key="cfg_fresh_run",
@@ -579,6 +593,7 @@ def _build_runtime_config(pdf_path: str) -> RuntimeConfig:
         llm_api_key=llm_api_key,
         llm_base_url=llm_base_url,
         llm_model=llm_model,
+        llm_parse_max_parallel=llm_parse_max_parallel,
         paddle_ocr_token=paddle_ocr_token,
         paddle_ocr_model=paddle_ocr_model,
         paddle_ocr_use_async=paddle_ocr_use_async,

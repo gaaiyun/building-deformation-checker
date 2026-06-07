@@ -27,7 +27,7 @@ from src.core.pipeline import (
     _noop_progress,
     run_pipeline,
 )
-from src.models.data_models import CheckIssue
+from src.models.data_models import CheckIssue, MonitoringReport
 
 
 class TestRuntimeConfigDefaults(unittest.TestCase):
@@ -46,6 +46,7 @@ class TestRuntimeConfigDefaults(unittest.TestCase):
         self.assertGreater(cfg.llm_parse_timeout_sec, 0)
         self.assertGreater(cfg.llm_parse_chunk_chars, 0)
         self.assertGreater(cfg.llm_parse_max_tokens, 0)
+        self.assertGreater(cfg.llm_parse_max_parallel, 0)
 
     def test_default_ocr_flags(self):
         cfg = RuntimeConfig(pdf_path="x.pdf")
@@ -88,6 +89,15 @@ class TestRuntimeConfigToAppGlobals(unittest.TestCase):
         self.assertEqual(srccfg.LLM_MODEL, "custom-model")
         self.assertEqual(srccfg.LLM_TIMEOUT_NORMAL, 99)
         self.assertEqual(srccfg.PADDLE_OCR_TOKEN, "paddle-tok")
+
+    def test_syncs_llm_parse_parallelism(self):
+        cfg = RuntimeConfig(pdf_path="x.pdf", llm_parse_max_parallel=6)
+        cfg.to_app_globals()
+
+        import src.config as srccfg
+
+        self.assertEqual(srccfg.LLM_PARSE_MAX_PARALLEL, 6)
+        self.assertEqual(os.environ.get("LLM_PARSE_MAX_PARALLEL"), "6")
 
     def test_syncs_to_env_vars(self):
         cfg = RuntimeConfig(
@@ -320,6 +330,55 @@ class TestRunPipelineErrorHandling(unittest.TestCase):
 
             self.assertTrue(result.cancelled)
             self.assertFalse(result.success)
+        finally:
+            os.unlink(tmp_path)
+
+    def test_pipeline_preserves_llm_chunk_diagnostics_after_step1_merge(self):
+        """Step 2 parser 写入的 LLM 分块统计不应被 Step 1 提取诊断覆盖。"""
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(b"%PDF-1.4\n%fake\n")
+            tmp_path = tmp.name
+
+        try:
+            cfg = RuntimeConfig(
+                pdf_path=tmp_path,
+                skip_self_verify=True,
+                skip_ai_review=True,
+            )
+            fake_extraction = MagicMock()
+            fake_extraction.text = "fake text"
+            fake_extraction.method = "pdfplumber"
+            fake_extraction.selected_profile = "pdfplumber"
+            fake_extraction.diagnostics = {
+                "page_count": 1,
+                "method": "pdfplumber",
+                "selected_profile": "pdfplumber",
+            }
+            parsed_report = MonitoringReport(project_name="测试项目")
+            parsed_report.extraction_diagnostics = {
+                "llm_chunk_count": 2,
+                "llm_chunk_success_count": 2,
+                "llm_chunk_parse_failures": 0,
+            }
+
+            with (
+                patch("src.tools.pdf_extractor.extract_pdf", return_value=fake_extraction),
+                patch("src.tools.llm_parser.parse_report_with_llm", return_value=parsed_report),
+                patch("src.tools.extraction_quality.analyze_extraction_quality", return_value=parsed_report),
+                patch("src.tools.table_analyzer.enrich_configs_with_llm", return_value=None),
+                patch("src.tools.table_analyzer.generate_analysis_plan", return_value=[]),
+                patch("src.tools.calculation_checker.run_calculation_checks", return_value=[]),
+                patch("src.tools.statistics_checker.run_statistics_checks", return_value=[]),
+                patch("src.tools.logic_checker.run_logic_checks", return_value=[]),
+                patch("src.tools.report_generator.generate_report_md", return_value="# ok"),
+                patch("src.tools.report_generator.save_report", return_value="out.md"),
+            ):
+                result = run_pipeline(cfg)
+
+            self.assertTrue(result.success)
+            self.assertEqual(result.report.extraction_diagnostics["page_count"], 1)
+            self.assertEqual(result.report.extraction_diagnostics["llm_chunk_count"], 2)
+            self.assertEqual(result.extraction_diagnostics["llm_chunk_success_count"], 2)
         finally:
             os.unlink(tmp_path)
 
