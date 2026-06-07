@@ -160,6 +160,23 @@ class MaxRateDisagreementTests(unittest.TestCase):
         self.assertNotIn("error", severities, f"符号口径矛盾应保留为 warning 而非 error：{severities}")
         self.assertIn("warning", severities)
 
+    def test_mixed_sign_message_does_not_falsely_claim_same_direction(self):
+        table = MonitoringTable(
+            monitoring_item="周边地面沉降",
+            category=MonitoringCategory.SETTLEMENT,
+            points=[
+                MeasurementPoint(point_id="D1", change_rate=0.20),
+                MeasurementPoint(point_id="D2", change_rate=-0.05),
+                MeasurementPoint(point_id="D3", change_rate=0.10),
+            ],
+            statistics=StatisticsSummary(max_rate_id="D1", max_rate_value=-0.20),
+        )
+        issues = run_statistics_checks(MonitoringReport(tables=[table]))
+        sign_issues = [issue for issue in issues if "符号矛盾" in (issue.message or "")]
+        self.assertGreaterEqual(len(sign_issues), 1)
+        self.assertNotIn("全部速率同向", sign_issues[0].message)
+        self.assertIn("符号相反", sign_issues[0].message)
+
     def test_small_absolute_values_no_warning(self):
         """所有速率都很小（< 0.05 mm/d）→ 不警告（噪声范围）"""
         table = MonitoringTable(

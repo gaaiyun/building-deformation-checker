@@ -27,6 +27,12 @@ def test_streamlit_app_uses_branded_deepseek_and_paddle_defaults():
     assert "正在启动后台检查任务" in text
     assert "已开始检查，后台任务运行中" in text
     assert "任务启动失败" in text
+    assert "@st.cache_resource" in text
+    assert "def _task_registry" in text
+    assert "后台任务状态丢失" in text
+    assert "if registry[\"tasks\"]" in text
+    assert "registry[\"tasks\"][task_id] = task_payload" in text
+    assert "thread.start()" in text
 
 
 def test_streamlit_app_keeps_report_download_exports_available():

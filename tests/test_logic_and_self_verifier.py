@@ -1,7 +1,7 @@
 import json
 import re
 import sys
-import types
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -15,6 +15,11 @@ from src.models.data_models import (
 )
 from src.tools.logic_checker import run_logic_checks
 from src.tools.self_verifier import verify_errors_with_llm
+
+
+def _parse_batch_size(messages: list[dict]) -> int:
+    prompt = messages[1]["content"]
+    return int(re.search(r"本批共 (\d+) 个错误", prompt).group(1))
 
 
 class LogicCheckerTests(unittest.TestCase):
@@ -89,6 +94,50 @@ class LogicCheckerTests(unittest.TestCase):
 
 
 class SelfVerifierTests(unittest.TestCase):
+    def test_prompt_defaults_to_confirm_without_direct_extraction_evidence(self):
+        from src.tools.self_verifier import _build_prompt
+
+        issue = CheckIssue(
+            severity="error",
+            table_name="支护结构顶部水平位移",
+            point_id="P1",
+            field_name="最大值统计",
+            expected_value="P1=2.0",
+            actual_value="P2=1.0",
+            message="报告最值点与计算结果不一致",
+        )
+        prompt = _build_prompt([issue], "支护结构顶部水平位移 原文", 120)
+
+        self.assertIn("默认倾向 confirm", prompt)
+        self.assertIn("不是", prompt)
+        self.assertIn("列错位的证据", prompt)
+
+    def test_request_verdicts_uses_unified_llm_call(self):
+        from src.tools.self_verifier import _request_verdicts
+
+        response = json.dumps([{
+            "error_idx": 0,
+            "verdict": "confirm",
+            "reason": "确认",
+            "suspected_origin": "report",
+        }], ensure_ascii=False)
+        with patch("src.utils.llm_client.call_chat_completion", return_value=response) as call:
+            verdicts, error = _request_verdicts(
+                None,
+                None,
+                "prompt",
+                timeout_sec=77,
+                max_retries=1,
+                backoff_sec=2,
+                max_tokens=1234,
+            )
+
+        self.assertIsNone(error)
+        self.assertEqual(verdicts[0]["verdict"], "confirm")
+        self.assertEqual(call.call_args.kwargs["timeout"], 77)
+        self.assertEqual(call.call_args.kwargs["max_tokens"], 1234)
+        self.assertEqual(call.call_args.kwargs["max_retries"], 1)
+
     def test_self_verifier_processes_more_than_twenty_errors_and_writes_origin(self):
         issues = [
             CheckIssue(
@@ -104,42 +153,26 @@ class SelfVerifierTests(unittest.TestCase):
         ]
         report = MonitoringReport(raw_text="支护结构顶部水平位移 原文片段")
 
-        class FakeOpenAI:
-            calls = 0
+        calls = {"count": 0}
+        lock = threading.Lock()
 
-            def __init__(self, *args, **kwargs):
-                self.chat = types.SimpleNamespace(
-                    completions=types.SimpleNamespace(create=self._create)
-                )
+        def fake_call(messages, **kwargs):
+            del kwargs
+            with lock:
+                calls["count"] += 1
+            batch_size = _parse_batch_size(messages)
+            verdicts = [{
+                "error_idx": idx,
+                "verdict": "downgrade" if idx % 2 == 0 else "confirm",
+                "reason": "OCR错列导致疑似误报" if idx % 2 == 0 else "确为报告错误",
+                "suspected_origin": "extraction" if idx % 2 == 0 else "report",
+            } for idx in range(batch_size)]
+            return json.dumps(verdicts, ensure_ascii=False)
 
-            def _create(self, model, messages, temperature, max_tokens, timeout):
-                FakeOpenAI.calls += 1
-                prompt = messages[1]["content"]
-                batch_size = int(re.search(r"本批共 (\d+) 个错误", prompt).group(1))
-                verdicts = []
-                for idx in range(batch_size):
-                    if idx % 2 == 0:
-                        verdicts.append({
-                            "error_idx": idx,
-                            "verdict": "downgrade",
-                            "reason": "OCR错列导致疑似误报",
-                            "suspected_origin": "extraction",
-                        })
-                    else:
-                        verdicts.append({
-                            "error_idx": idx,
-                            "verdict": "confirm",
-                            "reason": "确为报告错误",
-                            "suspected_origin": "report",
-                        })
-                return types.SimpleNamespace(
-                    choices=[types.SimpleNamespace(message=types.SimpleNamespace(content=json.dumps(verdicts, ensure_ascii=False)))]
-                )
-
-        with patch.dict(sys.modules, {"openai": types.SimpleNamespace(OpenAI=FakeOpenAI)}):
+        with patch("src.utils.llm_client.call_chat_completion", side_effect=fake_call):
             verified = verify_errors_with_llm(report, issues)
 
-        self.assertEqual(FakeOpenAI.calls, 5)
+        self.assertEqual(calls["count"], 5)
         self.assertEqual(verified[-1].severity, "warning")
         self.assertEqual(verified[0].suspected_source, "extraction")
 
@@ -158,36 +191,26 @@ class SelfVerifierTests(unittest.TestCase):
         ]
         report = MonitoringReport(raw_text="支护结构顶部水平位移 原文片段")
 
-        class FakeOpenAI:
-            calls = []
+        calls = []
 
-            def __init__(self, *args, **kwargs):
-                self.chat = types.SimpleNamespace(
-                    completions=types.SimpleNamespace(create=self._create)
-                )
+        def fake_call(messages, **kwargs):
+            del kwargs
+            batch_size = _parse_batch_size(messages)
+            calls.append(batch_size)
+            if batch_size > 1:
+                return None
+            return json.dumps([{
+                "error_idx": 0,
+                "verdict": "downgrade",
+                "reason": "拆单后确认更像提取误差",
+                "suspected_origin": "extraction",
+            }], ensure_ascii=False)
 
-            def _create(self, model, messages, temperature, max_tokens, timeout):
-                prompt = messages[1]["content"]
-                batch_size = int(re.search(r"本批共 (\d+) 个错误", prompt).group(1))
-                FakeOpenAI.calls.append(batch_size)
-                if batch_size > 1:
-                    raise TimeoutError("batch timeout")
-                verdicts = [{
-                    "error_idx": 0,
-                    "verdict": "downgrade",
-                    "reason": "拆单后确认更像提取误差",
-                    "suspected_origin": "extraction",
-                }]
-                return types.SimpleNamespace(
-                    choices=[types.SimpleNamespace(message=types.SimpleNamespace(content=json.dumps(verdicts, ensure_ascii=False)))]
-                )
-
-        with patch.dict(sys.modules, {"openai": types.SimpleNamespace(OpenAI=FakeOpenAI)}), \
-             patch("src.tools.self_verifier.time.sleep", return_value=None):
+        with patch("src.utils.llm_client.call_chat_completion", side_effect=fake_call):
             verified = verify_errors_with_llm(report, issues)
 
-        self.assertEqual(FakeOpenAI.calls[0], 2)
-        self.assertEqual(FakeOpenAI.calls.count(1), 2)
+        self.assertEqual(calls[0], 2)
+        self.assertEqual(calls.count(1), 2)
         self.assertTrue(all(issue.severity == "warning" for issue in verified))
 
     def test_self_verifier_parallel_mode_keeps_results_correct(self):
@@ -205,26 +228,18 @@ class SelfVerifierTests(unittest.TestCase):
         ]
         report = MonitoringReport(raw_text="支护结构顶部水平位移 原文片段")
 
-        class FakeOpenAI:
-            def __init__(self, *args, **kwargs):
-                self.chat = types.SimpleNamespace(
-                    completions=types.SimpleNamespace(create=self._create)
-                )
+        def fake_call(messages, **kwargs):
+            del kwargs
+            batch_size = _parse_batch_size(messages)
+            verdicts = [{
+                "error_idx": idx,
+                "verdict": "downgrade" if idx % 2 == 0 else "confirm",
+                "reason": "并发复核测试",
+                "suspected_origin": "logic" if idx % 2 == 0 else "report",
+            } for idx in range(batch_size)]
+            return json.dumps(verdicts, ensure_ascii=False)
 
-            def _create(self, model, messages, temperature, max_tokens, timeout):
-                prompt = messages[1]["content"]
-                batch_size = int(re.search(r"本批共 (\d+) 个错误", prompt).group(1))
-                verdicts = [{
-                    "error_idx": idx,
-                    "verdict": "downgrade" if idx % 2 == 0 else "confirm",
-                    "reason": "并发复核测试",
-                    "suspected_origin": "logic" if idx % 2 == 0 else "report",
-                } for idx in range(batch_size)]
-                return types.SimpleNamespace(
-                    choices=[types.SimpleNamespace(message=types.SimpleNamespace(content=json.dumps(verdicts, ensure_ascii=False)))]
-                )
-
-        with patch.dict(sys.modules, {"openai": types.SimpleNamespace(OpenAI=FakeOpenAI)}), \
+        with patch("src.utils.llm_client.call_chat_completion", side_effect=fake_call), \
              patch("src.config.SELF_VERIFY_MAX_PARALLEL", 2):
             verified = verify_errors_with_llm(report, issues)
 
@@ -249,36 +264,27 @@ class SelfVerifierTests(unittest.TestCase):
         report = MonitoringReport(raw_text="支护结构顶部水平位移 原文片段")
         events: list[dict] = []
 
-        class FakeOpenAI:
-            calls = 0
+        calls = {"count": 0}
 
-            def __init__(self, *args, **kwargs):
-                self.chat = types.SimpleNamespace(
-                    completions=types.SimpleNamespace(create=self._create)
-                )
+        def fake_call(messages, **kwargs):
+            del kwargs
+            calls["count"] += 1
+            batch_size = _parse_batch_size(messages)
+            return json.dumps([{
+                "error_idx": idx,
+                "verdict": "confirm",
+                "reason": "确认",
+                "suspected_origin": "report",
+            } for idx in range(batch_size)], ensure_ascii=False)
 
-            def _create(self, model, messages, temperature, max_tokens, timeout):
-                FakeOpenAI.calls += 1
-                prompt = messages[1]["content"]
-                batch_size = int(re.search(r"本批共 (\d+) 个错误", prompt).group(1))
-                verdicts = [{
-                    "error_idx": idx,
-                    "verdict": "confirm",
-                    "reason": "确认",
-                    "suspected_origin": "report",
-                } for idx in range(batch_size)]
-                return types.SimpleNamespace(
-                    choices=[types.SimpleNamespace(message=types.SimpleNamespace(content=json.dumps(verdicts, ensure_ascii=False)))]
-                )
-
-        with patch.dict(sys.modules, {"openai": types.SimpleNamespace(OpenAI=FakeOpenAI)}), \
+        with patch("src.utils.llm_client.call_chat_completion", side_effect=fake_call), \
              patch("src.config.SELF_VERIFY_MAX_ERRORS", 10), \
              patch("src.config.SELF_VERIFY_BATCH_SIZE", 5), \
              patch("src.config.SELF_VERIFY_MAX_PARALLEL", 1):
             verify_errors_with_llm(report, issues, progress_callback=events.append)
 
         self.assertTrue(any(evt.get("stage") == "truncated" for evt in events))
-        self.assertEqual(FakeOpenAI.calls, 2)
+        self.assertEqual(calls["count"], 2)
 
 
 if __name__ == "__main__":

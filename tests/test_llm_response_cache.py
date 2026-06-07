@@ -91,6 +91,23 @@ class LlmCacheStorageTests(unittest.TestCase):
             (cache_dir / "bad.json").write_text("not valid json {{{", encoding="utf-8")
             self.assertIsNone(load_cached_response(cache_dir, "bad"))
 
+    def test_short_valid_json_is_cached(self):
+        from src.utils.llm_cache import load_cached_response, save_cached_response
+
+        with tempfile.TemporaryDirectory() as td:
+            cache_dir = Path(td)
+            content = '{"tables":[]}'
+            save_cached_response(cache_dir, "k", content)
+            self.assertEqual(load_cached_response(cache_dir, "k"), content)
+
+    def test_short_non_json_still_rejected(self):
+        from src.utils.llm_cache import load_cached_response, save_cached_response
+
+        with tempfile.TemporaryDirectory() as td:
+            cache_dir = Path(td)
+            save_cached_response(cache_dir, "k", "出错了")
+            self.assertIsNone(load_cached_response(cache_dir, "k"))
+
 
 class LlmClientCacheIntegrationTests(unittest.TestCase):
     """call_chat_completion 与缓存的整合"""

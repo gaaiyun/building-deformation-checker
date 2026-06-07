@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 import warnings
@@ -29,13 +30,16 @@ sys.path.insert(0, str(ROOT))
 from src.utils.dotenv_loader import load_dotenv
 load_dotenv()
 
-import os
-
+from src import config as app_config
 from src.core import PipelineResult, RuntimeConfig, run_pipeline
 
 RESULTS_DIR = ROOT / "baseline" / "results"
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-LEGACY_SAMPLE_ROOT = Path("C:/Users/gaaiy/Desktop/建筑变形监测Agent")
+LEGACY_SAMPLE_ROOTS = [
+    Path(p)
+    for p in os.environ.get("BDC_SAMPLE_ROOTS", "").split(os.pathsep)
+    if p.strip()
+]
 
 TEST_CASES = [
     # (PDF 文件名, ground truth diff 文件名, 预期错误数)
@@ -53,9 +57,12 @@ def _resolve_pdf_path(pdf_name: str) -> Path:
     candidates = [
         ROOT / "test_pdfs" / pdf_name,
         ROOT / pdf_name,
-        LEGACY_SAMPLE_ROOT / "test_pdfs" / pdf_name,
-        LEGACY_SAMPLE_ROOT / pdf_name,
     ]
+    for legacy_root in LEGACY_SAMPLE_ROOTS:
+        candidates.extend([
+            legacy_root / "test_pdfs" / pdf_name,
+            legacy_root / pdf_name,
+        ])
     for path in candidates:
         if path.exists():
             return path
@@ -67,9 +74,10 @@ def build_runtime_config(pdf_path: str, quick: bool) -> RuntimeConfig:
     return RuntimeConfig(
         pdf_path=pdf_path,
         llm_api_key=os.environ.get("LLM_API_KEY", ""),
-        llm_base_url=os.environ.get("LLM_BASE_URL", "https://api.minimaxi.com/v1"),
-        llm_model=os.environ.get("LLM_MODEL", "MiniMax-M2.7-highspeed"),
+        llm_base_url=os.environ.get("LLM_BASE_URL", app_config.LLM_BASE_URL),
+        llm_model=os.environ.get("LLM_MODEL", app_config.LLM_MODEL),
         paddle_ocr_token=os.environ.get("PADDLE_OCR_TOKEN", ""),
+        paddle_ocr_model=os.environ.get("PADDLE_OCR_MODEL", app_config.PADDLE_OCR_MODEL),
         paddle_ocr_use_cache=True,
         use_ocr=False,           # XLSX 转的 PDF 是文字版，不需要 OCR
         prefer_ocr=False,

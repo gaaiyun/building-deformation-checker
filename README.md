@@ -272,9 +272,13 @@ export PADDLE_OCR_MODEL="PaddleOCR-VL-1.6"
 pip install keyring
 ```
 
-如果系统不支持 keyring（少数 headless Linux），settings_store 会自动回退到 JSON 存储并打印 warning。
+如果系统不支持 keyring（少数 headless Linux），settings_store 会拒绝把新密钥明文写入 JSON，并在日志中提示；此时请改用环境变量或启用系统 keyring 后再保存。
 
 旧配置迁移：早期版本可能把 API key 写在 JSON 里；当前桌面版和 Streamlit 会优先读入并迁移到 keyring，旧 JSON 中的明文密钥在下次保存时会被清除。
+
+### 本地样本与旧工程备份
+
+真实 PDF/XLSX/DOCX 样本、历史 `.env`、打包输出和回归报告必须保存在 git 仓库外，仅用于本机追溯差异，禁止上传到 GitHub 或随安装包分发。需要让 baseline 脚本复用仓库外样本时，可用 `BDC_SAMPLE_ROOTS` 指定一个或多个样本根目录（Windows 用分号分隔）。
 
 ### 常用 RuntimeConfig 字段
 
@@ -318,6 +322,8 @@ print(result.final_md)
 2. 所有进度、日志、结果一律走 `st.session_state`，用 UUID 跟踪任务。
 3. 用 `@st.fragment(run_every=1.0)` 每秒轮询后台状态，无需用户操作。
 4. 完成后所有产物保留在 `st.session_state.result`，下载按钮触发的 rerun 不会丢。
+5. 上传文件按内容哈希去重，重复点击不会误判为新任务；Markdown、DOCX、HTML 报告均在完成态持续可下载。
+6. Web UI 与桌面版共用 DeepSeek / MiniMax / 自定义 OpenAI 兼容端点配置，以及 PaddleOCR-VL-1.6 Token、模型和缓存开关。
 
 ```mermaid
 stateDiagram
@@ -369,7 +375,7 @@ sequenceDiagram
 
 ## 安全设计
 
-- **API Key 优先不落盘**：敏感凭证优先存系统 keyring；如果系统 keyring 不可用，程序会按兼容模式回退到 JSON，交付环境应安装/启用 keyring。
+- **API Key 不明文落盘**：敏感凭证只写系统 keyring；如果系统 keyring 不可用，程序不会把新密钥回退写入 JSON，交付环境应安装/启用 keyring，或改用环境变量。
 - **运行隔离边界**：桌面端单窗口后台运行最稳；Streamlit 当前做了同进程单任务保护，避免不同用户同时跑不同 key/model 时互相覆盖全局配置。
 - **输入校验前置**：流水线先校验 PDF 文件存在再同步全局配置，避免污染 `src.config` 后才报错。
 - **取消事件协作式**：`cancel_event` 在步骤边界检查；正在进行的 LLM/OCR HTTP 请求需要等当前调用返回后才会响应取消。
@@ -404,14 +410,15 @@ python -m pytest tests/test_default_provider_config.py tests/test_streamlit_app_
 | `test_desktop_main_window.py` | PySide6 offscreen 实例化、专业主题样式、配置面板到 RuntimeConfig、三态主窗、结果面板渲染 |
 | `test_packaging_assets.py` | 桌面打包脚本、WiX MSI 模板、密钥不内置、per-user 安装范围 |
 | `test_pdf_extractor.py` | OCR/文本层路由、清洗、缓存命中 |
-| `test_llm_parser.py` | JSON 提取容错、分块策略、`_extract_json_from_response` |
+| `test_llm_parser.py` | JSON 提取容错、分块策略、非 dict / null 分块防御、`_extract_json_from_response` |
 | `test_calculation_checker.py` | 单位换算、间隔仲裁、跨期连续性、深层位移 abs 比较 |
-| `test_cross_period_continuity.py` | 多期累计递推、同日 AM/PM 跳过、反向符号口径 |
+| `test_cross_period_continuity.py` | 多期累计递推、同日 AM/PM 跳过、反向符号口径、占位复制值跳过 |
 | `test_statistics_checker.py` | 正/负方向最大、跨表引用、宽表本次变化/当前累计口径 |
-| `test_logic_and_self_verifier.py` | 安全状态语义匹配、汇总口径 warning、Two-LLM 复核流程 |
+| `test_logic_and_self_verifier.py` | 安全状态语义匹配、阈值符号展示、汇总口径 warning、Two-LLM 复核流程 |
 | `test_table_recognition_fixes.py` | 异常表识别、单位推断回归 |
 | `test_step78_timeout_fix.py` | Step 6 / Step 7 LLM 超时与降级 |
 | `test_report_generator.py` | Markdown 渲染快照 |
+| `test_baseline_scripts.py` | 原生 PDF / Excel 转 PDF 回归脚本、召回率评分工具、无缓存参数透传 |
 
 真实 PDF、Excel 转 PDF 和 OCR 缓存属于本地回归材料，默认放在 `output/` 并被 git ignore；交付前可按需在本机跑完整回归并保留证据目录。
 
@@ -426,6 +433,31 @@ python -m pytest tests/test_default_provider_config.py tests/test_streamlit_app_
 | 总计 | 11 | 11/11 有可用报告 | `all_results_background_corrected.json` 保存结构化证据 |
 
 关键结论：PaddleOCR-VL-1.6 链路可用，但对 Excel 导出的数字型大表格 PDF 不应默认强制 OCR；推荐“文本层优先，质量不足再 PaddleOCR”。质安模板错误/正确对照最符合预期（错误版 2 error，正确版 0 error）；深工勘和展誉需要补充逐字段 ground truth 才能做精确检出率评价。
+
+### 旧桌面分支同步回归（2026-06-07）
+
+从旧桌面工程恢复并对比后，只迁入仍适用于当前主线的修复：LLM 分块返回 `null`/非对象时降级、短 JSON 缓存判定、Step 6 统一 LLM 调用与缓存隔离、阈值负号展示、最大速率符号不一致提示、跨页占位复制值连续性跳过，以及桌面端关闭事件的线程安全收尾。旧分支里与当前主线相冲突的“单期汇总必须 error”等策略未迁入。
+
+本轮维护同步修复了 Streamlit 后台任务注册表：后台线程句柄改由 `st.cache_resource` 保存，避免 rerun 后“上传后点击检查没反应 / 任务直接失败”的状态丢失问题；失败态也会显示明确错误信息和日志入口。
+
+### 交付验证回归（2026-06-07）
+
+本机交付前完成以下验证，所有命令均在当前主仓库执行，未使用旧桌面工程副本作为源码：
+
+| 项目 | 结果 | 证据 |
+|------|------|------|
+| 源码目录隔离 | 通过 | 当前主仓库为唯一打包源码；旧工程与真实样本只保存在仓库外本机备份，不纳入 git 或安装包 |
+| pytest 全量回归 | 通过 | `338 passed, 4 skipped` |
+| Streamlit UI smoke | 通过 | Playwright 启动页面、检查城安物联品牌、DeepSeek/PaddleOCR 配置、上传 PDF、点击检查 |
+| Streamlit 闭环（本地 mock LLM） | 通过 | 跑到完成态，Markdown / Word / HTML 三个下载按钮可见；截图 `output/streamlit_mock_latest_bottom.png` |
+| Streamlit 闭环（真实 DeepSeek） | 通过 | 真实上传、真实点击、真实 API，完成态三种下载可见；截图 `output/streamlit_deepseek_real_done.png` |
+| 核心 pipeline（真实 DeepSeek，无缓存） | 通过 | 小样本 smoke 成功；此前真实报告无缓存回归 16 张数据表，Step 7 最终审核完成 |
+| PaddleOCR-VL-1.6 强制 OCR | 通过 | 真实 PaddleOCR + DeepSeek 在真实报告样本跑通，12 张表，报告输出到 `output/paddle_report_final_smoke_20260607/` |
+| 桌面 QThread worker（真实 DeepSeek，无缓存） | 通过 | `PipelineWorker -> QThread -> run_pipeline` 完成，报告输出到 `output/desktop_worker_deepseek_20260607/` |
+| 打包 EXE | 通过 | `dist/BuildingDeformationChecker.exe` 启动后窗口标题为“建筑变形监测报告核验台 · 桌面版”，进程响应正常 |
+| MSI 安装包 | 通过 | `scripts/verify_msi.ps1 -Install` 静默安装、启动安装后 EXE、静默卸载通过；SHA256 由 `verify_msi.ps1` 输出 |
+
+辅助工具：`scripts/mock_openai_server.py` 提供本地 OpenAI 兼容 mock 服务，只用于 UI/打包烟测，不包含任何真实 key。
 
 ---
 

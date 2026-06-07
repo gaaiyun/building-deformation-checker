@@ -248,6 +248,28 @@ class CrossPeriodContinuityTests(unittest.TestCase):
         cross = [i for i in issues if i.field_name == "跨期累计连续性"]
         self.assertEqual(len(cross), 0, "同一日历日不同监测次数不应触发跨期检查")
 
+    def test_value_copy_placeholder_across_dates_not_paired(self):
+        t1 = _make_period_table(
+            "周边建筑竖向位移",
+            "2026-05-14",
+            [
+                MeasurementPoint(point_id="SC1", cumulative_change=-1.06, current_change=0.77),
+                MeasurementPoint(point_id="SC2", cumulative_change=-1.47, current_change=0.50),
+            ],
+        )
+        t2 = _make_period_table(
+            "周边建筑竖向位移",
+            "2026-05-15",
+            [
+                MeasurementPoint(point_id="SC1", cumulative_change=-1.06, current_change=0.77),
+                MeasurementPoint(point_id="SC2", cumulative_change=-1.47, current_change=0.50),
+            ],
+        )
+        issues = []
+        check_cross_period_continuity(MonitoringReport(tables=[t1, t2]), issues)
+        cross = [issue for issue in issues if issue.field_name == "跨期累计连续性"]
+        self.assertEqual(len(cross), 0, "逐值复制的占位期不应触发跨期检查")
+
     def test_deep_displacement_table_not_affected(self):
         """深层位移走自己的 prev/current 路径，不应被本函数检查"""
         from src.models.data_models import DeepDisplacementPoint

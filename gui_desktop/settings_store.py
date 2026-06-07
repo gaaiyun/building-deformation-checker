@@ -3,7 +3,8 @@
 存储策略 v2（带向后兼容）:
     - **敏感字段**（`llm_api_key`、`paddle_ocr_token`）首选 keyring（Windows
       Credential Manager / macOS Keychain / Linux Secret Service），明文从不
-      落盘。keyring 不可用时回退到 JSON 文件（与 v1 行为一致）。
+      落盘。keyring 不可用时不会保存新密钥，请改用环境变量或先启用系统
+      keyring。
     - **非敏感字段**（模型名、URL、超时配置等）写 JSON，方便用户/团队复制配置。
     - 启动时若发现 JSON 里残留 v1 留下的明文 API key，自动迁移到 keyring 并
       清除 JSON 里的明文（一次性迁移，不重复）。
@@ -87,7 +88,7 @@ class _KeyringBackend:
             import keyring  # noqa: F401
             return True
         except Exception as exc:
-            logger.warning("keyring 不可用，敏感字段将回退到 JSON 存储: %s", exc)
+            logger.warning("keyring 不可用，敏感字段不会写入 settings.json: %s", exc)
             return False
 
     def get(self, key: str) -> Optional[str]:
@@ -101,7 +102,7 @@ class _KeyringBackend:
             return None
 
     def set(self, key: str, value: str) -> bool:
-        """返回是否真的写入了 keyring；失败时调用方应回退到 JSON。"""
+        """返回是否真的写入了 keyring；失败时调用方不应明文落盘。"""
         if not self._available:
             return False
         try:
@@ -116,7 +117,7 @@ class _KeyringBackend:
                     pass
             return True
         except Exception as exc:
-            logger.warning("keyring 写入失败 (%s)，回退到 JSON: %s", key, exc)
+            logger.warning("keyring 写入失败 (%s)，未写入 settings.json: %s", key, exc)
             return False
 
 
@@ -203,7 +204,7 @@ def load_settings() -> dict[str, Any]:
 def save_settings(settings: dict[str, Any]) -> None:
     """持久化用户配置。
 
-    敏感字段优先写入 keyring；keyring 不可用时回退到 JSON（v1 兼容路径）。
+    敏感字段只写入 keyring；keyring 不可用时不明文回退到 JSON。
     非敏感字段始终写 JSON。
     """
     path = _config_file()
@@ -215,8 +216,7 @@ def save_settings(settings: dict[str, Any]) -> None:
         if k in _SENSITIVE_KEYS:
             stored_to_keyring = _keyring_backend.set(k, v or "")
             if not stored_to_keyring:
-                # keyring 不可用 → 回退到 JSON（保留 v1 行为）
-                json_payload[k] = v
+                logger.warning("keyring 不可用，敏感字段 %s 未写入 settings.json", k)
         else:
             json_payload[k] = v
 

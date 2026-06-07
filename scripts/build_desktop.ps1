@@ -9,6 +9,14 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $root
 
+$pyinstallerConfigDir = if ($env:PYINSTALLER_CONFIG_DIR) {
+    $env:PYINSTALLER_CONFIG_DIR
+} else {
+    Join-Path $root "build\pyinstaller-cache"
+}
+New-Item -ItemType Directory -Force -Path $pyinstallerConfigDir | Out-Null
+$env:PYINSTALLER_CONFIG_DIR = $pyinstallerConfigDir
+
 function Invoke-Native {
     param(
         [Parameter(Mandatory = $true)]
@@ -77,3 +85,7 @@ if (-not (Test-Path -LiteralPath $msi)) {
 }
 
 Write-Host "==> MSI ready: $msi"
+
+$stableMsi = Join-Path $root "dist\BuildingDeformationChecker.msi"
+Copy-Item -LiteralPath $msi -Destination $stableMsi -Force
+Write-Host "==> MSI stable copy ready: $stableMsi"

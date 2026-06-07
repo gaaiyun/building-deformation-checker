@@ -44,17 +44,20 @@ def _build_prompt(batch: list[CheckIssue], raw_text: str, context_chars: int) ->
         + str(len(batch))
         + " 个错误，error_idx 请使用 0 到 "
         + str(len(batch) - 1)
-        + "。请逐一确认：\n"
-        "- 如果错误确实存在，回复 'confirm'\n"
-        "- 如果是误报（例如数据提取错误、列错位、分页拆表、精度问题、单位换算导致），回复 'dismiss'\n"
-        "- 如果不确定，回复 'downgrade'（降为警告）\n\n"
+        + "。请逐一复核（默认倾向 confirm 保留，宁可多报、也不要漏掉真错误）：\n"
+        "- 错误确实存在，或原文片段中没有明确的提取错误证据 → 回复 'confirm'\n"
+        "- 仅当原文片段中能直接看到 OCR 串字、列错位、分页拆表或单位换算问题 → 回复 'dismiss'\n"
+        "- 确实拿不准 → 回复 'downgrade'（降为警告，仍对稽核员可见）\n\n"
         "同时请给出 suspected_origin，取值只能是 report / extraction / logic。\n"
         "- report: 报告原文或表内数据确有错误\n"
         "- extraction: OCR、列映射、分页拆表、单位理解错误导致的误报\n"
         "- logic: 规则边界、统计口径、匹配逻辑导致的误报或不确定\n\n"
         "正负号代表方向不代表大小。高程数据单位m与mm之间存在精度损失。\n"
         "水位初始基准可能与建设初期不同。\n"
-        "若属于同一监测项多页表的统计引用、OCR/提取错列、列映射错误，应倾向 dismiss 或 downgrade，并在 reason 中说明。\n\n"
+        "累计变化量、变化速率、跨期累计连续性、最大/最小值统计等数值不符，"
+        "通常就是被查出的真实数据错误，应优先 confirm。\n"
+        "报告填写的最大/最小值点与按数据计算出的真实最值点不同，本身不是列错位的证据，"
+        "恰恰可能是被注入的真错误；只有能从原文指出具体错列证据时才 dismiss。\n\n"
         + "\n---\n".join(error_descriptions)
         + "\n\n返回JSON数组: "
         '[{"error_idx":0,"verdict":"confirm|dismiss|downgrade","reason":"简要原因","suspected_origin":"report|extraction|logic"}]'
@@ -74,51 +77,44 @@ def _request_verdicts(
     batch_index: int = 0,
     total_batches: int = 0,
 ) -> tuple[list[dict] | None, Exception | None]:
-    """Request verdicts from LLM with retry."""
-    last_exc = None
-    for attempt in range(1 + max_retries):
-        try:
-            resp = client.chat.completions.create(
-                model=cfg.LLM_MODEL,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "你是建筑变形监测数据审核专家。"
-                            "请返回纯JSON，并准确区分 report / extraction / logic 三类来源。"
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.1,
-                max_tokens=max_tokens,
-                timeout=timeout_sec,
-            )
-            raw = resp.choices[0].message.content or ""
-            raw = re.sub(r'<think(?:ing)?>.*?</think(?:ing)?>', '', raw, flags=re.DOTALL).strip()
-            m = re.search(r'\[.*\]', raw, re.DOTALL)
-            if m:
-                return json.loads(m.group()), None
-            last_exc = ValueError("LLM 未返回可解析 JSON 数组")
-        except Exception as e:
-            last_exc = e
+    """Request verdicts through the shared cached LLM client."""
+    del client, cfg, backoff_sec, progress_callback, batch_index, total_batches
+    from src.utils.llm_client import call_chat_completion
 
-        if attempt < max_retries:
-            backoff = backoff_sec * (2 ** attempt)
-            logger.warning("自验证本批请求失败，%ds 后重试: %s", backoff, last_exc)
-            if progress_callback:
-                progress_callback({
-                    "stage": "batch_retry",
-                    "batch_index": batch_index,
-                    "total_batches": total_batches,
-                    "attempt": attempt + 2,
-                    "max_attempts": max_retries + 1,
-                    "error": str(last_exc),
-                })
-            time.sleep(backoff)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是建筑变形监测数据审核专家。"
+                "请返回纯JSON，并准确区分 report / extraction / logic 三类来源。"
+            ),
+        },
+        {"role": "user", "content": prompt},
+    ]
+    try:
+        raw = call_chat_completion(
+            messages,
+            timeout=timeout_sec,
+            max_tokens=max_tokens,
+            max_retries=max_retries,
+            temperature=0.1,
+        )
+    except Exception as exc:
+        logger.warning("自验证本批LLM调用异常 (non-fatal): %s", exc)
+        return None, exc
 
-    logger.warning("自验证本批LLM调用失败 (non-fatal): %s", last_exc)
-    return None, last_exc
+    if raw is None:
+        error = RuntimeError("call_chat_completion 返回 None (API 调用失败)")
+        logger.warning("自验证本批LLM调用失败 (non-fatal): %s", error)
+        return None, error
+
+    match = re.search(r"\[.*\]", raw, re.DOTALL)
+    if not match:
+        return None, ValueError("LLM 未返回可解析 JSON 数组")
+    try:
+        return json.loads(match.group()), None
+    except json.JSONDecodeError as exc:
+        return None, exc
 
 
 def _apply_verdicts(
@@ -176,14 +172,10 @@ def _verify_batch_task(
     context_chars: int,
 ) -> dict:
     """Verify one batch and fall back to single-item verification if needed."""
-    import src.config as cfg
-    from src.utils.llm_client import create_openai_client
-
-    client = create_openai_client(max_retries=0)
     prompt = _build_prompt(batch, raw_text, context_chars)
     verdicts, last_exc = _request_verdicts(
-        client,
-        cfg,
+        None,
+        None,
         prompt,
         timeout_sec=timeout_sec,
         max_retries=max_retries,
@@ -209,12 +201,11 @@ def _verify_batch_task(
 
     logger.warning("自验证批次失败，拆分为单条重试")
     segments: list[tuple[list[CheckIssue], list[dict]]] = []
-    single_client = create_openai_client(max_retries=0)
     final_exc = last_exc
     for single_issue in batch:
         single_verdicts, single_exc = _request_verdicts(
-            single_client,
-            cfg,
+            None,
+            None,
             _build_prompt([single_issue], raw_text, context_chars),
             timeout_sec=max(30, timeout_sec),
             max_retries=0,

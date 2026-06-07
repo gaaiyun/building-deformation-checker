@@ -300,8 +300,9 @@ def check_safety_status(report: MonitoringReport, issues: list[CheckIssue]) -> N
                     message=(
                         f"安全状态判定有误: 累计={_fmt(pt.cumulative_change)}, "
                         f"速率={_fmt(pt.change_rate, 3)}, "
-                        f"报警值={_fmt(threshold.warning_value)}, "
-                        f"控制值={_fmt(threshold.control_value)} → 应为 {should_be}"
+                        f"报警值={_fmt(abs(threshold.warning_value) if threshold.warning_value is not None else None)}, "
+                        f"控制值={_fmt(abs(threshold.control_value) if threshold.control_value is not None else None)} "
+                        f"→ 应为 {should_be}"
                     ),
                 ))
             elif reported != "正常" and should_be == "正常":

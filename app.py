@@ -12,6 +12,7 @@ import io
 import hashlib
 import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -74,6 +75,20 @@ PADDLE_MODEL_OPTIONS = [
 ]
 
 
+def _streamlit_supports_width_stretch() -> bool:
+    match = re.match(r"^(\d+)\.(\d+)", getattr(st, "__version__", "0.0"))
+    if not match:
+        return False
+    major, minor = (int(match.group(1)), int(match.group(2)))
+    return (major, minor) >= (1, 55)
+
+
+def _stretch_kwargs() -> dict[str, object]:
+    if _streamlit_supports_width_stretch():
+        return {"width": "stretch"}
+    return {"use_container_width": True}
+
+
 # ── 日志：通过 list 串接到 session_state ──────────────────────
 class _ListLogHandler(logging.Handler):
     def __init__(self, target_list: list):
@@ -88,30 +103,29 @@ class _ListLogHandler(logging.Handler):
 
 
 # ── 全局后台任务注册表（进程内单例，活在所有 rerun 之间）──────
-# 注意：Streamlit 1.55+ 的 rerun 会重新执行整个脚本，但模块级变量保留在内存中。
-# session_state 仍是首选，但 thread 句柄不能跨 session 共享，所以放在模块级 dict。
-_BACKGROUND_TASKS: dict[str, dict] = {}
-_TASKS_LOCK = threading.Lock()
-
-
-def _register_task(task_id: str, payload: dict) -> None:
-    with _TASKS_LOCK:
-        _BACKGROUND_TASKS[task_id] = payload
+# Streamlit 会反复执行脚本文件，普通模块级 dict 在部分版本/启动方式下会被重建。
+# cache_resource 返回同一个 Python 对象，用来保存 thread 句柄和共享锁。
+@st.cache_resource(show_spinner=False)
+def _task_registry() -> dict[str, object]:
+    return {"tasks": {}, "lock": threading.Lock()}
 
 
 def _get_task(task_id: str) -> Optional[dict]:
-    with _TASKS_LOCK:
-        return _BACKGROUND_TASKS.get(task_id)
+    registry = _task_registry()
+    with registry["lock"]:
+        return registry["tasks"].get(task_id)
 
 
 def _delete_task(task_id: str) -> None:
-    with _TASKS_LOCK:
-        _BACKGROUND_TASKS.pop(task_id, None)
+    registry = _task_registry()
+    with registry["lock"]:
+        registry["tasks"].pop(task_id, None)
 
 
 def _has_running_tasks() -> bool:
-    with _TASKS_LOCK:
-        return any(task["thread"].is_alive() for task in _BACKGROUND_TASKS.values())
+    registry = _task_registry()
+    with registry["lock"]:
+        return bool(registry["tasks"])
 
 
 # ── Session State 初始化 ─────────────────────────────────────
@@ -247,9 +261,7 @@ def _start_pipeline(cfg: RuntimeConfig, *, llm_use_cache: bool) -> str:
                 os.environ["PADDLE_OCR_USE_CACHE"] = old_paddle_cache
 
     thread = threading.Thread(target=worker, daemon=True, name=f"pipeline-{task_id[:8]}")
-    thread.start()
-
-    _register_task(task_id, {
+    task_payload = {
         "thread": thread,
         "progress": progress_box,
         "logs": logs,
@@ -257,7 +269,17 @@ def _start_pipeline(cfg: RuntimeConfig, *, llm_use_cache: bool) -> str:
         "cancel_event": cancel_event,
         "started_at": time.time(),
         "llm_use_cache": llm_use_cache,
-    })
+    }
+    registry = _task_registry()
+    with registry["lock"]:
+        if registry["tasks"]:
+            raise RuntimeError("当前进程已有任务运行。为避免不同用户配置互相覆盖，请等待当前任务结束。")
+        registry["tasks"][task_id] = task_payload
+    try:
+        thread.start()
+    except Exception:
+        _delete_task(task_id)
+        raise
     return task_id
 
 
@@ -425,6 +447,16 @@ st.markdown("""
 .app-kpi b { display:block; color:#0f2f5f; }
 .app-kpi span { color:#6b7280; font-size: 12px; }
 section[data-testid="stSidebar"] { background: #ffffff; border-right: 1px solid #e5e7eb; }
+div[data-testid="stButton"] > button[kind="primary"] {
+  background: #0b5cab;
+  border-color: #0b5cab;
+  color: #ffffff;
+}
+div[data-testid="stButton"] > button[kind="primary"]:hover {
+  background: #083f86;
+  border-color: #083f86;
+  color: #ffffff;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -445,7 +477,7 @@ st.markdown("""
 # ── 侧边栏 ───────────────────────────────────────────────────
 with st.sidebar:
     if APP_LOGO_PATH.exists():
-        st.image(str(APP_LOGO_PATH), use_container_width=True)
+        st.image(str(APP_LOGO_PATH), **_stretch_kwargs())
     st.caption(APP_SUBTITLE)
     st.header("运行设置")
 
@@ -477,7 +509,6 @@ with st.sidebar:
         )
         llm_use_cache = st.toggle(
             "复用 LLM 缓存",
-            value=st.session_state.get("cfg_llm_cache", True),
             key="cfg_llm_cache",
         )
 
@@ -498,20 +529,20 @@ with st.sidebar:
             key="cfg_paddle_model",
         )
         paddle_ocr_use_cache = st.toggle(
-            "复用 OCR 缓存", value=st.session_state.get("cfg_paddle_cache", True),
+            "复用 OCR 缓存",
             key="cfg_paddle_cache",
         )
         paddle_ocr_use_async = st.toggle(
-            "使用异步 API", value=st.session_state.get("cfg_paddle_async", True),
+            "使用异步 API",
             key="cfg_paddle_async",
         )
         st.caption("实测建议：数字型表格 PDF 默认走 pdfplumber；扫描件或文本层质量差时再启用 PaddleOCR。")
 
     c_save, c_reset = st.columns(2)
-    if c_save.button("保存配置", use_container_width=True):
+    if c_save.button("保存配置", **_stretch_kwargs()):
         save_settings(_current_settings_payload())
         st.success("已保存。API Key/Token 优先进入系统 keyring。")
-    if c_reset.button("DeepSeek 默认", use_container_width=True):
+    if c_reset.button("DeepSeek 默认", **_stretch_kwargs()):
         st.session_state.cfg_llm_provider = "DeepSeek"
         _apply_llm_provider()
         st.rerun()
@@ -520,7 +551,6 @@ with st.sidebar:
     ocr_mode = st.radio(
         "PDF 提取方式",
         ["优先 pdfplumber", "优先 PaddleOCR", "强制 PaddleOCR"],
-        index=0,
         key="cfg_ocr_mode",
     )
     use_ocr_flag = ocr_mode == "强制 PaddleOCR"
@@ -530,17 +560,14 @@ with st.sidebar:
     st.divider()
     skip_self_verify = st.checkbox(
         "跳过 AI 自验证 (Step 6, 快 30%)",
-        value=st.session_state.get("cfg_skip_self_verify", False),
         key="cfg_skip_self_verify",
     )
     skip_ai_review = st.checkbox(
         "跳过 AI 最终审核 (Step 7)",
-        value=st.session_state.get("cfg_skip_ai_review", False),
         key="cfg_skip_ai_review",
     )
     fresh_run = st.checkbox(
         "从头测试（禁用 LLM/OCR 缓存）",
-        value=st.session_state.get("cfg_fresh_run", False),
         key="cfg_fresh_run",
     )
 
@@ -572,6 +599,10 @@ def _sync_task_state() -> None:
     task = _get_task(tid)
     if not task:
         # 任务被清理（不应发生）
+        st.session_state.result = PipelineResult(
+            success=False,
+            error_message="后台任务状态丢失，请返回首页重新上传并检查；如重复出现，请提交运行日志。",
+        )
         st.session_state.task_state = "failed"
         return
 
@@ -616,7 +647,7 @@ if st.session_state.task_state == "idle":
         if not can_run:
             st.warning("请先在侧边栏填写 API Key / Base URL / 模型 ID")
 
-        if st.button("🚀 开始检查", type="primary", use_container_width=True,
+        if st.button("🚀 开始检查", type="primary", **_stretch_kwargs(),
                      disabled=not can_run):
             if _has_running_tasks():
                 st.warning("当前进程已有任务运行。为避免不同用户配置互相覆盖，请等待当前任务结束。")
@@ -675,7 +706,7 @@ elif st.session_state.task_state == "running":
         _render_log_tail(log_container, st.session_state.log_lines)
 
         cancel_col, _ = st.columns([1, 5])
-        if cancel_col.button("取消", use_container_width=True, key="btn_cancel_running"):
+        if cancel_col.button("取消", **_stretch_kwargs(), key="btn_cancel_running"):
             _cancel_current_task()
             st.info("已请求取消，当前 LLM/OCR 请求返回后会停止。")
 
@@ -692,7 +723,7 @@ elif st.session_state.task_state == "done":
     if uploaded is not None and uploaded_signature != st.session_state.get("pdf_signature"):
         # 用户上传了新 PDF，提示重新运行
         st.info(f"已检测到新文件：**{uploaded.name}** — 点击下方按钮处理新 PDF。")
-        if st.button("🔄 处理新 PDF", type="primary", use_container_width=True):
+        if st.button("🔄 处理新 PDF", type="primary", **_stretch_kwargs()):
             # 重置状态准备启动新任务
             _store_uploaded_pdf(uploaded)
             st.session_state.task_state = "idle"
@@ -742,17 +773,7 @@ elif st.session_state.task_state == "done":
     st.subheader("导出检查报告")
     pdf_stem = Path(st.session_state.pdf_name or "report.pdf").stem
 
-    @st.cache_data(show_spinner=False)
-    def _cache_docx(md: str, errors_count: int, warnings_count: int, report_signature: str) -> bytes:
-        # 缓存键基于 report.project_name 等不变量，避免每次 rerun 重生成
-        return generate_docx(md, result.report, result.errors, result.warnings)
-
-    docx_bytes = _cache_docx(
-        result.final_md,
-        len(result.errors),
-        len(result.warnings),
-        f"{getattr(result.report, 'project_name', '')}|{getattr(result.report, 'report_number', '')}",
-    )
+    docx_bytes = generate_docx(result.final_md, result.report, result.errors, result.warnings)
 
     html_content = generate_html(
         result.final_md,
@@ -767,7 +788,7 @@ elif st.session_state.task_state == "done":
             data=result.final_md,
             file_name=f"{pdf_stem}_检查报告.md",
             mime="text/markdown",
-            use_container_width=True,
+            **_stretch_kwargs(),
             key="dl_md",
         )
     with dl2:
@@ -776,7 +797,7 @@ elif st.session_state.task_state == "done":
             data=docx_bytes,
             file_name=f"{pdf_stem}_检查报告.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            use_container_width=True,
+            **_stretch_kwargs(),
             key="dl_docx",
         )
     with dl3:
@@ -785,11 +806,11 @@ elif st.session_state.task_state == "done":
             data=html_content,
             file_name=f"{pdf_stem}_检查报告.html",
             mime="text/html",
-            use_container_width=True,
+            **_stretch_kwargs(),
             key="dl_html",
         )
     with dl_new:
-        if st.button("🆕 新建任务", use_container_width=True, key="btn_new_task"):
+        if st.button("🆕 新建任务", **_stretch_kwargs(), key="btn_new_task"):
             st.session_state.task_state = "idle"
             st.session_state.task_id = None
             st.session_state.result = None

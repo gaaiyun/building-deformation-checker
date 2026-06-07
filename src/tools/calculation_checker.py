@@ -440,6 +440,32 @@ def check_anchor_force(
             ))
 
 
+def _pair_equal(a, b, tol: float = 1e-6) -> bool:
+    if a is None and b is None:
+        return True
+    if a is None or b is None:
+        return False
+    return abs(a - b) <= tol
+
+
+def _is_value_copy(t1: MonitoringTable, t2: MonitoringTable) -> bool:
+    """Return True when a later period is a multi-point placeholder copy."""
+    common = 0
+    t1_by_id = {point.point_id: point for point in t1.points if point.point_id}
+    for point2 in t2.points:
+        if not point2.point_id:
+            continue
+        point1 = t1_by_id.get(point2.point_id)
+        if point1 is None:
+            continue
+        if not _pair_equal(point1.current_change, point2.current_change):
+            return False
+        if not _pair_equal(point1.cumulative_change, point2.cumulative_change):
+            return False
+        common += 1
+    return common >= 2
+
+
 def check_cross_period_continuity(
     report: MonitoringReport,
     issues: list[CheckIssue],
@@ -493,6 +519,8 @@ def check_cross_period_continuity(
             n_date_key = _calendar_date_key(n_date)
             n1_date_key = _calendar_date_key(n1_date)
             if n_date_key and n_date_key == n1_date_key:
+                continue
+            if _is_value_copy(n_tbl, n1_tbl):
                 continue
 
             n_cums = {

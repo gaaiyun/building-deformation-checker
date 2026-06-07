@@ -1,6 +1,6 @@
 """验证 Step 7/8 超时配置修复 — 不依赖真实 PDF 和 LLM API"""
 import unittest
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import patch
 import time
 
 class TestConfigNoDuplicates(unittest.TestCase):
@@ -40,22 +40,16 @@ class TestConfigNoDuplicates(unittest.TestCase):
 class TestSelfVerifierTimeoutPropagation(unittest.TestCase):
     """验证自验证器正确传递超时值到 LLM 调用"""
 
-    @patch("openai.OpenAI")
-    def test_batch_timeout_uses_config_value(self, mock_openai_cls):
+    @patch("src.utils.llm_client.call_chat_completion")
+    def test_batch_timeout_uses_config_value(self, mock_call):
         """批次请求应使用 SELF_VERIFY_TIMEOUT_SEC=120"""
-        # 需要重新 import 以使 mock 生效
         import importlib
         import src.tools.self_verifier as sv_mod
         importlib.reload(sv_mod)
         from src.tools.self_verifier import _verify_batch_task
         from src.models.data_models import CheckIssue
 
-        mock_client = MagicMock()
-        mock_openai_cls.return_value = mock_client
-        mock_resp = MagicMock()
-        mock_resp.choices = [MagicMock()]
-        mock_resp.choices[0].message.content = '[{"error_idx":0,"verdict":"confirm","reason":"ok","suspected_origin":"report"}]'
-        mock_client.chat.completions.create.return_value = mock_resp
+        mock_call.return_value = '[{"error_idx":0,"verdict":"confirm","reason":"ok","suspected_origin":"report"}]'
 
         issue = CheckIssue(
             table_name="测试表", point_id="P1", field_name="累计变化",
@@ -72,12 +66,12 @@ class TestSelfVerifierTimeoutPropagation(unittest.TestCase):
             context_chars=200,
         )
 
-        create_call = mock_client.chat.completions.create.call_args
+        create_call = mock_call.call_args
         self.assertEqual(create_call.kwargs.get("timeout"), 120,
             "批次请求超时应为120秒")
 
-    @patch("openai.OpenAI")
-    def test_single_retry_timeout_not_capped_at_30(self, mock_openai_cls):
+    @patch("src.utils.llm_client.call_chat_completion")
+    def test_single_retry_timeout_not_capped_at_30(self, mock_call):
         """单条重试超时不应被限制在30秒"""
         import importlib
         import src.tools.self_verifier as sv_mod
@@ -85,20 +79,14 @@ class TestSelfVerifierTimeoutPropagation(unittest.TestCase):
         from src.tools.self_verifier import _verify_batch_task
         from src.models.data_models import CheckIssue
 
-        mock_client = MagicMock()
-        mock_openai_cls.return_value = mock_client
-
         call_count = [0]
-        def side_effect(**kwargs):
+        def side_effect(*args, **kwargs):
             call_count[0] += 1
             if call_count[0] <= 1:
                 raise Exception("Request timed out.")
-            mock_resp = MagicMock()
-            mock_resp.choices = [MagicMock()]
-            mock_resp.choices[0].message.content = '[{"error_idx":0,"verdict":"confirm","reason":"ok","suspected_origin":"report"}]'
-            return mock_resp
+            return '[{"error_idx":0,"verdict":"confirm","reason":"ok","suspected_origin":"report"}]'
 
-        mock_client.chat.completions.create.side_effect = side_effect
+        mock_call.side_effect = side_effect
 
         issues = [
             CheckIssue(
@@ -118,7 +106,7 @@ class TestSelfVerifierTimeoutPropagation(unittest.TestCase):
             context_chars=200,
         )
 
-        calls = mock_client.chat.completions.create.call_args_list
+        calls = mock_call.call_args_list
         for c in calls[1:]:
             timeout_val = c.kwargs.get("timeout")
             self.assertGreaterEqual(timeout_val, 120,

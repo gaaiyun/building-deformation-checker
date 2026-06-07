@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 
 import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-LEGACY_SAMPLE_ROOT = Path("C:/Users/gaaiy/Desktop/建筑变形监测Agent")
+LEGACY_SAMPLE_ROOTS = [
+    Path(p)
+    for p in os.environ.get("BDC_SAMPLE_ROOTS", "").split(os.pathsep)
+    if p.strip()
+]
 
 
 def _load_module(path: Path, name: str):
@@ -22,9 +27,12 @@ def _sample_exists(relative: str) -> bool:
     candidates = [
         ROOT / relative,
         ROOT / "test_pdfs" / relative,
-        LEGACY_SAMPLE_ROOT / relative,
-        LEGACY_SAMPLE_ROOT / "test_pdfs" / relative,
     ]
+    for legacy_root in LEGACY_SAMPLE_ROOTS:
+        candidates.extend([
+            legacy_root / relative,
+            legacy_root / "test_pdfs" / relative,
+        ])
     return any(path.exists() for path in candidates)
 
 
@@ -73,3 +81,11 @@ def test_run_original_pdfs_cases_are_decoded_and_resolvable():
         pytest.skip("original sample PDFs are not present in this environment: " + ", ".join(missing))
 
     assert mod._resolve_pdf_path("监测报告检查（测试）.pdf").exists()
+
+
+def test_score_recall_handles_empty_and_category_field_names():
+    mod = _load_module(ROOT / "baseline" / "score_recall.py", "score_recall")
+
+    assert mod._gt_keywords("") == []
+    assert "沉降" in mod._gt_keywords("累计沉降 / (mm)")
+    assert "水位" in mod._gt_keywords("地下水位 / (mm)")

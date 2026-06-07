@@ -330,14 +330,18 @@ def _build_report(data: dict) -> MonitoringReport:
         monitoring_date=data.get("monitoring_date", ""),
         conclusion=data.get("conclusion", ""),
     )
-    for th in data.get("thresholds", []):
+    for th in data.get("thresholds") or []:
+        if not isinstance(th, dict):
+            continue
         r.thresholds.append(ThresholdConfig(
             item_name=th.get("item_name", ""),
             warning_value=_sf(th.get("warning_value")),
             control_value=_sf(th.get("control_value")),
             rate_limit=_sf(th.get("rate_limit")),
         ))
-    for si in data.get("summary_items", []):
+    for si in data.get("summary_items") or []:
+        if not isinstance(si, dict):
+            continue
         r.summary_items.append(ReportSummaryItem(
             monitoring_item=si.get("monitoring_item", ""),
             negative_max=str(si.get("negative_max", "")),
@@ -350,7 +354,9 @@ def _build_report(data: dict) -> MonitoringReport:
         ))
     global_interval = _sf(data.get("interval_days"))
 
-    for tb in data.get("tables", []):
+    for tb in data.get("tables") or []:
+        if not isinstance(tb, dict):
+            continue
         t = MonitoringTable(
             monitoring_item=_text(tb.get("monitoring_item")),
             category=_cat(tb.get("category", "")),
@@ -362,7 +368,9 @@ def _build_report(data: dict) -> MonitoringReport:
             borehole_id=_sid(tb.get("borehole_id")),
             borehole_depth=_sf(tb.get("borehole_depth")),
         )
-        for pt in tb.get("points", []):
+        for pt in tb.get("points") or []:
+            if not isinstance(pt, dict):
+                continue
             t.points.append(MeasurementPoint(
                 point_id=str(pt.get("point_id", "")),
                 initial_value=_sf(pt.get("initial_value")),
@@ -373,7 +381,9 @@ def _build_report(data: dict) -> MonitoringReport:
                 change_rate=_sf(pt.get("change_rate")),
                 safety_status=str(pt.get("safety_status", "")),
             ))
-        for dp in tb.get("deep_points", []):
+        for dp in tb.get("deep_points") or []:
+            if not isinstance(dp, dict):
+                continue
             # 鲁棒解析 depth：LLM 可能返回 "01-1" 等非数字格式，原 float() 会抛 ValueError
             # 中断整个 pipeline。改用 _sf 容错解析，缺/坏的 depth 跳过该点而非崩溃。
             depth_val = _sf(dp.get("depth"))
@@ -390,7 +400,9 @@ def _build_report(data: dict) -> MonitoringReport:
                 current_change=_sf(dp.get("current_change")),
                 change_rate=_sf(dp.get("change_rate")),
             ))
-        s = tb.get("statistics", {})
+        s = tb.get("statistics") or {}
+        if not isinstance(s, dict):
+            s = {}
         t.statistics = StatisticsSummary(
             positive_max_id=_sid(s.get("positive_max_id")),
             positive_max_value=_sf(s.get("positive_max_value")),
@@ -551,6 +563,14 @@ def parse_report_with_llm(raw_text: str) -> MonitoringReport:
                 logger.info("已保存失败的 LLM 响应到: %s", dump_path)
             except Exception as dump_exc:
                 logger.warning("无法保存调试 dump: %s", dump_exc)
+            parse_failures += 1
+            continue
+        if not isinstance(parsed, dict):
+            logger.error(
+                "第%d段解析结果非 JSON 对象 (%s)，跳过",
+                i + 1,
+                type(parsed).__name__,
+            )
             parse_failures += 1
             continue
         success_count += 1

@@ -507,8 +507,8 @@ def check_table_statistics(
                     expected_value=_fmt(actual_rate_val),
                     actual_value=_fmt(stats.max_rate_value),
                     message=(
-                        f"最大速率符号矛盾: 实际 {actual_rate_id}={_fmt(actual_rate_val)} "
-                        f"(全部速率同向)，但报告 {stats.max_rate_id}={_fmt(stats.max_rate_value)} "
+                        f"最大速率符号矛盾: 表内最大幅值速率 {actual_rate_id}={_fmt(actual_rate_val)} "
+                        f"与报告最大速率 {stats.max_rate_id}={_fmt(stats.max_rate_value)} "
                         f"符号相反，疑似 OCR/列错位"
                     ),
                 ))

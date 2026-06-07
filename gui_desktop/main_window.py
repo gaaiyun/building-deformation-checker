@@ -981,6 +981,7 @@ class MainWindow(QMainWindow):
                 )
                 event.ignore()
                 return
+        self.config_panel.persist()
         super().closeEvent(event)
 
     def reset_to_idle(self) -> None:
@@ -1043,24 +1044,6 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"已保存：{path}", 5000)
         except Exception as exc:
             QMessageBox.critical(self, "导出失败", str(exc))
-
-    def closeEvent(self, event):
-        if self._thread is not None:
-            ret = QMessageBox.question(
-                self,
-                "确认退出",
-                "流水线仍在运行，确定要退出吗？",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-            if ret != QMessageBox.Yes:
-                event.ignore()
-                return
-            if self._worker:
-                self._worker.cancel()
-        self.config_panel.persist()
-        super().closeEvent(event)
-
 
 def run_app() -> int:
     """启动桌面应用"""

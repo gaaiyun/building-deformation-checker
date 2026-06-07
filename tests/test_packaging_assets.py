@@ -25,6 +25,8 @@ def test_desktop_build_script_supports_exe_and_optional_msi_without_keys():
     assert "Invoke-Native" in script
     assert "$LASTEXITCODE" in script
     assert "wix.exe" in script
+    assert "BuildingDeformationChecker.msi" in script
+    assert "Copy-Item" in script
     assert "--version 4.0.6" in script
     assert "acceptEula" not in script
     assert "BuildingDeformationChecker.exe" in wxs

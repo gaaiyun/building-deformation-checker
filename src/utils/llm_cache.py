@@ -118,11 +118,14 @@ def save_cached_response(
 
     原子写入：先写 .tmp.{pid} 再 os.replace，避免并发读到半写文件。
     """
-    # 过滤：拒绝缓存空/极短响应（避免污染）
+    # 过滤：拒绝缓存空响应；合法短 JSON 仍值得缓存，避免重复调用 LLM。
     if not text or not text.strip():
         return
     if len(text) < _MIN_CACHEABLE_LENGTH:
-        return
+        try:
+            json.loads(text.strip())
+        except (ValueError, TypeError):
+            return
 
     try:
         cache_dir.mkdir(parents=True, exist_ok=True)

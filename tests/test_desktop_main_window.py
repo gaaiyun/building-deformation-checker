@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import inspect
 import sys
 import unittest
 from pathlib import Path
@@ -161,6 +162,13 @@ class DesktopMainWindowTests(unittest.TestCase):
             self.assertIsNone(win._worker)
         finally:
             win.close()
+
+    def test_close_event_keeps_thread_shutdown_and_settings_persistence(self):
+        source = inspect.getsource(MainWindow.closeEvent)
+
+        self.assertIn("isRunning()", source)
+        self.assertIn("wait(3000)", source)
+        self.assertIn("config_panel.persist()", source)
 
     def test_city_safety_iot_brand_assets_are_used(self):
         self.assertTrue(APP_ICON_PATH.exists())

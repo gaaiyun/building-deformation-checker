@@ -113,6 +113,18 @@ class ProximityNegativeThresholdTests(unittest.TestCase):
                 and "接近预警值" in (i.message or "")]
         self.assertGreaterEqual(len(prox), 1, "正向 warning_value=30, |cum|=29.03 → 97% 应识别")
 
+    def test_safety_status_error_message_shows_absolute_threshold(self):
+        report = _make(threshold_warn=-30, threshold_rate=None, cum=-35.0, rate=None)
+        issues = run_logic_checks(report)
+        safety_errors = [
+            issue for issue in issues
+            if issue.field_name == "安全状态" and issue.severity == "error"
+        ]
+        self.assertGreaterEqual(len(safety_errors), 1)
+        message = safety_errors[0].message or ""
+        self.assertIn("报警值=30", message)
+        self.assertNotIn("-30", message)
+
 
 if __name__ == "__main__":
     unittest.main()

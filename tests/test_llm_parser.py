@@ -138,6 +138,85 @@ class LlmParserTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 parse_report_with_llm("任意文本")
 
+    def test_parse_report_skips_chunk_that_parses_to_non_dict(self):
+        good_chunk = {
+            "project_name": "项目X",
+            "monitoring_company": "",
+            "report_number": "",
+            "monitoring_period": "",
+            "monitoring_date": "",
+            "interval_days": None,
+            "thresholds": [],
+            "summary_items": [],
+            "conclusion": "",
+            "tables": [{
+                "monitoring_item": "支护结构顶部水平位移",
+                "category": "水平位移",
+                "monitor_date": "",
+                "monitor_count": "",
+                "point_count": 1,
+                "equipment_type": "",
+                "equipment_model": "",
+                "borehole_id": "",
+                "borehole_depth": None,
+                "table_unit": "mm",
+                "initial_value_reliable": True,
+                "points": [{
+                    "point_id": "S1",
+                    "initial_value": 0.0,
+                    "previous_value": None,
+                    "current_value": 1.0,
+                    "current_change": 1.0,
+                    "cumulative_change": 1.0,
+                    "change_rate": 0.1,
+                    "safety_status": "正常",
+                }],
+                "deep_points": [],
+                "statistics": {},
+            }],
+        }
+        with (
+            patch("src.tools.llm_parser._split_chunks", return_value=["chunk-1", "chunk-2"]),
+            patch(
+                "src.tools.llm_parser.call_chat_completion",
+                side_effect=[json.dumps(good_chunk, ensure_ascii=False), "null"],
+            ),
+        ):
+            report = parse_report_with_llm("ignored")
+
+        self.assertEqual(len(report.tables), 1)
+        self.assertEqual(report.project_name, "项目X")
+
+    def test_build_report_robust_to_null_nested_values(self):
+        from src.tools.llm_parser import _build_report
+
+        data = {
+            "project_name": "X",
+            "thresholds": [None, {"item_name": "水平位移", "warning_value": 10}],
+            "summary_items": [None],
+            "tables": [
+                None,
+                {
+                    "monitoring_item": "支护结构顶部水平位移",
+                    "category": "水平位移",
+                    "statistics": None,
+                    "points": None,
+                    "deep_points": None,
+                },
+                {
+                    "monitoring_item": "周边地面沉降",
+                    "category": "沉降",
+                    "points": [None, {"point_id": "P1", "cumulative_change": 1.0}],
+                    "statistics": {},
+                },
+            ],
+        }
+
+        report = _build_report(data)
+        items = [table.monitoring_item for table in report.tables]
+        self.assertIn("支护结构顶部水平位移", items)
+        self.assertIn("周边地面沉降", items)
+
 
 if __name__ == "__main__":
     unittest.main()

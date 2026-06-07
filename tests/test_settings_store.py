@@ -112,20 +112,37 @@ class TestSettingsStore(unittest.TestCase):
     def test_api_key_stored_in_keyring_not_json(self):
         """安全要求：API key 永远不能写入 JSON 文件，必须存 keyring。"""
         data = dict(_DEFAULTS)
-        data["llm_api_key"] = "sk-secret-must-not-leak"
+        data["llm_api_key"] = "fake-secret-must-not-leak"
         data["paddle_ocr_token"] = "paddle-tok-456"
         save_settings(data)
 
         # JSON 文件里不应出现明文密钥
         with (self.tmp_dir / "settings.json").open("r", encoding="utf-8") as f:
             raw = f.read()
-        self.assertNotIn("sk-secret-must-not-leak", raw)
+        self.assertNotIn("fake-secret-must-not-leak", raw)
         self.assertNotIn("paddle-tok-456", raw)
 
         # 但 load_settings 应仍能拿到（从内存 keyring 中读出）
         out = load_settings()
-        self.assertEqual(out["llm_api_key"], "sk-secret-must-not-leak")
+        self.assertEqual(out["llm_api_key"], "fake-secret-must-not-leak")
         self.assertEqual(out["paddle_ocr_token"], "paddle-tok-456")
+
+    def test_api_key_not_written_to_json_when_keyring_unavailable(self):
+        """即使 keyring 写入失败，也不能退回到明文 JSON。"""
+
+        class FailingKeyring:
+            def get(self, key):
+                return None
+
+            def set(self, key, value):
+                return False
+
+        with patch.object(settings_store, "_keyring_backend", FailingKeyring()):
+            save_settings({**_DEFAULTS, "llm_api_key": "fake-no-json", "paddle_ocr_token": "tok-no-json"})
+
+        raw = (self.tmp_dir / "settings.json").read_text(encoding="utf-8")
+        self.assertNotIn("fake-no-json", raw)
+        self.assertNotIn("tok-no-json", raw)
 
     # ── 损坏 JSON 处理 ────────────────────────────────────────
     def test_corrupt_json_returns_defaults(self):
