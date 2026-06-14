@@ -99,12 +99,12 @@ def test_pipeline_imports():
     print("=== 测试 4: 核心模块导入链 ===")
     from src.core import run_pipeline, RuntimeConfig, PipelineResult
     from gui_desktop.worker import PipelineWorker
-    from src.tools.export_formats import generate_docx, generate_html
+    from src.tools.export_formats import generate_docx, generate_html, generate_intermediate_xlsx
     print("  src.core.run_pipeline: 可用")
     print("  src.core.RuntimeConfig: 可用")
     print("  src.core.PipelineResult: 可用")
     print("  gui_desktop.worker.PipelineWorker: 可用")
-    print("  src.tools.export_formats.generate_docx/html: 可用")
+    print("  src.tools.export_formats.generate_docx/html/xlsx: 可用")
 
 
 def main():

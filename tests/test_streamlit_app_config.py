@@ -42,13 +42,17 @@ def test_streamlit_app_keeps_report_download_exports_available():
 
     assert "generate_docx(" in text
     assert "generate_html(" in text
+    assert "generate_intermediate_xlsx(" in text
     assert '"下载 Markdown"' in text
     assert '"下载 Word"' in text
     assert '"下载 HTML"' in text
+    assert '"下载 Excel中间层"' in text
     assert "_检查报告.md" in text
     assert "_检查报告.docx" in text
     assert "_检查报告.html" in text
+    assert "_Excel中间层.xlsx" in text
     assert "mime=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document\"" in text
+    assert "mime=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\"" in text
 
 
 def test_streamlit_dependency_supports_fragment_api():

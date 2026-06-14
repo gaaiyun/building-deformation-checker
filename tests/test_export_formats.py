@@ -12,6 +12,8 @@ import unittest
 import zipfile
 from pathlib import Path
 
+from openpyxl import load_workbook
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -23,7 +25,7 @@ from src.models.data_models import (
     MonitoringReport,
     MonitoringTable,
 )
-from src.tools.export_formats import generate_docx, generate_html
+from src.tools.export_formats import generate_docx, generate_html, generate_intermediate_xlsx
 
 
 def _make_minimal_report(project_name: str = "测试项目") -> MonitoringReport:
@@ -202,6 +204,63 @@ class TestGenerateHtml(unittest.TestCase):
     def test_has_charset_utf8(self):
         html = generate_html("# 中文标题", "项目")
         self.assertIn('charset="UTF-8"', html.upper().replace('CHARSET="UTF-8"', 'charset="UTF-8"'))
+
+
+class TestGenerateIntermediateXlsx(unittest.TestCase):
+    """generate_intermediate_xlsx 应产生可审查的 Excel 中间层"""
+
+    def test_returns_valid_xlsx(self):
+        report = _make_minimal_report()
+        out = generate_intermediate_xlsx(report)
+        self.assertIsInstance(out, bytes)
+        self.assertEqual(out[:2], b"PK")
+        wb = load_workbook(io.BytesIO(out), read_only=True)
+        self.assertIn("00_报告概览", wb.sheetnames)
+        self.assertIn("01_表格清单", wb.sheetnames)
+        self.assertIn("02_标准化测点", wb.sheetnames)
+        self.assertIn("05_问题清单", wb.sheetnames)
+
+    def test_standardized_point_sheet_contains_measurement_fields(self):
+        report = _make_minimal_report(project_name="Excel中间层项目")
+        out = generate_intermediate_xlsx(report)
+        wb = load_workbook(io.BytesIO(out), read_only=True, data_only=True)
+        ws = wb["02_标准化测点"]
+        rows = list(ws.iter_rows(values_only=True))
+        self.assertEqual(rows[0][:5], ("表序号", "表名", "类别", "日期", "测点"))
+        self.assertIn("P1", rows[1])
+        self.assertIn(1.0, rows[1])
+
+    def test_issue_sheet_contains_all_issue_sources(self):
+        report = _make_minimal_report()
+        out = generate_intermediate_xlsx(
+            report,
+            calc_issues=[_make_issue("error", "计算错误")],
+            stats_issues=[_make_issue("warning", "统计警告")],
+            logic_issues=[_make_issue("info", "逻辑提示")],
+        )
+        wb = load_workbook(io.BytesIO(out), read_only=True, data_only=True)
+        ws = wb["05_问题清单"]
+        body = ["|".join(str(v or "") for v in row) for row in ws.iter_rows(values_only=True)]
+        joined = "\n".join(body)
+        self.assertIn("计算核验", joined)
+        self.assertIn("统计核验", joined)
+        self.assertIn("逻辑检查", joined)
+        self.assertIn("计算错误", joined)
+
+    def test_text_cells_escape_excel_formula_prefixes(self):
+        report = _make_minimal_report(project_name="=危险项目")
+        report.tables[0].points[0].point_id = "=SUM(1,1)"
+        issue = _make_issue("error", "@危险说明")
+        out = generate_intermediate_xlsx(report, calc_issues=[issue])
+
+        wb = load_workbook(io.BytesIO(out), read_only=True, data_only=True)
+        overview = wb["00_报告概览"]
+        point_ws = wb["02_标准化测点"]
+        issue_ws = wb["05_问题清单"]
+
+        self.assertEqual(overview["B2"].value, "'=危险项目")
+        self.assertEqual(point_ws["E2"].value, "'=SUM(1,1)")
+        self.assertIn("'@危险说明", issue_ws["H2"].value)
 
 
 if __name__ == "__main__":

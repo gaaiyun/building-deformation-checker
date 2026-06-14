@@ -14,7 +14,7 @@
 
 建筑变形监测报告（基坑、桥梁、隧道、深基坑支护等）由专业监测公司出具，**累计变化量、变化速率、最大/最小统计、安全状态判定**这些字段必须与原始测值自洽。但每家公司格式各异，单位混杂（mm / m / kN）、列序不同、初始值含义也不一样。
 
-本工具做的事：抽取 PDF → 让 LLM 理解每张数据表的语义 → 用规则引擎按表自适应地校验所有计算/统计/逻辑字段 → 由第二个 LLM 复核可疑错误（Two-LLM 误报治理） → 输出带证据的 Markdown / Word / HTML 报告。
+本工具做的事：抽取 PDF → 让 LLM 理解每张数据表的语义 → 用规则引擎按表自适应地校验所有计算/统计/逻辑字段 → 由第二个 LLM 复核可疑错误（Two-LLM 误报治理） → 输出带证据的 Markdown / Word / HTML 报告，并提供 Excel 中间层用于业务核查识别出的表格、字段和测点。
 
 适用对象：监测单位自查、第三方复核工程师、监理与建管单位。
 
@@ -62,7 +62,7 @@ flowchart TB
         T5["statistics_checker"]
         T6["logic_checker"]
         T7["self_verifier<br/>Two-LLM 复核"]
-        T8["report_generator<br/>MD / DOCX / HTML"]
+        T8["report_generator<br/>MD / DOCX / HTML / XLSX"]
     end
 
     subgraph EXT["外部服务"]
@@ -132,7 +132,7 @@ flowchart LR
 | 5 | 逻辑检查 | <1 s | 默认使用本地启发式语义映射，避免每份报告额外等待一次 LLM；如需更强语义映射可设 `LOGIC_USE_LLM_SEMANTIC_MATCH=1`。**接近预警值告警**：累计 ≥ 80% 预警值 + 状态标"正常" → 建议加密观测。 |
 | 6 | AI 自验证 | 30–120 s | 仅对 `error` 级问题发起 Two-LLM 复核：confirm / downgrade / dismiss，可关闭。 |
 | 7 | AI 最终审核 | 30–90 s | 把初步报告 + 原文交给 LLM 整体复读，可关闭。 |
-| 8 | 报告生成 | <1 s | 输出标准化 Markdown，可一键转 Word / HTML。 |
+| 8 | 报告生成 | <1 s | 输出标准化 Markdown，可一键转 Word / HTML；桌面端和 Streamlit 也可导出 Excel 中间层，用于复核表格清单、标准化测点、深层位移、统计摘要、问题清单和分析计划。 |
 
 **总耗时**：完整流水线 3–8 分钟；跳过 Step 6 + 7 后通常 3–6 分钟（取决于 PDF 页数、LLM 服务速度和余额/限流状态）；
 **LLM 响应缓存**激活后重跑同一 PDF 可降至 20–40 秒。
@@ -170,6 +170,7 @@ requests>=2.31.0     # PaddleOCR API 调用
 streamlit>=1.37.0    # Streamlit Web UI
 PySide6>=6.5.0       # 桌面 GUI
 python-docx>=1.0.0   # Word 导出
+openpyxl>=3.1.0      # Excel 中间层导出
 markdown>=3.5.0      # Markdown → HTML
 keyring>=25.0.0      # 桌面版敏感配置存储
 pyinstaller>=6.0.0   # 桌面版 .exe 打包

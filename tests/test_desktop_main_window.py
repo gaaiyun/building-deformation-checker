@@ -237,6 +237,17 @@ class DesktopMainWindowTests(unittest.TestCase):
         self.assertIn("log line", panel.tab_logs.toPlainText())
         self.assertGreater(panel.tab_calc.topLevelItemCount(), 0)
 
+    def test_results_panel_exposes_excel_intermediate_export(self):
+        panel = ResultsPanel()
+
+        button_texts = [button.text() for button in panel.findChildren(QPushButton)]
+        self.assertIn("导出 Excel中间层", button_texts)
+
+        source = inspect.getsource(MainWindow)
+        self.assertIn("export_xlsx_requested.connect(self._export_xlsx)", source)
+        self.assertIn("generate_intermediate_xlsx", source)
+        self.assertIn("_Excel中间层.xlsx", source)
+
 
 if __name__ == "__main__":
     unittest.main()

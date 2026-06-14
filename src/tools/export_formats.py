@@ -265,4 +265,353 @@ def generate_html(md_content: str, project_name: str) -> str:
 </html>"""
 
 
-__all__ = ["generate_docx", "generate_html"]
+def _enum_value(value) -> str:
+    return getattr(value, "value", str(value or ""))
+
+
+def _fmt(value) -> str | float | int:
+    if value is None:
+        return ""
+    if isinstance(value, (int, float)):
+        return value
+    return str(value)
+
+
+def _safe_excel_value(value) -> str | float | int:
+    """避免 PDF/LLM 文本被 Excel 当公式执行。
+
+    数值型负数会以 int/float 写入，不受影响；只有字符串字段才会在疑似公式
+    前缀前加引号。
+    """
+    value = _fmt(value)
+    if isinstance(value, str):
+        stripped = value.lstrip()
+        if stripped.startswith(("=", "+", "-", "@")):
+            return "'" + value
+    return value
+
+
+def _table_name(table) -> str:
+    name = getattr(table, "monitoring_item", "") or "未命名表"
+    borehole_id = getattr(table, "borehole_id", "")
+    if borehole_id:
+        return f"{name} ({borehole_id})"
+    return name
+
+
+def generate_intermediate_xlsx(
+    report,
+    *,
+    calc_issues: list | None = None,
+    stats_issues: list | None = None,
+    logic_issues: list | None = None,
+    analysis_plan: list[dict] | None = None,
+) -> bytes:
+    """生成可审查的 Excel 中间层。
+
+    这个工作簿不是最终 Word 报告的替代品，而是把已经进入规则引擎的结构化数据
+    展开给业务人员核查：表格清单、标准化测点、深层位移、统计摘要、问题清单和
+    分析计划。后续若新增 LLM 前候选表格，也应继续复用这个导出入口。
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    calc_issues = calc_issues or []
+    stats_issues = stats_issues or []
+    logic_issues = logic_issues or []
+    analysis_plan = analysis_plan or []
+    tables = getattr(report, "tables", []) if report is not None else []
+
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    header_fill = PatternFill("solid", fgColor="EAF1FB")
+    section_fill = PatternFill("solid", fgColor="F7F9FC")
+    header_font = Font(name="Microsoft YaHei", bold=True, color="0F2F5F")
+    normal_font = Font(name="Microsoft YaHei", color="111827")
+    note_font = Font(name="Microsoft YaHei", color="4B5563")
+    wrap = Alignment(vertical="top", wrap_text=True)
+
+    def add_sheet(title: str, headers: list[str]):
+        ws = wb.create_sheet(title)
+        ws.append(headers)
+        for cell in ws[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
+        return ws
+
+    def append_safe(ws, values: list) -> None:
+        ws.append([_safe_excel_value(value) for value in values])
+
+    def finish_sheet(ws, *, widths: dict[int, int] | None = None) -> None:
+        widths = widths or {}
+        ws.auto_filter.ref = ws.dimensions
+        for row in ws.iter_rows():
+            for cell in row:
+                if cell.row == 1:
+                    cell.font = header_font
+                else:
+                    cell.font = normal_font
+                    cell.alignment = wrap
+        for col_idx in range(1, ws.max_column + 1):
+            max_len = 8
+            for column_cells in ws.iter_cols(min_col=col_idx, max_col=col_idx, min_row=1, max_row=ws.max_row):
+                for cell in column_cells:
+                    value = cell.value
+                    if value is not None:
+                        max_len = max(max_len, min(len(str(value)) + 2, 40))
+            ws.column_dimensions[get_column_letter(col_idx)].width = widths.get(col_idx, max_len)
+
+    overview = wb.create_sheet("00_报告概览")
+    overview.append(["字段", "值"])
+    for cell in overview[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+    diagnostics = getattr(report, "extraction_diagnostics", {}) if report is not None else {}
+    overview_rows = [
+        ("项目名称", getattr(report, "project_name", "") if report is not None else ""),
+        ("监测单位", getattr(report, "monitoring_company", "") if report is not None else ""),
+        ("报告编号", getattr(report, "report_number", "") if report is not None else ""),
+        ("监测日期", getattr(report, "monitoring_date", "") if report is not None else ""),
+        ("监测时间段", getattr(report, "monitoring_period", "") if report is not None else ""),
+        ("生成时间", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        ("结构化表数量", len(tables)),
+        ("阈值数量", len(getattr(report, "thresholds", []) if report is not None else [])),
+        ("汇总项数量", len(getattr(report, "summary_items", []) if report is not None else [])),
+        ("计算问题数量", len(calc_issues)),
+        ("统计问题数量", len(stats_issues)),
+        ("逻辑问题数量", len(logic_issues)),
+        ("提取方式", diagnostics.get("method", "")),
+        ("OCR/清洗配置", diagnostics.get("selected_profile", "")),
+        ("原始字符", diagnostics.get("raw_chars", "")),
+        ("清洗后字符", diagnostics.get("clean_chars", "")),
+        ("压缩率", diagnostics.get("compression_ratio", "")),
+        ("异常表数量", diagnostics.get("abnormal_table_count", "")),
+    ]
+    for label, value in overview_rows:
+        append_safe(overview, [label, value])
+    for row in overview.iter_rows():
+        for cell in row:
+            cell.font = header_font if cell.column == 1 else normal_font
+            cell.alignment = wrap
+            if cell.column == 1 and cell.row > 1:
+                cell.fill = section_fill
+    overview.column_dimensions["A"].width = 18
+    overview.column_dimensions["B"].width = 48
+
+    table_ws = add_sheet(
+        "01_表格清单",
+        [
+            "序号",
+            "表名",
+            "类别",
+            "日期",
+            "期次",
+            "测孔",
+            "声明测点数",
+            "解析测点数",
+            "深层点数",
+            "单位",
+            "单位换算",
+            "间隔天数",
+            "初始值可靠",
+            "提取提示",
+        ],
+    )
+    for idx, table in enumerate(tables, start=1):
+        cfg = getattr(table, "verification_config", None)
+        flags = getattr(report, "table_extraction_flags", {}).get(idx - 1, []) if report is not None else []
+        append_safe(table_ws, [
+            idx,
+            _table_name(table),
+            _enum_value(getattr(table, "category", "")),
+            _fmt(getattr(table, "monitor_date", "")),
+            _fmt(getattr(table, "monitor_count", "")),
+            _fmt(getattr(table, "borehole_id", "")),
+            _fmt(getattr(table, "point_count", "")),
+            len(getattr(table, "points", []) or []),
+            len(getattr(table, "deep_points", []) or []),
+            _fmt(getattr(cfg, "unit", "")),
+            _fmt(getattr(cfg, "unit_conversion", "")),
+            _fmt(getattr(cfg, "interval_days", "")),
+            _fmt(getattr(cfg, "initial_value_reliable", "")),
+            "；".join(flags),
+        ])
+    finish_sheet(table_ws, widths={2: 28, 14: 42})
+
+    point_ws = add_sheet(
+        "02_标准化测点",
+        [
+            "表序号",
+            "表名",
+            "类别",
+            "日期",
+            "测点",
+            "初始值",
+            "上次值",
+            "本次值",
+            "本次变化",
+            "累计变化",
+            "变化速率",
+            "安全状态",
+        ],
+    )
+    for idx, table in enumerate(tables, start=1):
+        for point in getattr(table, "points", []) or []:
+            append_safe(point_ws, [
+                idx,
+                _table_name(table),
+                _enum_value(getattr(table, "category", "")),
+                _fmt(getattr(table, "monitor_date", "")),
+                _fmt(getattr(point, "point_id", "")),
+                _fmt(getattr(point, "initial_value", None)),
+                _fmt(getattr(point, "previous_value", None)),
+                _fmt(getattr(point, "current_value", None)),
+                _fmt(getattr(point, "current_change", None)),
+                _fmt(getattr(point, "cumulative_change", None)),
+                _fmt(getattr(point, "change_rate", None)),
+                _fmt(getattr(point, "safety_status", "")),
+            ])
+    finish_sheet(point_ws, widths={2: 28})
+
+    deep_ws = add_sheet(
+        "03_深层位移",
+        [
+            "表序号",
+            "表名",
+            "日期",
+            "测孔",
+            "深度",
+            "上次累计",
+            "本次累计",
+            "本次变化",
+            "变化速率",
+        ],
+    )
+    for idx, table in enumerate(tables, start=1):
+        for point in getattr(table, "deep_points", []) or []:
+            append_safe(deep_ws, [
+                idx,
+                _table_name(table),
+                _fmt(getattr(table, "monitor_date", "")),
+                _fmt(getattr(table, "borehole_id", "")),
+                _fmt(getattr(point, "depth", None)),
+                _fmt(getattr(point, "previous_cumulative", None)),
+                _fmt(getattr(point, "current_cumulative", None)),
+                _fmt(getattr(point, "current_change", None)),
+                _fmt(getattr(point, "change_rate", None)),
+            ])
+    finish_sheet(deep_ws, widths={2: 28})
+
+    stats_ws = add_sheet(
+        "04_统计摘要",
+        [
+            "表序号",
+            "表名",
+            "正向最大点",
+            "正向最大值",
+            "负向最大点",
+            "负向最大值",
+            "最大速率点",
+            "最大速率值",
+            "最大变化点",
+            "最大变化值",
+            "最大力值点",
+            "最大力值",
+            "最小力值点",
+            "最小力值",
+        ],
+    )
+    for idx, table in enumerate(tables, start=1):
+        stats = getattr(table, "statistics", None)
+        append_safe(stats_ws, [
+            idx,
+            _table_name(table),
+            _fmt(getattr(stats, "positive_max_id", "")),
+            _fmt(getattr(stats, "positive_max_value", None)),
+            _fmt(getattr(stats, "negative_max_id", "")),
+            _fmt(getattr(stats, "negative_max_value", None)),
+            _fmt(getattr(stats, "max_rate_id", "")),
+            _fmt(getattr(stats, "max_rate_value", None)),
+            _fmt(getattr(stats, "max_change_id", "")),
+            _fmt(getattr(stats, "max_change_value", None)),
+            _fmt(getattr(stats, "max_force_id", "")),
+            _fmt(getattr(stats, "max_force_value", None)),
+            _fmt(getattr(stats, "min_force_id", "")),
+            _fmt(getattr(stats, "min_force_value", None)),
+        ])
+    finish_sheet(stats_ws, widths={2: 28})
+
+    issue_ws = add_sheet(
+        "05_问题清单",
+        ["来源", "级别", "表名", "测点", "字段", "期望", "实际", "说明"],
+    )
+    for source_name, issues in (
+        ("计算核验", calc_issues),
+        ("统计核验", stats_issues),
+        ("逻辑检查", logic_issues),
+    ):
+        for issue in issues:
+            append_safe(issue_ws, [
+                source_name,
+                _fmt(getattr(issue, "severity", "")),
+                _fmt(getattr(issue, "table_name", "")),
+                _fmt(getattr(issue, "point_id", "")),
+                _fmt(getattr(issue, "field_name", "")),
+                _fmt(getattr(issue, "expected_value", "")),
+                _fmt(getattr(issue, "actual_value", "")),
+                append_issue_source_hint(
+                    _fmt(getattr(issue, "message", "")),
+                    _fmt(getattr(issue, "suspected_source", "")),
+                ),
+            ])
+    finish_sheet(issue_ws, widths={3: 28, 8: 60})
+
+    plan_ws = add_sheet(
+        "06_分析计划",
+        ["表序号", "表名", "类别", "测点数", "单位", "单位换算", "间隔天数", "计算方法", "特殊说明"],
+    )
+    for plan in analysis_plan:
+        methods = []
+        for method in plan.get("verification_methods", []) or []:
+            if isinstance(method, dict):
+                methods.append(
+                    f"{method.get('name', '')}: {method.get('formula', '')}"
+                    + (f" (tol={method.get('tolerance')})" if method.get("tolerance") else "")
+                )
+            else:
+                methods.append(str(method))
+        notes = plan.get("special_notes", []) or []
+        append_safe(plan_ws, [
+            _fmt(plan.get("table_index", "")),
+            _fmt(plan.get("table_name", "")),
+            _fmt(plan.get("category", "")),
+            _fmt(plan.get("point_count", "")),
+            _fmt(plan.get("unit", "")),
+            _fmt(plan.get("unit_conversion", "")),
+            _fmt(plan.get("interval_days", "")),
+            "\n".join(methods),
+            "\n".join(str(n) for n in notes),
+        ])
+    finish_sheet(plan_ws, widths={2: 28, 8: 60, 9: 48})
+
+    for ws in wb.worksheets:
+        ws.sheet_view.showGridLines = False
+        for row in ws.iter_rows(min_row=2):
+            if row and row[0].row % 2 == 0:
+                for cell in row:
+                    cell.fill = section_fill
+        if ws.max_row == 1:
+            ws.append(["", "无数据"])
+            ws["B2"].font = note_font
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+__all__ = ["generate_docx", "generate_html", "generate_intermediate_xlsx"]

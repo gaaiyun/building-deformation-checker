@@ -4,6 +4,7 @@ requests>=2.31.0
 streamlit>=1.37.0
 PySide6>=6.5.0
 python-docx>=1.0.0
+openpyxl>=3.1.0
 markdown>=3.5.0
 json5>=0.14.0       # LLM 输出 JSON 容错（处理单引号 / 无引号 key / 尾随逗号）
 keyring>=25.0.0     # 桌面版敏感配置存储（Windows Credential Manager / macOS Keychain）

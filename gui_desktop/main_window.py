@@ -487,6 +487,7 @@ class ResultsPanel(QWidget):
     export_md_requested = Signal()
     export_docx_requested = Signal()
     export_html_requested = Signal()
+    export_xlsx_requested = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -553,6 +554,9 @@ class ResultsPanel(QWidget):
         self.btn_html = QPushButton("导出 HTML")
         self.btn_html.clicked.connect(self.export_html_requested)
         btns.addWidget(self.btn_html)
+        self.btn_xlsx = QPushButton("导出 Excel中间层")
+        self.btn_xlsx.clicked.connect(self.export_xlsx_requested)
+        btns.addWidget(self.btn_xlsx)
         layout.addLayout(btns)
 
     def _make_metric(self, label: str, color: str) -> QWidget:
@@ -843,6 +847,7 @@ class MainWindow(QMainWindow):
         self.results_panel.export_md_requested.connect(self._export_md)
         self.results_panel.export_docx_requested.connect(self._export_docx)
         self.results_panel.export_html_requested.connect(self._export_html)
+        self.results_panel.export_xlsx_requested.connect(self._export_xlsx)
         self.stack.addWidget(self.results_panel)
 
         splitter.addWidget(self.stack)
@@ -1053,6 +1058,29 @@ class MainWindow(QMainWindow):
                 getattr(self._result.report, "project_name", "") or "检查报告",
             )
             Path(path).write_text(html, encoding="utf-8")
+            self.statusBar().showMessage(f"已保存：{path}", 5000)
+        except Exception as exc:
+            QMessageBox.critical(self, "导出失败", str(exc))
+
+    def _export_xlsx(self) -> None:
+        if not self._result or not self._result.report:
+            return
+        suggested = Path(self._current_pdf or "report.pdf").stem + "_Excel中间层.xlsx"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "保存 Excel 中间层", suggested, "Excel 工作簿 (*.xlsx)"
+        )
+        if not path:
+            return
+        try:
+            from src.tools.export_formats import generate_intermediate_xlsx
+            data = generate_intermediate_xlsx(
+                self._result.report,
+                calc_issues=self._result.calc_issues,
+                stats_issues=self._result.stats_issues,
+                logic_issues=self._result.logic_issues,
+                analysis_plan=self._result.analysis_plan,
+            )
+            Path(path).write_bytes(data)
             self.statusBar().showMessage(f"已保存：{path}", 5000)
         except Exception as exc:
             QMessageBox.critical(self, "导出失败", str(exc))

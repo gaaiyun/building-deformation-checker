@@ -29,7 +29,7 @@ import streamlit as st
 import src.config as cfg
 from gui_desktop.settings_store import load_settings, save_settings
 from src.core import PipelineResult, RuntimeConfig, run_pipeline
-from src.tools.export_formats import generate_docx, generate_html
+from src.tools.export_formats import generate_docx, generate_html, generate_intermediate_xlsx
 from src.tools.extraction_quality import append_issue_source_hint
 
 
@@ -694,6 +694,8 @@ if st.session_state.task_state == "idle":
                 "detail": "任务已提交，正在进入 PDF 提取",
             }
             st.session_state.log_lines = []
+            st.session_state.pop("xlsx_export_key", None)
+            st.session_state.pop("xlsx_export_bytes", None)
             st.toast("已开始检查，后台任务运行中")
             st.rerun()
     else:
@@ -794,8 +796,24 @@ elif st.session_state.task_state == "done":
         result.final_md,
         getattr(result.report, "project_name", "") or "检查报告",
     )
+    export_key = (
+        f"{st.session_state.get('pdf_signature', '')}:"
+        f"{len(result.final_md or '')}:"
+        f"{len(result.calc_issues)}-{len(result.stats_issues)}-{len(result.logic_issues)}:"
+        f"{len(result.report.tables) if result.report else 0}"
+    )
+    if st.session_state.get("xlsx_export_key") != export_key:
+        st.session_state.xlsx_export_bytes = generate_intermediate_xlsx(
+            result.report,
+            calc_issues=result.calc_issues,
+            stats_issues=result.stats_issues,
+            logic_issues=result.logic_issues,
+            analysis_plan=result.analysis_plan,
+        )
+        st.session_state.xlsx_export_key = export_key
+    xlsx_bytes = st.session_state.xlsx_export_bytes
 
-    dl1, dl2, dl3, _, dl_new = st.columns([1, 1, 1, 1, 1])
+    dl1, dl2, dl3, dl4, dl_new = st.columns([1, 1, 1, 1, 1])
 
     with dl1:
         st.download_button(
@@ -824,6 +842,15 @@ elif st.session_state.task_state == "done":
             **_stretch_kwargs(),
             key="dl_html",
         )
+    with dl4:
+        st.download_button(
+            "下载 Excel中间层",
+            data=xlsx_bytes,
+            file_name=f"{pdf_stem}_Excel中间层.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            **_stretch_kwargs(),
+            key="dl_xlsx",
+        )
     with dl_new:
         if st.button("🆕 新建任务", **_stretch_kwargs(), key="btn_new_task"):
             st.session_state.task_state = "idle"
@@ -832,6 +859,8 @@ elif st.session_state.task_state == "done":
             st.session_state.pdf_path = None
             st.session_state.pdf_name = None
             st.session_state.log_lines = []
+            st.session_state.pop("xlsx_export_key", None)
+            st.session_state.pop("xlsx_export_bytes", None)
             st.rerun()
 
 
