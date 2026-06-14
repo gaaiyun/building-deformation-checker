@@ -47,6 +47,10 @@ a = Analysis(
         'docx',
         'docx.oxml',
         'docx.oxml.ns',
+        # Excel 中间层导出
+        'openpyxl',
+        'openpyxl.styles',
+        'openpyxl.utils',
         # 配置存储
         'keyring',
         'keyring.backends',
