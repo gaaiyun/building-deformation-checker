@@ -209,7 +209,7 @@ python main.py "报告.pdf" -o output/my_report.md
 
 # 使用 MiniMax Token Plan 的 OpenAI 兼容端点
 set LLM_BASE_URL=https://api.minimaxi.com/v1
-set LLM_API_KEY=sk-cp-...
+set LLM_API_KEY=<MINIMAX_API_KEY>
 python main.py "报告.pdf" --model MiniMax-M2.7-highspeed --no-self-verify --no-ai-review
 ```
 
@@ -1036,3 +1036,8 @@ class StreamlitLogHandler(logging.Handler):
 ## 许可证
 
 本项目为内部工具，仅供学习和使用。
+# 历史归档说明
+
+本文件保留早期 v1 设计和历史测试记录，仅用于追溯，不代表当前默认模型、PaddleOCR 版本、导出格式或部署方式。当前可交付说明以仓库根目录 `README.md`、`docs/甲方部署使用说明.md`、`docs/计算核验逻辑说明.md` 和最新实际测试报告为准。
+
+---

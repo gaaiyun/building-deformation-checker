@@ -30,6 +30,7 @@
 
 from __future__ import annotations
 
+import html
 import logging
 import sys
 from collections import defaultdict
@@ -87,6 +88,14 @@ def resource_path(*parts: str) -> Path:
 APP_ICON_PATH = resource_path("assets", "city_safety_iot.ico")
 APP_LOGO_PATH = resource_path("assets", "city_safety_iot_logo.png")
 APP_MARK_PATH = resource_path("assets", "city_safety_iot_icon.png")
+LEGACY_PADDLE_DEFAULT_MODELS = {"PaddleOCR-VL-1.5", "PaddleOCR-VL"}
+
+
+def _normalize_paddle_model(model: str | None) -> str:
+    model = (model or "").strip()
+    if not model or model in LEGACY_PADDLE_DEFAULT_MODELS:
+        return "PaddleOCR-VL-1.6"
+    return model
 
 
 PROFESSIONAL_STYLESHEET = """
@@ -266,9 +275,7 @@ class ConfigPanel(QWidget):
             "PP-StructureV3",
             "PP-OCRv5",
         ])
-        saved_ocr_model = settings.get("paddle_ocr_model", "PaddleOCR-VL-1.6")
-        if saved_ocr_model == "PaddleOCR-VL-1.5":
-            saved_ocr_model = "PaddleOCR-VL-1.6"
+        saved_ocr_model = _normalize_paddle_model(settings.get("paddle_ocr_model", "PaddleOCR-VL-1.6"))
         self.paddle_ocr_model.setCurrentText(saved_ocr_model)
         ocr_form.addRow("模型", self.paddle_ocr_model)
 
@@ -558,6 +565,7 @@ class ResultsPanel(QWidget):
         self.btn_xlsx.clicked.connect(self.export_xlsx_requested)
         btns.addWidget(self.btn_xlsx)
         layout.addLayout(btns)
+        self._set_export_buttons_enabled(False)
 
     def _make_metric(self, label: str, color: str) -> QWidget:
         w = QWidget()
@@ -579,8 +587,13 @@ class ResultsPanel(QWidget):
     def _set_metric_value(metric_widget: QWidget, value: str) -> None:
         metric_widget._value_label.setText(value)
 
+    def _set_export_buttons_enabled(self, enabled: bool) -> None:
+        for button in (self.btn_md, self.btn_docx, self.btn_html, self.btn_xlsx):
+            button.setEnabled(enabled)
+
     def render(self, result: PipelineResult, log_lines: list[str]) -> None:
         report = result.report
+        self._set_export_buttons_enabled(bool(result.report and result.final_md))
         self._set_metric_value(self.metric_errors, str(len(result.errors)))
         self._set_metric_value(self.metric_warnings, str(len(result.warnings)))
         self._set_metric_value(self.metric_infos, str(len(result.infos)))
@@ -626,6 +639,27 @@ class ResultsPanel(QWidget):
 
         # MD 源 + 日志
         self.tab_md.setPlainText(result.final_md)
+        self.tab_logs.setPlainText("\n".join(log_lines))
+
+    def render_failed(self, result: PipelineResult, log_lines: list[str]) -> None:
+        self._set_export_buttons_enabled(False)
+        self._set_metric_value(self.metric_errors, "1")
+        self._set_metric_value(self.metric_warnings, "0")
+        self._set_metric_value(self.metric_infos, "0")
+        self._set_metric_value(self.metric_duration, f"{result.duration_sec:.0f}s")
+
+        error_text = result.error_message or "未知错误"
+        self.tab_summary.setHtml(
+            "<h2>处理失败</h2>"
+            "<p>流水线未生成可导出的检查报告。请查看实时日志定位失败步骤。</p>"
+            f"<pre>{html.escape(error_text)}</pre>"
+        )
+        self._fill_issue_tree(self.tab_calc, [])
+        self._fill_issue_tree(self.tab_stats, [])
+        self._fill_issue_tree(self.tab_logic, [])
+        self.tab_plan.setPlainText("任务失败，未生成分析计划。")
+        self.tab_ai.setPlainText("任务失败，未生成 AI 最终审核。")
+        self.tab_md.setPlainText("")
         self.tab_logs.setPlainText("\n".join(log_lines))
 
     def _fill_issue_tree(self, tree: QTreeWidget, issues: list) -> None:
@@ -954,8 +988,7 @@ class MainWindow(QMainWindow):
                 f"流水线在某步骤失败：\n\n{result.error_message}\n\n查看运行日志了解详情。",
             )
             self.statusBar().showMessage("失败")
-            # 仍把日志展示出来
-            self.results_panel.tab_logs.setPlainText("\n".join(self._log_lines))
+            self.results_panel.render_failed(result, self._log_lines)
             self.stack.setCurrentWidget(self.results_panel)
             return
 

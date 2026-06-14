@@ -502,6 +502,72 @@ def extract_text_with_pdfplumber(pdf_path: str) -> str:
     return "\n\n".join(pages_text)
 
 
+def extract_text_with_pymupdf(pdf_path: str) -> str:
+    """用 PyMuPDF 提取文本层；用于 pdfplumber/pdfminer 内存失败时兜底。"""
+    from src.utils.text_normalize import normalize_numeric_text
+
+    try:
+        import pymupdf as fitz
+    except ImportError:
+        try:
+            import fitz  # PyMuPDF compatibility alias
+        except ImportError as exc:  # pragma: no cover - depends on deployment env
+            raise RuntimeError("PyMuPDF is required for text-layer fallback") from exc
+
+    pages_text: list[str] = []
+    with fitz.open(pdf_path) as doc:
+        total = len(doc)
+        for page_index, page in enumerate(doc, 1):
+            text = page.get_text("text") or ""
+            text = normalize_numeric_text(text)
+            pages_text.append(f"--- 第 {page_index} 页 / 共 {total} 页 ---\n{text}")
+    return "\n\n".join(pages_text)
+
+
+def _split_extracted_pages(text: str) -> list[str]:
+    pages = re.split(r"(?=--- 第 \d+ 页)", text) if "--- 第 " in text else [text]
+    pages = [page.strip() for page in pages if page.strip()]
+    return pages or [text]
+
+
+def _extract_text_layer(pdf_path: str) -> tuple[str, str]:
+    try:
+        return extract_text_with_pdfplumber(pdf_path), "pdfplumber"
+    except Exception as exc:
+        logger.warning("pdfplumber 文本层提取失败，尝试 PyMuPDF 兜底: %s", exc, exc_info=True)
+        return extract_text_with_pymupdf(pdf_path), "pymupdf"
+
+
+def _text_layer_result(
+    text: str,
+    method: str,
+    *,
+    ocr_output_dir: Optional[str] = None,
+    attempts: Optional[list[dict]] = None,
+) -> PDFExtractionResult:
+    page_list = _split_extracted_pages(text)
+    diagnostics = {
+        "page_count": text.count("--- 第 ") or len(page_list),
+        "raw_chars": len(text),
+        "clean_chars": len(text),
+        "plain_chars": len(text),
+        "compression_ratio": 1.0,
+        "high_markup_pages": [],
+        "identical_page_pairs": [],
+        "attempts": attempts or [],
+        "debug_dir": ocr_output_dir or "",
+        "method": method,
+    }
+    return PDFExtractionResult(
+        text=text,
+        pages=page_list,
+        method=method,
+        selected_profile=method,
+        diagnostics=diagnostics,
+        debug_output_dir=ocr_output_dir or "",
+    )
+
+
 def extract_tables_with_pdfplumber(pdf_path: str) -> list[dict]:
     """用 pdfplumber 提取每页的表格，返回结构化数据。"""
     results: list[dict] = []
@@ -557,6 +623,24 @@ def _normalize_layout_page(page_result: dict) -> dict:
     }
 
 
+def _paddle_request_with_retries(operation: str, request_func, max_attempts: int = 3):
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return request_func()
+        except requests.RequestException as exc:
+            if attempt >= max_attempts:
+                raise
+            delay = min(2 ** (attempt - 1), 5)
+            logger.warning(
+                "PaddleOCR %s 网络异常，第 %d/%d 次重试: %s",
+                operation,
+                attempt,
+                max_attempts,
+                exc,
+            )
+            time.sleep(delay)
+
+
 def _collect_layout_results_from_jsonl(jsonl_text: str) -> list[dict]:
     layout_results: list[dict] = []
     for line_num, raw_line in enumerate(jsonl_text.splitlines(), 1):
@@ -585,12 +669,19 @@ def _call_paddle_ocr_async(pdf_path: str, profile: dict) -> dict:
 
     logger.info("Submitting PaddleOCR async job for %s ...", pdf_path)
     with open(pdf_path, "rb") as file_obj:
-        response = requests.post(
-            PADDLE_OCR_ASYNC_JOB_URL,
-            headers=headers,
-            data=data,
-            files={"file": file_obj},
-            timeout=300,
+        def submit_job():
+            file_obj.seek(0)
+            return requests.post(
+                PADDLE_OCR_ASYNC_JOB_URL,
+                headers=headers,
+                data=data,
+                files={"file": file_obj},
+                timeout=300,
+            )
+
+        response = _paddle_request_with_retries(
+            "job submit",
+            submit_job,
         )
     body = _decode_paddle_response(response, "job submit")
     job_id = (body.get("data") or {}).get("jobId")
@@ -603,10 +694,13 @@ def _call_paddle_ocr_async(pdf_path: str, profile: dict) -> dict:
         if time.monotonic() > deadline:
             raise TimeoutError(f"PaddleOCR job {job_id} timed out after {PADDLE_OCR_POLL_TIMEOUT_SEC:g}s")
 
-        poll_response = requests.get(
-            f"{PADDLE_OCR_ASYNC_JOB_URL}/{job_id}",
-            headers=headers,
-            timeout=60,
+        poll_response = _paddle_request_with_retries(
+            "job poll",
+            lambda: requests.get(
+                f"{PADDLE_OCR_ASYNC_JOB_URL}/{job_id}",
+                headers=headers,
+                timeout=60,
+            ),
         )
         poll_body = _decode_paddle_response(poll_response, "job poll", allow_failed_job=True)
         job_data = poll_body.get("data") or {}
@@ -639,7 +733,10 @@ def _call_paddle_ocr_async(pdf_path: str, profile: dict) -> dict:
     if not jsonl_url:
         raise ValueError(f"PaddleOCR job {job_id} completed without jsonUrl")
 
-    jsonl_response = requests.get(jsonl_url, timeout=300)
+    jsonl_response = _paddle_request_with_retries(
+        "result download",
+        lambda: requests.get(jsonl_url, timeout=300),
+    )
     jsonl_response.raise_for_status()
     layout_results = _collect_layout_results_from_jsonl(jsonl_response.text)
     if not layout_results:
@@ -683,6 +780,12 @@ def _call_paddle_ocr(pdf_path: str, profile: dict) -> dict:
     if PADDLE_OCR_USE_ASYNC:
         try:
             return _call_paddle_ocr_async(pdf_path, profile)
+        except requests.RequestException:
+            logger.warning(
+                "PaddleOCR async API failed with a network error; skip legacy base64 fallback",
+                exc_info=True,
+            )
+            raise
         except Exception:
             if not PADDLE_OCR_ENABLE_LEGACY_FALLBACK:
                 raise
@@ -838,44 +941,31 @@ def extract_pdf(
                 if _assess_text_quality(result.text, result.diagnostics["page_count"]):
                     return result if return_details else result.text
                 logger.warning("OCR %s profile 清洗后文本质量一般，尝试回退 profile", profile_name)
+            except requests.RequestException as exc:
+                attempts.append({"profile": profile_name, "error": str(exc), "kind": "network"})
+                logger.warning("PaddleOCR %s profile 网络失败，停止继续尝试 OCR profile: %s", profile_name, exc)
+                if not auto_fallback:
+                    raise
+                break
             except Exception as exc:
                 attempts.append({"profile": profile_name, "error": str(exc)})
                 logger.warning("PaddleOCR %s profile 失败: %s", profile_name, exc)
                 if use_ocr and not auto_fallback:
                     raise
 
-        logger.warning("PaddleOCR 不可用或质量不足，回退 pdfplumber")
-        text = extract_text_with_pdfplumber(pdf_path)
-        page_count = text.count("--- 第 ")
-        # 按页拆分，保持与 OCR 路径一致
-        page_list = re.split(r"(?=--- 第 \d+ 页)", text)
-        page_list = [p.strip() for p in page_list if p.strip()]
-        if not page_list:
-            page_list = [text]
-        diagnostics = {
-            "page_count": page_count or len(page_list),
-            "raw_chars": len(text),
-            "clean_chars": len(text),
-            "plain_chars": len(text),
-            "compression_ratio": 1.0,
-            "high_markup_pages": [],
-            "identical_page_pairs": [],
-            "attempts": attempts,
-            "debug_dir": ocr_output_dir or "",
-            "method": "pdfplumber",
-        }
-        result = PDFExtractionResult(
-            text=text,
-            pages=page_list,
-            method="pdfplumber",
-            selected_profile="pdfplumber",
-            diagnostics=diagnostics,
-            debug_output_dir=ocr_output_dir or "",
+        logger.warning("PaddleOCR 不可用或质量不足，回退文本层提取")
+        text, text_method = _extract_text_layer(pdf_path)
+        result = _text_layer_result(
+            text,
+            text_method,
+            ocr_output_dir=ocr_output_dir,
+            attempts=attempts,
         )
         return result if return_details else result.text
 
-    logger.info("使用 pdfplumber 模式提取")
-    text = extract_text_with_pdfplumber(pdf_path)
+    logger.info("使用文本层模式提取")
+    text, text_method = _extract_text_layer(pdf_path)
+    ocr_attempts: list[dict] = []
     if auto_fallback and not _assess_text_quality(text, max(1, text.count("--- 第 "))):
         logger.info("pdfplumber 提取效果不佳，自动切换到 PaddleOCR")
         attempts: list[dict] = []
@@ -903,27 +993,14 @@ def extract_pdf(
                 if _assess_text_quality(result.text, result.diagnostics["page_count"]):
                     return result if return_details else result.text
                 logger.warning("自动切换 OCR 后，%s profile 质量一般，继续尝试下一 profile", profile_name)
+            except requests.RequestException as exc:
+                attempts.append({"profile": profile_name, "error": str(exc), "kind": "network"})
+                logger.warning("自动切换 OCR 时，%s profile 网络失败，停止继续尝试 OCR profile: %s", profile_name, exc)
+                break
             except Exception as exc:
                 attempts.append({"profile": profile_name, "error": str(exc)})
                 logger.warning("自动切换 OCR 时，%s profile 失败: %s", profile_name, exc)
+        ocr_attempts = attempts
 
-    result = PDFExtractionResult(
-        text=text,
-        pages=re.split(r"(?=--- 第 \d+ 页)", text) if "--- 第 " in text else [text],
-        method="pdfplumber",
-        selected_profile="pdfplumber",
-        diagnostics={
-            "page_count": text.count("--- 第 "),
-            "raw_chars": len(text),
-            "clean_chars": len(text),
-            "plain_chars": len(text),
-            "compression_ratio": 1.0,
-            "high_markup_pages": [],
-            "identical_page_pairs": [],
-            "attempts": [],
-            "debug_dir": ocr_output_dir or "",
-            "method": "pdfplumber",
-        },
-        debug_output_dir=ocr_output_dir or "",
-    )
+    result = _text_layer_result(text, text_method, ocr_output_dir=ocr_output_dir, attempts=ocr_attempts)
     return result if return_details else result.text

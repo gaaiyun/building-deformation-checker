@@ -82,6 +82,11 @@ class DesktopMainWindowTests(unittest.TestCase):
         panel = ConfigPanel({})
         self.assertEqual(panel.paddle_ocr_model.currentText(), "PaddleOCR-VL-1.6")
 
+    def test_config_panel_migrates_legacy_paddle_defaults_to_vl_16(self):
+        for legacy_model in ("PaddleOCR-VL-1.5", "PaddleOCR-VL"):
+            panel = ConfigPanel({"paddle_ocr_model": legacy_model})
+            self.assertEqual(panel.paddle_ocr_model.currentText(), "PaddleOCR-VL-1.6")
+
     def test_config_panel_defaults_to_deepseek_v4_flash(self):
         panel = ConfigPanel({})
 
@@ -236,6 +241,60 @@ class DesktopMainWindowTests(unittest.TestCase):
         self.assertIn("检查报告", panel.tab_md.toPlainText())
         self.assertIn("log line", panel.tab_logs.toPlainText())
         self.assertGreater(panel.tab_calc.topLevelItemCount(), 0)
+
+    def test_failed_pipeline_renders_error_state_and_disables_exports(self):
+        win = MainWindow()
+        try:
+            result = PipelineResult(
+                success=False,
+                error_message="InvalidURL: Invalid port: ':1'",
+                duration_sec=1.2,
+            )
+            win._log_lines = ["step 1 ok", "InvalidURL stack trace"]
+
+            with patch("gui_desktop.main_window.QMessageBox.critical", return_value=None):
+                win._on_pipeline_finished(result)
+
+            self.assertIs(win.stack.currentWidget(), win.results_panel)
+            self.assertIn("InvalidURL", win.results_panel.tab_summary.toPlainText())
+            self.assertIn("InvalidURL stack trace", win.results_panel.tab_logs.toPlainText())
+            self.assertFalse(win.results_panel.btn_md.isEnabled())
+            self.assertFalse(win.results_panel.btn_docx.isEnabled())
+            self.assertFalse(win.results_panel.btn_html.isEnabled())
+            self.assertFalse(win.results_panel.btn_xlsx.isEnabled())
+        finally:
+            win.close()
+
+    def test_failed_pipeline_clears_previous_successful_result_content(self):
+        panel = ResultsPanel()
+        success = PipelineResult(
+            success=True,
+            report=MonitoringReport(project_name="旧项目", monitoring_company="旧单位"),
+            final_md="# 旧报告\n\n旧内容",
+            output_path="output/old.md",
+            duration_sec=2.0,
+        )
+        success.calc_issues = [
+            CheckIssue(
+                severity="error",
+                table_name="旧表",
+                point_id="OLD1",
+                field_name="旧字段",
+                expected_value="1",
+                actual_value="2",
+                message="旧问题",
+            )
+        ]
+        panel.render(success, ["old log"])
+
+        failure = PipelineResult(success=False, error_message="new failure", duration_sec=1.0)
+        panel.render_failed(failure, ["new log"])
+
+        self.assertIn("new failure", panel.tab_summary.toPlainText())
+        self.assertNotIn("旧项目", panel.tab_summary.toPlainText())
+        self.assertEqual(panel.tab_md.toPlainText(), "")
+        self.assertNotIn("旧问题", panel.tab_calc.topLevelItem(0).text(0))
+        self.assertIn("new log", panel.tab_logs.toPlainText())
 
     def test_results_panel_exposes_excel_intermediate_export(self):
         panel = ResultsPanel()

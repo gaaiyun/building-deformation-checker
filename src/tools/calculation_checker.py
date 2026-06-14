@@ -491,19 +491,50 @@ def _is_value_copy(t1: MonitoringTable, t2: MonitoringTable) -> bool:
     return common >= 2
 
 
+FIRST_PERIOD_BASELINE_CUES = (
+    "首测",
+    "初测",
+    "首次监测",
+    "第一期",
+    "第1期",
+    "第 1 期",
+    "第一次",
+    "第1次",
+    "第 1 次",
+    "初始监测",
+    "起始监测",
+    "初始基准",
+    "基准日",
+)
+
+
+def _has_first_period_baseline_evidence(report: MonitoringReport, table: MonitoringTable) -> bool:
+    """判断报告时间段首日是否有足够证据可视为项目初始/首测日。"""
+    text = "\n".join(
+        str(part or "")
+        for part in (
+            table.monitor_count,
+            table.monitor_date,
+            table.monitoring_item,
+        )
+    )
+    return any(cue in text for cue in FIRST_PERIOD_BASELINE_CUES)
+
+
 def check_first_period_baseline(
     report: MonitoringReport,
     issues: list[CheckIssue],
 ) -> None:
-    """首期无初始值表校验：监测时间段第一天的累计变化应等于本次变化。
+    """首期无初始值表校验：仅在有首测证据时硬判累计变化应等于本次变化。
 
     适用场景：
         - 横向多期布局拆分后的第一期表；
         - 表中没有显式 initial_value；
         - 每行有 current_change 与 cumulative_change。
 
-    业务口径：如果报告没有写明初始值，则监测时间段第一天视为初始基准日。
-    因此首期累计变化应从 0 开始累加，等价于本次变化。
+    注意：报告"监测时间段"首日常常只是本期报告的起点，不一定是项目首测日。
+    只有文本或监测次数提供首测/第 1 次证据，或表内多数行支持 cumulative≈current，
+    才把该假设升级为硬校验；否则跳过，避免把正确的历史累计值误报为错误。
     """
     first_date_key = _first_monitoring_date_key(report)
     if not first_date_key:
@@ -527,6 +558,27 @@ def check_first_period_baseline(
             if pt.current_change is not None and pt.cumulative_change is not None
         ]
         if not valid_pts:
+            continue
+
+        match_count = 0
+        for pt in valid_pts:
+            tol = max(
+                table.verification_config.cumulative_tolerance,
+                0.15,
+                abs(pt.cumulative_change or 0.0) * 0.05,
+            )
+            if _close_enough(pt.current_change, pt.cumulative_change, tol):
+                match_count += 1
+
+        baseline_supported_by_data = (
+            len(valid_pts) >= 2
+            and match_count / len(valid_pts) >= 0.6
+        )
+        if not baseline_supported_by_data and not _has_first_period_baseline_evidence(report, table):
+            logger.info(
+                "表 [%s] 位于报告时间段首日，但缺少首测/初始基准证据，跳过首期累计基准硬校验",
+                table.monitoring_item,
+            )
             continue
 
         table_issues: list[CheckIssue] = []

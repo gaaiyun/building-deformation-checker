@@ -22,6 +22,8 @@ def test_streamlit_app_uses_branded_deepseek_and_paddle_defaults():
     assert "cfg_llm_parse_max_parallel" in text
     assert "LLM 分块并发数" in text
     assert "PADDLE_OCR_USE_CACHE" in text
+    assert 'LEGACY_PADDLE_DEFAULT_MODELS = {"PaddleOCR-VL-1.5", "PaddleOCR-VL"}' in text
+    assert "_normalize_paddle_model(saved.get(\"paddle_ocr_model\", cfg.PADDLE_OCR_MODEL))" in text
     assert "hashlib.sha256" in text
     assert "output\") / \"streamlit_uploads" in text
     assert 'st.expander("PaddleOCR（可选）", expanded=True)' in text
@@ -29,6 +31,15 @@ def test_streamlit_app_uses_branded_deepseek_and_paddle_defaults():
     assert "正在启动后台检查任务" in text
     assert "已开始检查，后台任务运行中" in text
     assert "任务启动失败" in text
+
+
+def test_streamlit_failed_state_accepts_new_uploaded_pdf():
+    text = (ROOT / "app.py").read_text(encoding="utf-8")
+    failed_branch = text.split("# Cancelled / Failed", 1)[1]
+
+    assert "uploaded_signature" in failed_branch
+    assert "处理新 PDF" in failed_branch
+    assert "_store_uploaded_pdf(uploaded)" in failed_branch
     assert "@st.cache_resource" in text
     assert "def _task_registry" in text
     assert "后台任务状态丢失" in text

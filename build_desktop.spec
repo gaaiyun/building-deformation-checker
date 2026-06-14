@@ -42,6 +42,8 @@ a = Analysis(
         'PySide6.QtWidgets',
         # PDF 处理
         'pdfplumber',
+        'pymupdf',
+        'fitz',
         'pypdfium2',
         # docx 导出
         'docx',

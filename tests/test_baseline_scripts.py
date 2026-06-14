@@ -89,3 +89,17 @@ def test_score_recall_handles_empty_and_category_field_names():
     assert mod._gt_keywords("") == []
     assert "沉降" in mod._gt_keywords("累计沉降 / (mm)")
     assert "水位" in mod._gt_keywords("地下水位 / (mm)")
+
+
+def test_acceptance_regression_script_declares_all_release_samples_without_keys():
+    script_path = ROOT / "scripts" / "run_acceptance_regression.py"
+    mod = _load_module(script_path, "run_acceptance_regression")
+
+    assert len(mod.EXCEL_CASES) == 6
+    assert len(mod.ORIGINAL_CASES) == 5
+    assert len(mod.PADDLE_CASES) == 1
+    assert any(case[3] is True for case in mod.PADDLE_CASES)
+
+    text = script_path.read_text(encoding="utf-8")
+    assert "sk-" not in text
+    assert "PADDLE_OCR_TOKEN" in text

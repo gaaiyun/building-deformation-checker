@@ -377,12 +377,14 @@ def check_table_statistics(
                                 ),
                             ))
                         else:
+                            severity = "warning" if is_deep else "error"
+                            prefix = "深层/测斜统计摘要口径不稳定，需人工复核: " if is_deep else ""
                             issues.append(CheckIssue(
-                                severity="error", table_name=table_label,
+                                severity=severity, table_name=table_label,
                                 point_id=actual_pos_id, field_name="正方向最大统计",
                                 expected_value=_fmt(actual_pos_val, 2),
                                 actual_value=_fmt(stats.positive_max_value, 2),
-                                message=f"正方向最大不符: 实际 {actual_pos_id}={_fmt(actual_pos_val, 2)}, 报告 {stats.positive_max_id}={_fmt(stats.positive_max_value, 2)}",
+                                message=f"{prefix}正方向最大不符: 实际 {actual_pos_id}={_fmt(actual_pos_val, 2)}, 报告 {stats.positive_max_id}={_fmt(stats.positive_max_value, 2)}",
                             ))
 
         # ── 负方向最大统计 ────────────────────────────────
@@ -455,12 +457,14 @@ def check_table_statistics(
                                 ),
                             ))
                         else:
+                            severity = "warning" if is_deep else "error"
+                            prefix = "深层/测斜统计摘要口径不稳定，需人工复核: " if is_deep else ""
                             issues.append(CheckIssue(
-                                severity="error", table_name=table_label,
+                                severity=severity, table_name=table_label,
                                 point_id=actual_neg_id, field_name="负方向最大统计",
                                 expected_value=_fmt(actual_neg_val, 2),
                                 actual_value=_fmt(stats.negative_max_value, 2),
-                                message=f"负方向最大不符: 实际 {actual_neg_id}={_fmt(actual_neg_val, 2)}, 报告 {stats.negative_max_id}={_fmt(stats.negative_max_value, 2)}",
+                                message=f"{prefix}负方向最大不符: 实际 {actual_neg_id}={_fmt(actual_neg_val, 2)}, 报告 {stats.negative_max_id}={_fmt(stats.negative_max_value, 2)}",
                             ))
 
     # ── 最大速率统计 ──────────────────────────────────────
@@ -513,12 +517,14 @@ def check_table_statistics(
                     ),
                 ))
             elif not _close(abs(actual_rate_val), abs(stats.max_rate_value), RATE_TOLERANCE):
+                severity = "warning" if is_deep else "error"
+                prefix = "深层/测斜统计摘要口径不稳定，需人工复核: " if is_deep else ""
                 issues.append(CheckIssue(
-                    severity="error", table_name=table_label,
+                    severity=severity, table_name=table_label,
                     point_id=actual_rate_id, field_name="最大速率统计",
                     expected_value=_fmt(actual_rate_val),
                     actual_value=_fmt(stats.max_rate_value),
-                    message=f"最大速率不符: 实际 {actual_rate_id}={_fmt(actual_rate_val)}, 报告 {stats.max_rate_id}={_fmt(stats.max_rate_value)}",
+                    message=f"{prefix}最大速率不符: 实际 {actual_rate_id}={_fmt(actual_rate_val)}, 报告 {stats.max_rate_id}={_fmt(stats.max_rate_value)}",
                 ))
 
     if change_vals and stats.max_change_value is not None:

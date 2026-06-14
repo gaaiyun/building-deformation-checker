@@ -55,7 +55,7 @@ flowchart TB
     end
 
     subgraph TOOLS["src/tools/ · 8 步工具"]
-        T1["pdf_extractor<br/>PyMuPDF / pdfplumber / PaddleOCR"]
+        T1["pdf_extractor<br/>pdfplumber / PyMuPDF / PaddleOCR"]
         T2["llm_parser<br/>结构化 JSON 解析"]
         T3["table_analyzer<br/>动态配置 + ReAct 计划"]
         T4["calculation_checker"]
@@ -102,7 +102,7 @@ flowchart TB
 ```mermaid
 flowchart LR
     PDF[("PDF<br/>报告")] --> S1
-    S1["Step 1<br/>PDF 提取<br/>PyMuPDF/pdfplumber/OCR"] --> S2
+    S1["Step 1<br/>PDF 提取<br/>pdfplumber/PyMuPDF/OCR"] --> S2
     S2["Step 2<br/>LLM 结构化解析<br/>文本 → JSON"] --> S25
     S25["Step 2.5<br/>分析计划<br/>ReAct"] --> S3
     S3["Step 3<br/>计算验证<br/>累计变化/速率"] --> S4
@@ -110,7 +110,7 @@ flowchart LR
     S5["Step 5<br/>逻辑检查<br/>安全状态/汇总一致"] --> S6
     S6["Step 6<br/>AI 自验证<br/>error 二次确认"] --> S7
     S7["Step 7<br/>AI 最终审核<br/>整体复读"] --> S8
-    S8["Step 8<br/>报告生成<br/>MD/DOCX/HTML"] --> OUT[("检查报告")]
+    S8["Step 8<br/>报告生成<br/>MD/DOCX/HTML/XLSX"] --> OUT[("检查报告")]
 
     style S1 fill:#e0f2fe,stroke:#0284c7
     style S2 fill:#fef3c7,stroke:#d97706
@@ -124,7 +124,7 @@ flowchart LR
 
 | Step | 名称 | 耗时 | 说明 |
 |------|------|------|------|
-| 1 | PDF 提取 | 5–30 s | PyMuPDF 文本层先判，质量不足回退 pdfplumber 再回退 PaddleOCR-VL。OCR 结果按 PDF SHA256 + profile 指纹缓存。同时扫描 OCR 缓存目录识别损毁（连续 200+ 同字符 blob、行重复 50+ 次）。 |
+| 1 | PDF 提取 | 5–30 s | pdfplumber 文本层优先；若 pdfminer 内存/解析失败则用 PyMuPDF 兜底；文本层质量不足时回退 PaddleOCR-VL。OCR 结果按 PDF SHA256 + profile 指纹缓存。同时扫描 OCR 缓存目录识别损毁（连续 200+ 同字符 blob、行重复 50+ 次）。 |
 | 2 | LLM 结构化解析 | 60–300 s | 多策略分块（页 / 表 / 字符），按 `LLM_PARSE_MAX_PARALLEL` 并发发送给 LLM，结果按原 chunk 顺序合并为统一 JSON。响应按 SHA256(messages+params) 磁盘缓存（temperature ≤ 0.3 时），开发迭代可达 **9× 速度提升**。若分块失败，报告会给出“LLM 分块解析”警告，不能视作完整通过。 |
 | 2.5 | 分析计划 (ReAct) | <1 s | 纯 Python，把对每张表的字段识别、单位推断、容差选择、将要执行的验证规则**显式输出**，供用户审查 AI 理解过程。 |
 | 3 | 计算验证 | <1 s | 累计变化 = 本次 − 初始；变化速率 = 本次变化 / 间隔天数。容差按表动态调整。**符号一致性检查**：sign(current − initial) 应与 sign(cumulative) 同号（量级悬殊 >10× 时跳过避免误报）。**单期变化幅度异常**：测点本次变化 > 3× 中位数（离群）或 \|本次\| > 3 × \|累计\|（不协调）。 |
@@ -156,9 +156,6 @@ cd building-deformation-checker
 
 # 通用依赖
 pip install -r requirements.txt
-
-# 文本层快速路由（推荐）
-pip install pymupdf
 ```
 
 `requirements.txt` 当前内容：
@@ -166,12 +163,14 @@ pip install pymupdf
 ```
 openai>=1.0.0        # LLM 调用（OpenAI 兼容协议）
 pdfplumber>=0.11.0   # 文字版 PDF 解析
+PyMuPDF>=1.24.0      # pdfplumber/pdfminer 失败时的文本层兜底
 requests>=2.31.0     # PaddleOCR API 调用
 streamlit>=1.37.0    # Streamlit Web UI
 PySide6>=6.5.0       # 桌面 GUI
 python-docx>=1.0.0   # Word 导出
 openpyxl>=3.1.0      # Excel 中间层导出
 markdown>=3.5.0      # Markdown → HTML
+json5>=0.14.0        # LLM 输出 JSON 容错
 keyring>=25.0.0      # 桌面版敏感配置存储
 pyinstaller>=6.0.0   # 桌面版 .exe 打包
 ```
@@ -246,14 +245,14 @@ python main.py "报告.pdf" --model deepseek-v4-flash -o output/my_check.md
 
 ```bash
 # PowerShell (Windows)
-$env:LLM_API_KEY = "sk-..."
+$env:LLM_API_KEY = "<LLM_API_KEY>"
 $env:LLM_BASE_URL = "https://api.deepseek.com"
 $env:LLM_MODEL = "deepseek-v4-flash"
 $env:PADDLE_OCR_TOKEN = "..."           # 可选
 $env:PADDLE_OCR_MODEL = "PaddleOCR-VL-1.6"
 
 # bash / zsh
-export LLM_API_KEY="sk-..."
+export LLM_API_KEY="<LLM_API_KEY>"
 export LLM_BASE_URL="https://api.deepseek.com"
 export LLM_MODEL="deepseek-v4-flash"
 export PADDLE_OCR_MODEL="PaddleOCR-VL-1.6"
@@ -335,7 +334,7 @@ stateDiagram
     running --> failed: result.success == False
     running --> cancelled: 用户取消 → cancel_event.set()
     done --> done: 下载 MD/DOCX/HTML<br/>(rerun 不丢状态)
-    done --> idle: 点击 新建任务<br/>清空 session_state
+    done --> idle: 点击 新建任务<br/>清空任务状态
     failed --> idle: 点击 返回首页
     cancelled --> idle: 点击 返回首页
 
@@ -423,53 +422,18 @@ python -m pytest tests/test_default_provider_config.py tests/test_streamlit_app_
 
 真实 PDF、Excel 转 PDF 和 OCR 缓存属于本地回归材料，默认放在 `output/` 并被 git ignore；交付前可按需在本机跑完整回归并保留证据目录。
 
-### 最新无缓存实测回归（2026-06-06）
+### 当前验收记录
 
-最新一轮实测在 `output/live_full_regression_20260606_013323/DETAILED_LIVE_TEST_REPORT.md` 生成完整报告。测试方式：6 个 Excel 纠正对照样本先转换为 fresh PDF，再与 5 个原生 PDF 一起逐个跑；禁用 LLM/OCR 缓存，并实际启用 PaddleOCR-VL-1.6。
+最新可交付状态以 `docs/实际测试报告.md` 和本地 `output/` 下对应证据目录为准。发布前必须重新执行：
 
-| 类别 | 样本数 | 结果 | 说明 |
-|------|------:|------|------|
-| Excel 转 PDF 纠正对照 | 6 | 6/6 生成报告 | 大表格 PDF 文本层更稳定，Paddle 强制路径普遍超时 |
-| 原生 PDF | 5 | 5/5 生成报告 | 4 个原生 PDF 直接走 PaddleOCR 成功，红土样本回退 pdfplumber 成功 |
-| 总计 | 11 | 11/11 有可用报告 | `all_results_background_corrected.json` 保存结构化证据 |
-
-关键结论：PaddleOCR-VL-1.6 链路可用，但对 Excel 导出的数字型大表格 PDF 不应默认强制 OCR；推荐“文本层优先，质量不足再 PaddleOCR”。质安模板错误/正确对照最符合预期（错误版 2 error，正确版 0 error）；深工勘和展誉需要补充逐字段 ground truth 才能做精确检出率评价。
-
-### 旧桌面分支同步回归（2026-06-07）
-
-从旧桌面工程恢复并对比后，只迁入仍适用于当前主线的修复：LLM 分块返回 `null`/非对象时降级、短 JSON 缓存判定、Step 6 统一 LLM 调用与缓存隔离、阈值负号展示、最大速率符号不一致提示、跨页占位复制值连续性跳过，以及桌面端关闭事件的线程安全收尾。旧分支里与当前主线相冲突的“单期汇总必须 error”等策略未迁入。
-
-本轮维护同步修复了 Streamlit 后台任务注册表：后台线程句柄改由 `st.cache_resource` 保存，避免 rerun 后“上传后点击检查没反应 / 任务直接失败”的状态丢失问题；失败态也会显示明确错误信息和日志入口。
-
-### 交付验证回归（2026-06-07）
-
-本机交付前完成以下验证，所有命令均在当前主仓库执行，未使用旧桌面工程副本作为源码：
-
-| 项目 | 结果 | 证据 |
-|------|------|------|
-| 源码目录隔离 | 通过 | 当前主仓库为唯一打包源码；旧工程与真实样本只保存在仓库外本机备份，不纳入 git 或安装包 |
-| pytest 全量回归 | 通过 | `338 passed, 4 skipped` |
-| Streamlit UI smoke | 通过 | Playwright 启动页面、检查城安物联品牌、DeepSeek/PaddleOCR 配置、上传 PDF、点击检查 |
-| Streamlit 闭环（本地 mock LLM） | 通过 | 跑到完成态，Markdown / Word / HTML 三个下载按钮可见；截图 `output/streamlit_mock_latest_bottom.png` |
-| Streamlit 闭环（真实 DeepSeek） | 通过 | 真实上传、真实点击、真实 API，完成态三种下载可见；截图 `output/streamlit_deepseek_real_done.png` |
-| 核心 pipeline（真实 DeepSeek，无缓存） | 通过 | 小样本 smoke 成功；此前真实报告无缓存回归 16 张数据表，Step 7 最终审核完成 |
-| PaddleOCR-VL-1.6 强制 OCR | 通过 | 真实 PaddleOCR + DeepSeek 在真实报告样本跑通，12 张表，报告输出到 `output/paddle_report_final_smoke_20260607/` |
-| 桌面 QThread worker（真实 DeepSeek，无缓存） | 通过 | `PipelineWorker -> QThread -> run_pipeline` 完成，报告输出到 `output/desktop_worker_deepseek_20260607/` |
-| 打包 EXE | 通过 | `dist/BuildingDeformationChecker.exe` 启动后窗口标题为“建筑变形监测报告核验台 · 桌面版”，进程响应正常 |
-| MSI 安装包 | 通过 | `scripts/verify_msi.ps1 -Install` 静默安装、启动安装后 EXE、静默卸载通过；SHA256 由 `verify_msi.ps1` 输出 |
-
-### 交付验证回归（2026-06-08）
-
-本轮针对恒大中心 99 页真实 PDF 做无缓存性能与报告效果复测，并同步检查 Streamlit/桌面配置链路：
-
-| 项目 | 结果 | 证据 |
-|------|------|------|
-| pytest 全量回归 | 通过 | `354 passed, 4 skipped` |
-| Streamlit UI smoke | 通过 | Playwright 启动 `app.py`，检查城安物联品牌、DeepSeek/PaddleOCR、`LLM 分块并发数`、上传入口；截图 `output/streamlit_smoke_20260608/streamlit_home.png` |
-| 恒大 PDF 基线（无缓存） | 完成 | `output/hengda_speed_effect_20260608_baseline/`；总耗时 560.12s，Step 2 为 422.44s，Step 5 为 84.74s，39 张表，25 个 warning |
-| 恒大 PDF 快速优化（无缓存） | 完成 | `output/hengda_speed_effect_20260608_optimized/`；总耗时约 305s，Step 5 降到 <1s，报告噪声显著降低；但该轮只抽到 29 张表，不能作为最终准确性基线 |
-| 恒大 PDF 平衡复测（无缓存） | 部分完成 | `output/hengda_speed_effect_20260608_balanced/`；总耗时 469.23s，36 张表；DeepSeek 后段返回 402 Insufficient Balance / 连接错误，分块解析不完整，报告会以 warning 暴露 |
-| 打包 EXE/MSI | 通过 | `dist/BuildingDeformationChecker.exe` 启动烟测通过；`dist/BuildingDeformationChecker-2.1.6.msi` 静默安装、启动安装后 EXE、静默卸载通过，SHA256 `F335FC144962A60DFE8131FF27CC48CBA9AB2BB4FB9821FA258C0F0C3CDE71B0` |
+| 验收项 | 要求 |
+|------|------|
+| pytest | 全量单元/集成测试通过，输出不写死在文档中 |
+| 真实样本 | 6 个 Excel 纠正对照转 PDF + 原生 PDF 样本从头运行，记录错误/警告/耗时/提取方式 |
+| PaddleOCR | 至少一个样本强制启用 PaddleOCR-VL-1.6；若外部服务网络失败，报告需记录请求错误而不是闪退或误报通过 |
+| Streamlit | 浏览器实际启动、上传 PDF、点击检查、失败态重新上传、完成态导出 Markdown/Word/HTML/Excel 中间层 |
+| 桌面 EXE/MSI | 使用当前源码打包，EXE 启动 smoke 通过；MSI 静默安装、安装后启动、卸载通过 |
+| 文档一致性 | README、部署说明、计算逻辑说明与当前代码行为一致，无硬编码过期测试数量或旧默认模型 |
 
 辅助工具：`scripts/mock_openai_server.py` 提供本地 OpenAI 兼容 mock 服务，只用于 UI/打包烟测，不包含任何真实 key。
 
@@ -499,7 +463,7 @@ building-deformation-checker/
 │   │   ├── text_normalize.py        # Unicode 数字归一化
 │   │   └── llm_client.py
 │   └── tools/
-│       ├── pdf_extractor.py         # PyMuPDF/pdfplumber/PaddleOCR-VL 路由
+│       ├── pdf_extractor.py         # pdfplumber/PyMuPDF/PaddleOCR-VL 路由
 │       ├── llm_parser.py            # LLM 结构化解析
 │       ├── table_analyzer.py        # 动态配置 + ReAct 计划
 │       ├── calculation_checker.py
@@ -562,7 +526,7 @@ building-deformation-checker/
 ...
 ```
 
-完整样例见 `output/batch_fast_20260513/` 目录下的四份 Markdown。
+完整样例输出位于本地 `output/` 目录；仓库不随源码分发历史大体积回归输出。若要复现，请使用 `test_pdfs/` 或本地归档样本重新运行。
 
 ---
 

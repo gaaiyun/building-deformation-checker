@@ -147,8 +147,8 @@ class CalculationCheckerTests(unittest.TestCase):
 
         self.assertFalse(any(issue.field_name == "首期累计基准" for issue in issues))
 
-    def test_first_period_without_initial_detects_bad_cumulative_baseline(self):
-        """无初始值列时，首日累计不等于本次变化应作为计算错误。"""
+    def test_first_period_without_initial_skips_when_period_start_is_not_initial_baseline(self):
+        """报告时间段首日不等于项目首测日时，不能硬判累计应等于本次变化。"""
         table = MonitoringTable(
             monitoring_item="基坑顶水平位移",
             category=MonitoringCategory.HORIZONTAL_DISP,
@@ -156,15 +156,69 @@ class CalculationCheckerTests(unittest.TestCase):
             verification_config=TableVerificationConfig(interval_days=1),
             points=[
                 MeasurementPoint(point_id="WY1", current_change=0.30, cumulative_change=1.20),
+                MeasurementPoint(point_id="WY2", current_change=-0.20, cumulative_change=4.80),
+                MeasurementPoint(point_id="WY3", current_change=0.10, cumulative_change=2.90),
             ],
         )
-        report = MonitoringReport(monitoring_period="2022-05-16至2022-05-22", tables=[table])
+        report = MonitoringReport(
+            monitoring_period="2022-05-16至2022-05-22",
+            tables=[table],
+            raw_text="本报告为例行周报，监测时间段为2022-05-16至2022-05-22。",
+        )
+
+        issues = run_calculation_checks(report)
+        first_period_errors = [
+            issue for issue in issues
+            if issue.field_name == "首期累计基准" and issue.severity == "error"
+        ]
+
+        self.assertEqual(first_period_errors, [])
+
+    def test_first_period_without_initial_detects_bad_cumulative_baseline_when_evidence_exists(self):
+        """有首测证据时，首日累计不等于本次变化应作为计算错误。"""
+        table = MonitoringTable(
+            monitoring_item="基坑顶水平位移",
+            category=MonitoringCategory.HORIZONTAL_DISP,
+            monitor_date="2022-05-16",
+            monitor_count="第1次",
+            verification_config=TableVerificationConfig(interval_days=1),
+            points=[
+                MeasurementPoint(point_id="WY1", current_change=0.30, cumulative_change=1.20),
+            ],
+        )
+        report = MonitoringReport(
+            monitoring_period="2022-05-16至2022-05-22",
+            tables=[table],
+            raw_text="本期为首次监测，未单列初始值。",
+        )
 
         issues = run_calculation_checks(report)
         first_period = [issue for issue in issues if issue.field_name == "首期累计基准"]
 
         self.assertEqual(len(first_period), 1)
         self.assertEqual(first_period[0].severity, "error")
+
+    def test_first_period_global_raw_text_cue_does_not_trigger_table_without_evidence(self):
+        """全局正文出现“首次”等词，不能让无表级证据的历史累计表误报。"""
+        table = MonitoringTable(
+            monitoring_item="基坑顶水平位移",
+            category=MonitoringCategory.HORIZONTAL_DISP,
+            monitor_date="2022-05-16",
+            verification_config=TableVerificationConfig(interval_days=1),
+            points=[
+                MeasurementPoint(point_id="WY1", current_change=0.30, cumulative_change=8.20),
+                MeasurementPoint(point_id="WY2", current_change=-0.20, cumulative_change=4.80),
+            ],
+        )
+        report = MonitoringReport(
+            monitoring_period="2022-05-16至2022-05-22",
+            tables=[table],
+            raw_text="首次监测技术交底会议已完成。本报告为第209期历史累计监测报告。",
+        )
+
+        issues = run_calculation_checks(report)
+
+        self.assertFalse(any(issue.field_name == "首期累计基准" for issue in issues))
 
 
 class IntervalInferenceArbitrationTests(unittest.TestCase):

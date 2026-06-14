@@ -73,6 +73,7 @@ PADDLE_MODEL_OPTIONS = [
     "PP-StructureV3",
     "PP-OCRv5",
 ]
+LEGACY_PADDLE_DEFAULT_MODELS = {"PaddleOCR-VL-1.5", "PaddleOCR-VL"}
 
 
 def _streamlit_supports_width_stretch() -> bool:
@@ -137,7 +138,7 @@ def _init_state() -> None:
         ss.cfg_llm_api_key = saved.get("llm_api_key", cfg.LLM_API_KEY)
         ss.cfg_llm_model = saved.get("llm_model", cfg.LLM_MODEL)
         ss.cfg_paddle_token = saved.get("paddle_ocr_token", cfg.PADDLE_OCR_TOKEN)
-        ss.cfg_paddle_model = saved.get("paddle_ocr_model", cfg.PADDLE_OCR_MODEL)
+        ss.cfg_paddle_model = _normalize_paddle_model(saved.get("paddle_ocr_model", cfg.PADDLE_OCR_MODEL))
         ss.cfg_paddle_cache = bool(saved.get("paddle_ocr_use_cache", True))
         ss.cfg_paddle_async = bool(saved.get("paddle_ocr_use_async", True))
         ss.cfg_skip_self_verify = bool(saved.get("skip_self_verify", False))
@@ -185,6 +186,13 @@ def _infer_llm_provider(base_url: str) -> str:
     if base == "https://api.minimaxi.com/v1":
         return "MiniMax"
     return "自定义 OpenAI 兼容"
+
+
+def _normalize_paddle_model(model: str | None) -> str:
+    model = (model or "").strip()
+    if not model or model in LEGACY_PADDLE_DEFAULT_MODELS:
+        return "PaddleOCR-VL-1.6"
+    return model
 
 
 def _ocr_mode_from_settings(settings: dict) -> str:
@@ -468,7 +476,7 @@ div[data-testid="stButton"] > button[kind="primary"]:hover {
 st.markdown("""
 <div class="app-hero">
   <h1>建筑变形监测报告核验台</h1>
-  <p>支持后台运行、实时进度、日志追踪、AI 复核，以及 Markdown / Word / HTML 报告下载。</p>
+  <p>支持后台运行、实时进度、日志追踪、AI 复核，以及 Markdown / Word / HTML / Excel 中间层下载。</p>
   <div class="app-kpis">
     <div class="app-kpi"><b>OpenAI 兼容</b><span>DeepSeek / MiniMax / 自定义模型</span></div>
     <div class="app-kpi"><b>PaddleOCR-VL</b><span>扫描件与图片型 PDF 备选</span></div>
@@ -575,7 +583,6 @@ with st.sidebar:
         "LLM 分块并发数",
         min_value=1,
         max_value=8,
-        value=int(st.session_state.get("cfg_llm_parse_max_parallel", 4) or 4),
         step=1,
         key="cfg_llm_parse_max_parallel",
         help="长 PDF 会拆成多段并行解析；DeepSeek 默认建议 4，遇到限流可调低。",
@@ -872,6 +879,19 @@ elif st.session_state.task_state in ("cancelled", "failed"):
         st.error("任务失败")
         if st.session_state.result and st.session_state.result.error_message:
             st.code(st.session_state.result.error_message, language=None)
+
+    uploaded_signature = hashlib.sha256(uploaded.getvalue()).hexdigest() if uploaded is not None else None
+    if uploaded is not None and uploaded_signature != st.session_state.get("pdf_signature"):
+        st.info(f"已检测到新文件：**{uploaded.name}** — 点击下方按钮处理新 PDF。")
+        if st.button("🔄 处理新 PDF", type="primary", **_stretch_kwargs(), key="btn_failed_new_pdf"):
+            _store_uploaded_pdf(uploaded)
+            st.session_state.task_state = "idle"
+            st.session_state.task_id = None
+            st.session_state.result = None
+            st.session_state.log_lines = []
+            st.session_state.pop("xlsx_export_key", None)
+            st.session_state.pop("xlsx_export_bytes", None)
+            st.rerun()
 
     if st.session_state.log_lines:
         with st.expander("查看运行日志", expanded=False):

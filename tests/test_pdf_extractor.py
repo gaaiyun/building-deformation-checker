@@ -4,6 +4,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import requests
+
 import src.config as config
 import src.tools.pdf_extractor as pdf_extractor
 
@@ -175,6 +177,114 @@ class PdfExtractorTests(unittest.TestCase):
             patch.object(pdf_extractor, "_call_paddle_ocr_legacy", return_value=legacy_result),
         ):
             self.assertIs(pdf_extractor._call_paddle_ocr("x.pdf", {}), legacy_result)
+
+    def test_paddle_async_network_error_does_not_fall_back_to_legacy_base64(self):
+        with (
+            patch.object(pdf_extractor, "PADDLE_OCR_TOKEN", "fake_token"),
+            patch.object(pdf_extractor, "PADDLE_OCR_USE_ASYNC", True),
+            patch.object(pdf_extractor, "PADDLE_OCR_ENABLE_LEGACY_FALLBACK", True),
+            patch.object(
+                pdf_extractor,
+                "_call_paddle_ocr_async",
+                side_effect=requests.ConnectionError("connection reset"),
+            ),
+            patch.object(
+                pdf_extractor,
+                "_call_paddle_ocr_legacy",
+                side_effect=AssertionError("legacy should not be called for network failures"),
+            ),
+        ):
+            with self.assertRaises(requests.ConnectionError):
+                pdf_extractor._call_paddle_ocr("x.pdf", {})
+
+    def test_paddle_async_submit_retry_rewinds_file_before_resend(self):
+        uploaded_payloads = []
+
+        def fake_post(url, headers=None, data=None, files=None, timeout=None):
+            uploaded_payloads.append(files["file"].read())
+            if len(uploaded_payloads) == 1:
+                raise requests.ConnectionError("connection reset after partial upload")
+            return FakeResponse({"code": 0, "data": {"jobId": "ocrjob-retry"}})
+
+        def fake_get(url, headers=None, timeout=None):
+            if url.endswith("/ocrjob-retry"):
+                return FakeResponse({
+                    "code": 0,
+                    "data": {
+                        "state": "done",
+                        "extractProgress": {"totalPages": 1, "extractedPages": 1},
+                        "resultUrl": {"jsonUrl": "https://example.test/retry.jsonl"},
+                    },
+                })
+            return FakeResponse(text=json.dumps({
+                "result": {
+                    "layoutParsingResults": [
+                        {"markdown": {"text": "retry ok"}}
+                    ]
+                }
+            }))
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pdf_path = Path(tmp_dir) / "sample.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\nfull-payload\n")
+            with (
+                patch.object(pdf_extractor, "PADDLE_OCR_TOKEN", "test-token"),
+                patch.object(pdf_extractor, "PADDLE_OCR_ASYNC_JOB_URL", "https://example.test/jobs"),
+                patch.object(pdf_extractor, "PADDLE_OCR_POLL_INTERVAL_SEC", 0),
+                patch.object(pdf_extractor, "PADDLE_OCR_POLL_TIMEOUT_SEC", 5),
+                patch.object(pdf_extractor.requests, "post", side_effect=fake_post),
+                patch.object(pdf_extractor.requests, "get", side_effect=fake_get),
+            ):
+                pdf_extractor._call_paddle_ocr_async(str(pdf_path), {})
+
+        self.assertEqual(uploaded_payloads, [b"%PDF-1.4\nfull-payload\n"] * 2)
+
+    def test_extract_pdf_stops_ocr_profiles_after_async_network_error_when_text_fallback_allowed(self):
+        with (
+            patch.object(
+                pdf_extractor,
+                "_extract_with_paddle_profile",
+                side_effect=requests.ConnectionError("network down"),
+            ) as mocked_ocr,
+            patch.object(
+                pdf_extractor,
+                "_extract_text_layer",
+                return_value=("--- 第 1 页 / 共 1 页 ---\ntext fallback", "pdfplumber"),
+            ),
+        ):
+            result = pdf_extractor.extract_pdf(
+                "sample.pdf",
+                use_ocr=True,
+                auto_fallback=True,
+                return_details=True,
+            )
+
+        self.assertEqual(mocked_ocr.call_count, 1)
+        self.assertEqual(result.method, "pdfplumber")
+        self.assertIn("text fallback", result.text)
+
+    def test_text_layer_falls_back_to_pymupdf_when_pdfplumber_raises(self):
+        with (
+            patch.object(
+                pdf_extractor,
+                "extract_text_with_pdfplumber",
+                side_effect=MemoryError("pdfminer allocation failed"),
+            ),
+            patch.object(
+                pdf_extractor,
+                "extract_text_with_pymupdf",
+                return_value="--- 第 1 页 / 共 1 页 ---\nPyMuPDF text",
+            ),
+        ):
+            result = pdf_extractor.extract_pdf(
+                "sample.pdf",
+                auto_fallback=False,
+                return_details=True,
+            )
+
+        self.assertEqual(result.method, "pymupdf")
+        self.assertEqual(result.selected_profile, "pymupdf")
+        self.assertIn("PyMuPDF text", result.text)
 
     def test_paddle_debug_cache_skips_remote_call_when_fingerprint_matches(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

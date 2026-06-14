@@ -22,7 +22,7 @@ flowchart TD
     D --> E["字段语义映射"]
     E --> F["标准化监测表"]
     F --> G["计算 / 统计 / 逻辑核验"]
-    G --> H["Markdown / Word / HTML / Excel 报告"]
+    G --> H["Markdown / Word / HTML 报告 + Excel 中间层"]
 ```
 
 ### 2.1 PDF/OCR 提取
@@ -228,4 +228,3 @@ PDF_SHA256 + OCR_MODEL + CLEANER_VERSION + TABLE_HASH + LLM_MODEL + PROMPT_VERSI
 2. 当前补强：导出结构化 Excel 中间层，便于业务核查已解析数据。
 3. 下一阶段：在 LLM 前增加候选表格清点和原始表 Excel 导出。
 4. 后续优化：候选表级并发 LLM 映射、已知模板 fast path、字段映射人工修正回灌。
-

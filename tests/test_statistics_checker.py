@@ -92,6 +92,35 @@ class StatisticsCheckerTests(unittest.TestCase):
             [issue.message for issue in issues],
         )
 
+    def test_deep_inclinometer_summary_mismatch_is_warning_not_error(self):
+        """测斜表统计摘要常有深度 ID/宽表口径错配，不能对正确表硬报 error。"""
+        table = MonitoringTable(
+            monitoring_item="围护结构测斜(JX4)",
+            category=MonitoringCategory.DEEP_HORIZONTAL,
+            borehole_id="JX4",
+            deep_points=[
+                DeepDisplacementPoint(depth=1.0, current_cumulative=12.63, change_rate=0.00),
+                DeepDisplacementPoint(depth=2.0, current_cumulative=12.48, change_rate=-0.20),
+            ],
+            statistics=StatisticsSummary(
+                positive_max_id="1",
+                positive_max_value=12.48,
+                max_rate_id="1",
+                max_rate_value=0.00,
+            ),
+        )
+
+        issues = run_statistics_checks(MonitoringReport(tables=[table]))
+
+        self.assertFalse(
+            any(issue.severity == "error" for issue in issues),
+            [issue.message for issue in issues],
+        )
+        self.assertTrue(
+            any(issue.severity == "warning" for issue in issues),
+            [issue.message for issue in issues],
+        )
+
     def test_missing_borehole_id_does_not_break_grouped_statistics(self):
         first_page = MonitoringTable(
             monitoring_item="horizontal displacement",
