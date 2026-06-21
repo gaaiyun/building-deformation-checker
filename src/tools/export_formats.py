@@ -347,23 +347,31 @@ def generate_intermediate_xlsx(
     def append_safe(ws, values: list) -> None:
         ws.append([_safe_excel_value(value) for value in values])
 
-    def finish_sheet(ws, *, widths: dict[int, int] | None = None) -> None:
+    def finish_sheet(
+        ws,
+        *,
+        widths: dict[int, int] | None = None,
+        style_body: bool = True,
+        auto_width: bool = True,
+    ) -> None:
         widths = widths or {}
         ws.auto_filter.ref = ws.dimensions
-        for row in ws.iter_rows():
-            for cell in row:
-                if cell.row == 1:
-                    cell.font = header_font
-                else:
-                    cell.font = normal_font
-                    cell.alignment = wrap
+        if style_body:
+            for row in ws.iter_rows():
+                for cell in row:
+                    if cell.row == 1:
+                        cell.font = header_font
+                    else:
+                        cell.font = normal_font
+                        cell.alignment = wrap
         for col_idx in range(1, ws.max_column + 1):
             max_len = 8
-            for column_cells in ws.iter_cols(min_col=col_idx, max_col=col_idx, min_row=1, max_row=ws.max_row):
-                for cell in column_cells:
-                    value = cell.value
-                    if value is not None:
-                        max_len = max(max_len, min(len(str(value)) + 2, 40))
+            if auto_width:
+                for column_cells in ws.iter_cols(min_col=col_idx, max_col=col_idx, min_row=1, max_row=ws.max_row):
+                    for cell in column_cells:
+                        value = cell.value
+                        if value is not None:
+                            max_len = max(max_len, min(len(str(value)) + 2, 40))
             ws.column_dimensions[get_column_letter(col_idx)].width = widths.get(col_idx, max_len)
 
     overview = wb.create_sheet("00_报告概览")
@@ -391,6 +399,7 @@ def generate_intermediate_xlsx(
         ("清洗后字符", diagnostics.get("clean_chars", "")),
         ("压缩率", diagnostics.get("compression_ratio", "")),
         ("异常表数量", diagnostics.get("abnormal_table_count", "")),
+        ("原始候选表数量", diagnostics.get("raw_table_candidate_count", len(diagnostics.get("raw_table_candidates", []) or []))),
     ]
     for label, value in overview_rows:
         append_safe(overview, [label, value])
@@ -402,6 +411,62 @@ def generate_intermediate_xlsx(
                 cell.fill = section_fill
     overview.column_dimensions["A"].width = 18
     overview.column_dimensions["B"].width = 48
+
+    raw_candidates = diagnostics.get("raw_table_candidates", []) or []
+    candidate_ws = add_sheet(
+        "00A_候选表清单",
+        ["候选表ID", "引擎", "来源页", "页内序号", "行数", "列数", "标题/首行预览", "质量标志"],
+    )
+    for candidate in raw_candidates:
+        flags = candidate.get("quality_flags", []) or []
+        append_safe(candidate_ws, [
+            candidate.get("table_id", ""),
+            candidate.get("engine", ""),
+            candidate.get("page", ""),
+            candidate.get("table_index", ""),
+            candidate.get("row_count", ""),
+            candidate.get("col_count", ""),
+            candidate.get("title_preview", ""),
+            "；".join(str(flag) for flag in flags),
+        ])
+    finish_sheet(candidate_ws, widths={1: 16, 7: 72, 8: 32})
+
+    raw_cell_headers = ["候选表ID", "引擎", "来源页", "原始行号", "原始列号", "原始单元格值"]
+    raw_cell_ws = add_sheet("00B_候选表单元格", raw_cell_headers)
+    raw_cell_sheet_index = 1
+    raw_cell_row_count = 1
+    max_raw_cell_rows = 900_000
+    for candidate in raw_candidates:
+        for row_index, row in enumerate(candidate.get("rows", []) or [], start=1):
+            for column_index, value in enumerate(row or [], start=1):
+                if raw_cell_row_count >= max_raw_cell_rows:
+                    finish_sheet(
+                        raw_cell_ws,
+                        widths={1: 16, 2: 14, 3: 10, 4: 12, 5: 12, 6: 48},
+                        style_body=False,
+                        auto_width=False,
+                    )
+                    raw_cell_sheet_index += 1
+                    raw_cell_ws = add_sheet(
+                        f"00B_候选表单元格_{raw_cell_sheet_index}",
+                        raw_cell_headers,
+                    )
+                    raw_cell_row_count = 1
+                append_safe(raw_cell_ws, [
+                    candidate.get("table_id", ""),
+                    candidate.get("engine", ""),
+                    candidate.get("page", ""),
+                    row_index,
+                    column_index,
+                    value,
+                ])
+                raw_cell_row_count += 1
+    finish_sheet(
+        raw_cell_ws,
+        widths={1: 16, 2: 14, 3: 10, 4: 12, 5: 12, 6: 48},
+        style_body=False,
+        auto_width=False,
+    )
 
     table_ws = add_sheet(
         "01_表格清单",
@@ -420,6 +485,8 @@ def generate_intermediate_xlsx(
             "间隔天数",
             "初始值可靠",
             "提取提示",
+            "来源分块",
+            "来源页",
         ],
     )
     for idx, table in enumerate(tables, start=1):
@@ -440,8 +507,10 @@ def generate_intermediate_xlsx(
             _fmt(getattr(cfg, "interval_days", "")),
             _fmt(getattr(cfg, "initial_value_reliable", "")),
             "；".join(flags),
+            _fmt(getattr(table, "source_chunk", 0)),
+            _fmt(getattr(table, "source_pages", "")),
         ])
-    finish_sheet(table_ws, widths={2: 28, 14: 42})
+    finish_sheet(table_ws, widths={2: 28, 14: 42, 16: 14})
 
     point_ws = add_sheet(
         "02_标准化测点",
@@ -458,6 +527,10 @@ def generate_intermediate_xlsx(
             "累计变化",
             "变化速率",
             "安全状态",
+            "来源分块",
+            "来源页",
+            "原始行",
+            "字段列映射",
         ],
     )
     for idx, table in enumerate(tables, start=1):
@@ -475,8 +548,12 @@ def generate_intermediate_xlsx(
                 _fmt(getattr(point, "cumulative_change", None)),
                 _fmt(getattr(point, "change_rate", None)),
                 _fmt(getattr(point, "safety_status", "")),
+                _fmt(getattr(point, "source_chunk", 0)),
+                _fmt(getattr(point, "source_page", None)),
+                _fmt(getattr(point, "source_row_text", "")),
+                _fmt(getattr(point, "source_field_map", "")),
             ])
-    finish_sheet(point_ws, widths={2: 28})
+    finish_sheet(point_ws, widths={2: 28, 15: 72, 16: 44})
 
     deep_ws = add_sheet(
         "03_深层位移",
@@ -490,6 +567,10 @@ def generate_intermediate_xlsx(
             "本次累计",
             "本次变化",
             "变化速率",
+            "来源分块",
+            "来源页",
+            "原始行",
+            "字段列映射",
         ],
     )
     for idx, table in enumerate(tables, start=1):
@@ -504,8 +585,12 @@ def generate_intermediate_xlsx(
                 _fmt(getattr(point, "current_cumulative", None)),
                 _fmt(getattr(point, "current_change", None)),
                 _fmt(getattr(point, "change_rate", None)),
+                _fmt(getattr(point, "source_chunk", 0)),
+                _fmt(getattr(point, "source_page", None)),
+                _fmt(getattr(point, "source_row_text", "")),
+                _fmt(getattr(point, "source_field_map", "")),
             ])
-    finish_sheet(deep_ws, widths={2: 28})
+    finish_sheet(deep_ws, widths={2: 28, 12: 72, 13: 44})
 
     stats_ws = add_sheet(
         "04_统计摘要",
@@ -601,10 +686,11 @@ def generate_intermediate_xlsx(
 
     for ws in wb.worksheets:
         ws.sheet_view.showGridLines = False
-        for row in ws.iter_rows(min_row=2):
-            if row and row[0].row % 2 == 0:
-                for cell in row:
-                    cell.fill = section_fill
+        if not ws.title.startswith("00B_候选表单元格"):
+            for row in ws.iter_rows(min_row=2):
+                if row and row[0].row % 2 == 0:
+                    for cell in row:
+                        cell.fill = section_fill
         if ws.max_row == 1:
             ws.append(["", "无数据"])
             ws["B2"].font = note_font

@@ -28,6 +28,7 @@ def test_streamlit_app_uses_branded_deepseek_and_paddle_defaults():
     assert "output\") / \"streamlit_uploads" in text
     assert 'st.expander("PaddleOCR（可选）", expanded=True)' in text
     assert "cfg_fresh_run" in text
+    assert "开始检查报告" in text
     assert "正在启动后台检查任务" in text
     assert "已开始检查，后台任务运行中" in text
     assert "任务启动失败" in text
@@ -64,6 +65,14 @@ def test_streamlit_app_keeps_report_download_exports_available():
     assert "_Excel中间层.xlsx" in text
     assert "mime=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document\"" in text
     assert "mime=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\"" in text
+
+
+def test_streamlit_capability_grid_is_responsive_on_mobile():
+    text = (ROOT / "app.py").read_text(encoding="utf-8")
+
+    assert "@media (max-width: 640px)" in text
+    assert ".app-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }" in text
+    assert "overflow-wrap: anywhere" in text
 
 
 def test_streamlit_dependency_supports_fragment_api():

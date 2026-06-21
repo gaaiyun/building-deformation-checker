@@ -141,9 +141,9 @@ def _choose_interval_days(
            - 否则 → 信推断（数据 > 元数据）
 
     历史背景：
-        - v1: 差距 >2 天时盲信 configured，导致多期模板（错误版/正确版都是
+        - 旧逻辑：差距 >2 天时盲信 configured，导致多期模板（错误版/正确版都是
           多期块）的全部行都触发"反推间隔≈2天"警告，34+ 行误报。
-        - v2: 引入行级支持率仲裁，多期场景下能正确识别每期内部的真实间隔。
+        - 当前逻辑：引入行级支持率仲裁，多期场景下能正确识别每期内部的真实间隔。
     """
     inferred_interval = _infer_interval_days(table)
 
@@ -443,6 +443,8 @@ def check_anchor_force(
 ) -> None:
     """锚索拉力: 累计变化量 = 本次内力 - 初始内力"""
     cfg = table.verification_config
+    if not cfg.initial_value_reliable:
+        return
 
     for pt in table.points:
         if pt.initial_value is None or pt.current_value is None or pt.cumulative_change is None:

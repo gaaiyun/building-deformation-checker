@@ -104,3 +104,31 @@ def test_large_row_count_gap_is_flagged_as_extraction_risk():
     flags = report.table_extraction_flags.get(0, [])
 
     assert any("表头测点数" in flag for flag in flags)
+
+
+def test_unmapped_numeric_source_field_is_flagged_and_counted():
+    point = MeasurementPoint(
+        point_id="MS7-3",
+        current_value=4.6,
+        current_change=0.0,
+        cumulative_change=0.0,
+        source_page=31,
+        source_row_text="MS7-3 190.0 0.0 4.6 0.00 0.0 -- 400 480",
+        source_field_map='{"current_value":4,"current_change":3}',
+    )
+    table = MonitoringTable(
+        monitoring_item="锚索拉力",
+        category=MonitoringCategory.ANCHOR_FORCE,
+        point_count=1,
+        points=[point],
+    )
+    report = MonitoringReport(tables=[table])
+
+    analyze_extraction_quality(report)
+
+    flags = report.table_extraction_flags[0]
+    provenance = report.extraction_diagnostics["source_provenance"]
+    assert any("1 个数值字段无法回溯原始列" in flag for flag in flags)
+    assert provenance["numeric_field_count"] == 3
+    assert provenance["mapped_numeric_field_count"] == 2
+    assert provenance["unmapped_fields"] == {"cumulative_change": 1}

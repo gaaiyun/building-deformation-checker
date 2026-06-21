@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections import Counter
 from pathlib import Path
@@ -277,6 +278,14 @@ def analyze_extraction_quality(report: MonitoringReport) -> MonitoringReport:
     pages = diagnostics.get("pages", [])
     high_markup_pages = [page["page"] for page in pages if page.get("markup_ratio", 0) >= 0.9]
     duplicate_pages = diagnostics.get("identical_page_pairs", [])
+    provenance_stats = {
+        "point_count": 0,
+        "source_row_count": 0,
+        "source_page_count": 0,
+        "numeric_field_count": 0,
+        "mapped_numeric_field_count": 0,
+    }
+    unmapped_fields: Counter[str] = Counter()
 
     for idx, table in enumerate(report.tables):
         flags: list[str] = []
@@ -354,6 +363,54 @@ def analyze_extraction_quality(report: MonitoringReport) -> MonitoringReport:
                 if 0.8 <= ratio_median <= 1.2:
                     flags.append("深层表变化速率疑似误映射为本期变化")
 
+        source_records = [
+            (
+                point,
+                (
+                    "initial_value", "previous_value", "current_value",
+                    "current_change", "cumulative_change", "change_rate",
+                ),
+            )
+            for point in (table.points or [])
+            if point.source_row_text or point.source_page is not None
+        ]
+        source_records.extend(
+            (
+                point,
+                (
+                    "depth", "previous_cumulative", "current_cumulative",
+                    "current_change", "change_rate",
+                ),
+            )
+            for point in (table.deep_points or [])
+            if point.source_row_text or point.source_page is not None
+        )
+        table_unmapped: Counter[str] = Counter()
+        for point, field_names in source_records:
+            provenance_stats["point_count"] += 1
+            provenance_stats["source_row_count"] += int(bool(point.source_row_text))
+            provenance_stats["source_page_count"] += int(point.source_page is not None)
+            try:
+                field_map = json.loads(point.source_field_map) if point.source_field_map else {}
+            except (TypeError, json.JSONDecodeError):
+                field_map = {}
+            if not isinstance(field_map, dict):
+                field_map = {}
+            for field_name in field_names:
+                value = getattr(point, field_name, None)
+                if value is None or value == "":
+                    continue
+                provenance_stats["numeric_field_count"] += 1
+                if field_name in field_map:
+                    provenance_stats["mapped_numeric_field_count"] += 1
+                else:
+                    table_unmapped[field_name] += 1
+                    unmapped_fields[field_name] += 1
+        if table_unmapped:
+            count = sum(table_unmapped.values())
+            names = ", ".join(sorted(table_unmapped))
+            flags.append(f"{count} 个数值字段无法回溯原始列: {names}")
+
         if flags:
             flags_by_table[idx] = flags
 
@@ -361,6 +418,8 @@ def analyze_extraction_quality(report: MonitoringReport) -> MonitoringReport:
     diagnostics["duplicate_pages"] = duplicate_pages
     diagnostics["abnormal_table_count"] = len(flags_by_table)
     diagnostics["flagged_table_indexes"] = sorted(flags_by_table)
+    provenance_stats["unmapped_fields"] = dict(unmapped_fields)
+    diagnostics["source_provenance"] = provenance_stats
 
     # OCR 损毁检测（Gap 3）：识别如恒大 4080 个 '0' blob 或红土 CX12 行重复
     # 两个来源：(a) report.raw_text（最终选用的提取结果） (b) OCR 缓存目录（含未选用的 OCR 输出）

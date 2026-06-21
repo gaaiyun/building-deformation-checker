@@ -458,7 +458,7 @@ st.markdown("""
 .app-kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
 .app-kpi { border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px 12px; background: #f8fafc; }
 .app-kpi b { display:block; color:#0f2f5f; }
-.app-kpi span { color:#6b7280; font-size: 12px; }
+.app-kpi span { color:#6b7280; font-size: 12px; overflow-wrap: anywhere; }
 section[data-testid="stSidebar"] { background: #ffffff; border-right: 1px solid #e5e7eb; }
 div[data-testid="stButton"] > button[kind="primary"] {
   background: #0b5cab;
@@ -469,6 +469,12 @@ div[data-testid="stButton"] > button[kind="primary"]:hover {
   background: #083f86;
   border-color: #083f86;
   color: #ffffff;
+}
+@media (max-width: 640px) {
+  .block-container { padding: 0.9rem 1rem 1.5rem; }
+  .app-hero { padding: 14px; }
+  .app-hero h1 { font-size: 22px; }
+  .app-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 </style>
 """, unsafe_allow_html=True)
@@ -669,7 +675,7 @@ if st.session_state.task_state == "idle":
         if not can_run:
             st.warning("请先在侧边栏填写 API Key / Base URL / 模型 ID")
 
-        if st.button("🚀 开始检查", type="primary", **_stretch_kwargs(),
+        if st.button("开始检查报告", type="primary", **_stretch_kwargs(),
                      disabled=not can_run):
             if _has_running_tasks():
                 st.warning("当前进程已有任务运行。为避免不同用户配置互相覆盖，请等待当前任务结束。")

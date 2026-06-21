@@ -79,6 +79,7 @@ def call_chat_completion(
     max_tokens: int = 4000,
     max_retries: Optional[int] = None,
     temperature: float = 0.1,
+    stream: bool = False,
 ) -> Optional[str]:
     """
     统一的 LLM 调用接口，带超时与重试。
@@ -89,6 +90,7 @@ def call_chat_completion(
         max_tokens: 最大生成 token 数
         max_retries: 重试次数（None 则使用 config 默认值）
         temperature: 采样温度
+        stream: 是否流式接收响应；长结构化请求可避免连接长时间空闲被中间网络设备关闭
 
     返回:
         LLM 返回的文本内容（已去除 <thinking> 标签），失败返回 None
@@ -132,8 +134,20 @@ def call_chat_completion(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 timeout=timeout_sec,
+                stream=stream,
             )
-            raw = resp.choices[0].message.content or ""
+            if stream:
+                content_parts: list[str] = []
+                for event in resp:
+                    if not getattr(event, "choices", None):
+                        continue
+                    delta = event.choices[0].delta
+                    content = getattr(delta, "content", None)
+                    if content:
+                        content_parts.append(content)
+                raw = "".join(content_parts)
+            else:
+                raw = resp.choices[0].message.content or ""
             # 去除 <thinking> 标签
             raw = re.sub(r'<think(?:ing)?>.*?</think(?:ing)?>', '', raw, flags=re.DOTALL).strip()
             # 写缓存（异常时不破坏主流程）

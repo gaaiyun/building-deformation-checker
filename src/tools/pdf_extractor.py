@@ -180,7 +180,7 @@ def _normalize_text(text: str) -> str:
 
     text = html.unescape(text)
     text = text.replace("\u00a0", " ")
-    # v2: \u7edf\u4e00\u5904\u7406 U+2212/\u5168\u89d2\u8d1f\u53f7/\u5168\u89d2\u6570\u5b57\u7b49 OCR \u9759\u9ed8 bug \u6e90
+    # \u7edf\u4e00\u5904\u7406 U+2212/\u5168\u89d2\u8d1f\u53f7/\u5168\u89d2\u6570\u5b57\u7b49 OCR \u9759\u9ed8 bug \u6e90
     text = normalize_numeric_text(text)
     return WHITESPACE_RE.sub(" ", text).strip()
 
@@ -496,7 +496,7 @@ def extract_text_with_pdfplumber(pdf_path: str) -> str:
     with pdfplumber.open(pdf_path) as pdf:
         for i, page in enumerate(pdf.pages, 1):
             text = page.extract_text() or ""
-            # v2: 文本层提取后立刻统一 Unicode（U+2212 minus、全角数字、特殊空格等）
+            # 文本层提取后立刻统一 Unicode（U+2212 minus、全角数字、特殊空格等）
             text = normalize_numeric_text(text)
             pages_text.append(f"--- 第 {i} 页 / 共 {len(pdf.pages)} 页 ---\n{text}")
     return "\n\n".join(pages_text)
@@ -542,6 +542,7 @@ def _text_layer_result(
     text: str,
     method: str,
     *,
+    pdf_path: str = "",
     ocr_output_dir: Optional[str] = None,
     attempts: Optional[list[dict]] = None,
 ) -> PDFExtractionResult:
@@ -558,6 +559,17 @@ def _text_layer_result(
         "debug_dir": ocr_output_dir or "",
         "method": method,
     }
+    if pdf_path and method == "pdfplumber":
+        try:
+            candidates = extract_tables_with_pdfplumber(pdf_path)
+            diagnostics["raw_table_candidates"] = candidates
+            diagnostics["raw_table_candidate_count"] = len(candidates)
+            diagnostics["raw_table_candidate_engine"] = "pdfplumber"
+        except Exception as exc:
+            logger.warning("原始候选表提取失败，继续使用文本层: %s", exc, exc_info=True)
+            diagnostics["raw_table_candidates"] = []
+            diagnostics["raw_table_candidate_count"] = 0
+            diagnostics["raw_table_candidate_error"] = str(exc)
     return PDFExtractionResult(
         text=text,
         pages=page_list,
@@ -570,12 +582,42 @@ def _text_layer_result(
 
 def extract_tables_with_pdfplumber(pdf_path: str) -> list[dict]:
     """用 pdfplumber 提取每页的表格，返回结构化数据。"""
+    from src.utils.text_normalize import normalize_numeric_text
+
     results: list[dict] = []
     with pdfplumber.open(pdf_path) as pdf:
         for i, page in enumerate(pdf.pages, 1):
             tables = page.extract_tables()
             for j, table in enumerate(tables):
-                results.append({"page": i, "table_index": j, "rows": table})
+                rows = [
+                    [normalize_numeric_text(str(cell)) if cell is not None else "" for cell in (row or [])]
+                    for row in (table or [])
+                ]
+                col_count = max((len(row) for row in rows), default=0)
+                row_widths = {len(row) for row in rows if any(cell.strip() for cell in row)}
+                serialized_rows = ["|".join(cell.strip() for cell in row) for row in rows]
+                flags: list[str] = []
+                if len(row_widths) > 1:
+                    flags.append("列数漂移")
+                if len(serialized_rows) != len(set(serialized_rows)):
+                    flags.append("重复行/表头")
+                if col_count >= 10:
+                    flags.append("宽表")
+                title_preview = next(
+                    (" | ".join(cell.strip() for cell in row if cell.strip()) for row in rows if any(cell.strip() for cell in row)),
+                    "",
+                )[:240]
+                results.append({
+                    "table_id": f"P{i:03d}-T{j + 1:02d}",
+                    "engine": "pdfplumber",
+                    "page": i,
+                    "table_index": j,
+                    "row_count": len(rows),
+                    "col_count": col_count,
+                    "title_preview": title_preview,
+                    "quality_flags": flags,
+                    "rows": rows,
+                })
     return results
 
 
@@ -958,6 +1000,7 @@ def extract_pdf(
         result = _text_layer_result(
             text,
             text_method,
+            pdf_path=pdf_path if return_details else "",
             ocr_output_dir=ocr_output_dir,
             attempts=attempts,
         )
@@ -1002,5 +1045,11 @@ def extract_pdf(
                 logger.warning("自动切换 OCR 时，%s profile 失败: %s", profile_name, exc)
         ocr_attempts = attempts
 
-    result = _text_layer_result(text, text_method, ocr_output_dir=ocr_output_dir, attempts=ocr_attempts)
+    result = _text_layer_result(
+        text,
+        text_method,
+        pdf_path=pdf_path if return_details else "",
+        ocr_output_dir=ocr_output_dir,
+        attempts=ocr_attempts,
+    )
     return result if return_details else result.text

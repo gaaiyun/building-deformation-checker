@@ -124,8 +124,8 @@ flowchart LR
 
 | Step | 名称 | 耗时 | 说明 |
 |------|------|------|------|
-| 1 | PDF 提取 | 5–30 s | pdfplumber 文本层优先；若 pdfminer 内存/解析失败则用 PyMuPDF 兜底；文本层质量不足时回退 PaddleOCR-VL。OCR 结果按 PDF SHA256 + profile 指纹缓存。同时扫描 OCR 缓存目录识别损毁（连续 200+ 同字符 blob、行重复 50+ 次）。 |
-| 2 | LLM 结构化解析 | 60–300 s | 多策略分块（页 / 表 / 字符），按 `LLM_PARSE_MAX_PARALLEL` 并发发送给 LLM，结果按原 chunk 顺序合并为统一 JSON。响应按 SHA256(messages+params) 磁盘缓存（temperature ≤ 0.3 时），开发迭代可达 **9× 速度提升**。若分块失败，报告会给出“LLM 分块解析”警告，不能视作完整通过。 |
+| 1 | PDF 提取 | 5–30 s | pdfplumber 文本层优先，并生成带页/行/列的原始候选表；若 pdfminer 内存/解析失败则用 PyMuPDF 兜底；文本层质量不足时回退 PaddleOCR-VL。OCR 结果按 PDF SHA256 + profile 指纹缓存。同时扫描 OCR 缓存目录识别损毁（连续 200+ 同字符 blob、行重复 50+ 次）。 |
+| 2 | LLM 结构化解析 | 60–300 s | 优先按结构化表题和连续续表分块，找不到可靠边界时才回退页/字符分块；并发请求采用流式响应，结果按原 chunk 顺序合并。模型结果缺日期或测点时会重试，摘要表不会混入逐点计算表。响应可按 SHA256(messages+params) 缓存；若仍有分块失败，报告会明确给出“LLM 分块解析”警告，不能视作完整通过。 |
 | 2.5 | 分析计划 (ReAct) | <1 s | 纯 Python，把对每张表的字段识别、单位推断、容差选择、将要执行的验证规则**显式输出**，供用户审查 AI 理解过程。 |
 | 3 | 计算验证 | <1 s | 累计变化 = 本次 − 初始；变化速率 = 本次变化 / 间隔天数。容差按表动态调整。**符号一致性检查**：sign(current − initial) 应与 sign(cumulative) 同号（量级悬殊 >10× 时跳过避免误报）。**单期变化幅度异常**：测点本次变化 > 3× 中位数（离群）或 \|本次\| > 3 × \|累计\|（不协调）。 |
 | 4 | 统计验证 | <1 s | 正/负方向最大、最大速率、最大/最小内力；深层位移表豁免跨表引用。**真实最大速率掩盖检测**：报告值 < 30% × max(\|rate\|) 时告警（避免"行业口径"掩盖关键风险）。 |
@@ -324,6 +324,7 @@ print(result.final_md)
 4. 完成后所有产物保留在 `st.session_state.result`，下载按钮触发的 rerun 不会丢。
 5. 上传文件按内容哈希去重，重复点击不会误判为新任务；Markdown、DOCX、HTML 报告均在完成态持续可下载。
 6. Web UI 与桌面版共用 DeepSeek / MiniMax / 自定义 OpenAI 兼容端点配置，以及 PaddleOCR-VL-1.6 Token、模型和缓存开关。
+7. Excel 中间层包含 `00A_候选表清单`、`00B_候选表单元格` 和标准化结果；每个数值字段可回查来源页、原始行和列号，无法回溯时明确提示。
 
 ```mermaid
 stateDiagram
@@ -422,9 +423,40 @@ python -m pytest tests/test_default_provider_config.py tests/test_streamlit_app_
 
 真实 PDF、Excel 转 PDF 和 OCR 缓存属于本地回归材料，默认放在 `output/` 并被 git ignore；交付前可按需在本机跑完整回归并保留证据目录。
 
+### 生产级数据审计链
+
+本项目不能只证明“模型返回了 JSON”，还必须证明每个规范字段来自 PDF 的哪一行哪一列。当前数据链如下：
+
+1. `pdf_extractor.py` 按页提取文本，在每页前加入 `--- 第 N 页 / 共 M 页 ---`。
+2. `llm_parser.py` 按附表标题和续表关系切块，防止跨表混合和粗暴字符截断。
+3. DeepSeek 只负责把不同表型映射到统一 `MonitoringTable / MeasurementPoint / DeepDisplacementPoint`。
+4. 模型返回后，本地代码在原始 chunk 中重新定位每个测点行，不额外消耗模型 token。
+5. 每个测点保存：
+   - `source_chunk`：来源分块编号；
+   - `source_page`：PDF 页码；
+   - `source_row_text`：原始表格行；
+   - `source_field_map`：标准字段到原始列号的唯一数值映射。
+6. `source_field_map` 只记录唯一匹配。例如：
+
+```json
+{"current_change":2,"cumulative_change":3,"change_rate":4}
+```
+
+如果同一行有重复数值，列号存在歧义，程序留空而不是强行映射。Excel 中间层的 `01_表格清单`、`02_标准化测点`、`03_深层位移` 会展示来源信息，业务人员可直接逐行复核。
+
+字段语义的关键约束：
+
+- 无明确初始值列时，不能把测点编号或第一期变化误当 `initial_value`。
+- 报告时间段首日不自动等于项目首测日；只有首测文本证据或数据多数支持时才执行首期基准硬校验。
+- `本次(kN) / 测值(kN) / 变化速率` 的力值表映射为 `current_change / cumulative_change / change_rate`，并标记初始值不可靠。
+- 监测结果汇总表、本报告期间最大值等摘要不进入逐点 `tables`。
+- 正负号表示方向；最大速率和最大力按绝对值比较但保留原符号。
+
+完整实现、各步骤边界、计算规则、UI 状态、测试纪律和发布手册见 [`docs/开发交接与生产验收手册.md`](docs/开发交接与生产验收手册.md)。
+
 ### 当前验收记录
 
-最新可交付状态以 `docs/实际测试报告.md` 和本地 `output/` 下对应证据目录为准。发布前必须重新执行：
+最新可交付状态以 `docs/实际测试报告.md` 和本地 `output/` 下对应证据目录为准。该报告会把已通过项、历史基线和外部服务阻断分开记录；发布前必须重新执行：
 
 | 验收项 | 要求 |
 |------|------|
@@ -435,7 +467,7 @@ python -m pytest tests/test_default_provider_config.py tests/test_streamlit_app_
 | 桌面 EXE/MSI | 使用当前源码打包，EXE 启动 smoke 通过；MSI 静默安装、安装后启动、卸载通过 |
 | 文档一致性 | README、部署说明、计算逻辑说明与当前代码行为一致，无硬编码过期测试数量或旧默认模型 |
 
-辅助工具：`scripts/mock_openai_server.py` 提供本地 OpenAI 兼容 mock 服务，只用于 UI/打包烟测，不包含任何真实 key。
+辅助工具：`scripts/mock_openai_server.py` 提供本地 OpenAI 兼容 mock 服务，只用于开发期 UI/协议烟测，不包含任何真实 key，也不能作为最终模型验收证据。
 
 ---
 
@@ -446,7 +478,6 @@ building-deformation-checker/
 ├── desktop.py                       # 桌面版入口
 ├── main.py                          # CLI 入口
 ├── app.py                           # Streamlit Web UI
-├── app_v1_legacy.py                 # 旧 UI，保留参照
 ├── requirements.txt
 ├── LICENSE                          # MIT
 │
@@ -482,6 +513,9 @@ building-deformation-checker/
 ├── tests/                           # pytest 测试套件
 ├── docs/
 │   ├── specs/
+│   ├── 开发交接与生产验收手册.md
+│   ├── 实际测试报告.md
+│   ├── 表格识别与Excel中间层设计.md
 │   ├── 计算核验逻辑说明.md
 │   └── 异构PDF表格核对流程设计.md
 │

@@ -286,6 +286,39 @@ class PdfExtractorTests(unittest.TestCase):
         self.assertEqual(result.selected_profile, "pymupdf")
         self.assertIn("PyMuPDF text", result.text)
 
+    def test_text_layer_details_include_raw_table_candidates(self):
+        raw_candidates = [{
+            "table_id": "P001-T01",
+            "engine": "pdfplumber",
+            "page": 1,
+            "table_index": 0,
+            "row_count": 2,
+            "col_count": 3,
+            "title_preview": "监测成果表",
+            "quality_flags": [],
+            "rows": [["测点", "累计变化", "速率"], ["S1", "1.2", "0.1"]],
+        }]
+        with (
+            patch.object(
+                pdf_extractor,
+                "_extract_text_layer",
+                return_value=("--- 第 1 页 / 共 1 页 ---\n监测成果表", "pdfplumber"),
+            ),
+            patch.object(
+                pdf_extractor,
+                "extract_tables_with_pdfplumber",
+                return_value=raw_candidates,
+            ),
+        ):
+            result = pdf_extractor.extract_pdf(
+                "sample.pdf",
+                auto_fallback=False,
+                return_details=True,
+            )
+
+        self.assertEqual(result.diagnostics["raw_table_candidate_count"], 1)
+        self.assertEqual(result.diagnostics["raw_table_candidates"], raw_candidates)
+
     def test_paddle_debug_cache_skips_remote_call_when_fingerprint_matches(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             pdf_path = Path(tmp_dir) / "sample.pdf"

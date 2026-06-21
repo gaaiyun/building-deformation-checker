@@ -1,6 +1,6 @@
 """桌面 GUI 的配置持久化（API key 等）
 
-存储策略 v2（带向后兼容）:
+当前存储策略（带向后兼容）:
     - **敏感字段**（`llm_api_key`、`paddle_ocr_token`）首选 keyring（Windows
       Credential Manager / macOS Keychain / Linux Secret Service），明文从不
       落盘。keyring 不可用时不会保存新密钥，请改用环境变量或先启用系统
@@ -47,9 +47,11 @@ _DEFAULTS: dict[str, Any] = {
     "paddle_ocr_enable_legacy_fallback": True,
     "paddle_ocr_poll_timeout_sec": 900,
     "llm_parse_chunk_chars": 18000,
-    "llm_parse_max_tokens": 24000,
+    "llm_structured_group_chars": 4500,
+    "llm_parse_max_tokens": 32000,
     "llm_parse_timeout_sec": 300,
     "llm_parse_max_parallel": 4,
+    "llm_parse_result_retries": 1,
     "llm_timeout_normal": 120,
     "use_ocr": False,
     "prefer_ocr": False,

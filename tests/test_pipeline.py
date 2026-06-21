@@ -45,8 +45,10 @@ class TestRuntimeConfigDefaults(unittest.TestCase):
         self.assertGreater(cfg.llm_timeout_normal, 0)
         self.assertGreater(cfg.llm_parse_timeout_sec, 0)
         self.assertGreater(cfg.llm_parse_chunk_chars, 0)
-        self.assertGreater(cfg.llm_parse_max_tokens, 0)
+        self.assertEqual(cfg.llm_parse_max_tokens, 32000)
         self.assertGreater(cfg.llm_parse_max_parallel, 0)
+        self.assertEqual(cfg.llm_structured_group_chars, 4500)
+        self.assertEqual(cfg.llm_parse_result_retries, 1)
 
     def test_default_ocr_flags(self):
         cfg = RuntimeConfig(pdf_path="x.pdf")
@@ -77,6 +79,8 @@ class TestRuntimeConfigToAppGlobals(unittest.TestCase):
             llm_base_url="https://example.com/v1/",
             llm_model="custom-model",
             llm_timeout_normal=99,
+            llm_structured_group_chars=4200,
+            llm_parse_result_retries=2,
             paddle_ocr_token="paddle-tok",
         )
         cfg.to_app_globals()
@@ -88,6 +92,8 @@ class TestRuntimeConfigToAppGlobals(unittest.TestCase):
         self.assertEqual(srccfg.LLM_BASE_URL, "https://example.com/v1")
         self.assertEqual(srccfg.LLM_MODEL, "custom-model")
         self.assertEqual(srccfg.LLM_TIMEOUT_NORMAL, 99)
+        self.assertEqual(srccfg.LLM_STRUCTURED_GROUP_CHARS, 4200)
+        self.assertEqual(srccfg.LLM_PARSE_RESULT_RETRIES, 2)
         self.assertEqual(srccfg.PADDLE_OCR_TOKEN, "paddle-tok")
 
     def test_syncs_llm_parse_parallelism(self):

@@ -275,7 +275,9 @@ def check_table_statistics(
             if pt.current_value is not None
         ]
         if force_vals:
-            actual_max_id, actual_max_val = max(force_vals, key=lambda x: x[1])
+            # 内力正负号表示受力方向；工程报告的“最大内力”按绝对幅值选取，
+            # 但结果保留原始符号，例如 -20.3 kN 的幅值大于 +15.5 kN。
+            actual_max_id, actual_max_val = max(force_vals, key=lambda x: abs(x[1]))
             actual_min_id, actual_min_val = min(force_vals, key=lambda x: x[1])
 
             if stats.max_force_value is not None:

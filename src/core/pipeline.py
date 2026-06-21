@@ -55,9 +55,11 @@ class RuntimeConfig:
     llm_model: str = "deepseek-v4-flash"
     llm_timeout_normal: int = 120
     llm_parse_chunk_chars: int = 18000
-    llm_parse_max_tokens: int = 24000
+    llm_structured_group_chars: int = 4500
+    llm_parse_max_tokens: int = 32000
     llm_parse_timeout_sec: int = 300
     llm_parse_max_parallel: int = 4
+    llm_parse_result_retries: int = 1
 
     # ── PaddleOCR 配置 ──────────────────────────
     paddle_ocr_token: str = ""
@@ -90,9 +92,9 @@ class RuntimeConfig:
         """同步本配置到 `src.config` 模块属性、`os.environ` 与 `pdf_extractor` 常量。
 
         Why（为什么需要这个看上去很危险的全局变量写入）:
-            v1 设计是所有工具模块直接读 `src.config.XXX` 的进程级常量。彻底
+            早期设计是所有工具模块直接读 `src.config.XXX` 的进程级常量。彻底
             重构成依赖注入会需要改动 8 个 tools 模块的全部 LLM/OCR 调用点，
-            v2 重构暂未做这件事。本方法作为**临时桥接**，把 RuntimeConfig
+            当前重构暂未覆盖这件事。本方法作为**临时桥接**，把 RuntimeConfig
             的字段反推到所有"读全局"的位置。
 
         线程安全:
@@ -114,9 +116,11 @@ class RuntimeConfig:
             cfg.LLM_BASE_URL = normalize_openai_base_url(self.llm_base_url)
             cfg.LLM_MODEL = self.llm_model
             cfg.LLM_PARSE_CHUNK_CHARS = self.llm_parse_chunk_chars
+            cfg.LLM_STRUCTURED_GROUP_CHARS = self.llm_structured_group_chars
             cfg.LLM_PARSE_MAX_TOKENS = self.llm_parse_max_tokens
             cfg.LLM_PARSE_TIMEOUT_SEC = self.llm_parse_timeout_sec
             cfg.LLM_PARSE_MAX_PARALLEL = self.llm_parse_max_parallel
+            cfg.LLM_PARSE_RESULT_RETRIES = self.llm_parse_result_retries
             cfg.LLM_TIMEOUT_NORMAL = self.llm_timeout_normal
             cfg.PADDLE_OCR_TOKEN = self.paddle_ocr_token
             cfg.PADDLE_OCR_MODEL = self.paddle_ocr_model

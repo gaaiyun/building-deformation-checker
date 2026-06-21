@@ -19,6 +19,53 @@ MOCK_REPORT = {
 }
 
 
+def _mock_content(payload: dict) -> str:
+    request_text = json.dumps(payload, ensure_ascii=False)
+    if "建筑变形监测数据审核专家" in request_text:
+        return json.dumps(
+            [{"error_idx": 0, "verdict": "confirm", "reason": "mock ok", "suspected_origin": "report"}],
+            ensure_ascii=False,
+        )
+    if "提取所有监测数据表格" in request_text or "输出JSON结构" in request_text:
+        return json.dumps(MOCK_REPORT, ensure_ascii=False)
+    return "本地 mock 最终审核通过。"
+
+
+def build_mock_http_response(payload: dict) -> tuple[str, bytes]:
+    """构造 OpenAI 兼容响应，同时覆盖普通 JSON 与 SSE 流式协议。"""
+    content = _mock_content(payload)
+    if payload.get("stream"):
+        event = {
+            "id": "chatcmpl-smoke",
+            "object": "chat.completion.chunk",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": content},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        body = (
+            f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            "data: [DONE]\n\n"
+        ).encode("utf-8")
+        return "text/event-stream; charset=utf-8", body
+
+    response = {
+        "id": "chatcmpl-smoke",
+        "object": "chat.completion",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": "stop",
+            }
+        ],
+    }
+    return "application/json; charset=utf-8", json.dumps(response, ensure_ascii=False).encode("utf-8")
+
+
 class MockOpenAIHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         self.send_response(200)
@@ -33,31 +80,10 @@ class MockOpenAIHandler(BaseHTTPRequestHandler):
         except Exception:
             payload = {}
 
-        request_text = json.dumps(payload, ensure_ascii=False)
-        if "建筑变形监测数据审核专家" in request_text:
-            content = json.dumps(
-                [{"error_idx": 0, "verdict": "confirm", "reason": "mock ok", "suspected_origin": "report"}],
-                ensure_ascii=False,
-            )
-        elif "提取所有监测数据表格" in request_text or "输出JSON结构" in request_text:
-            content = json.dumps(MOCK_REPORT, ensure_ascii=False)
-        else:
-            content = "本地 mock 最终审核通过。"
-
-        response = {
-            "id": "chatcmpl-smoke",
-            "object": "chat.completion",
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {"role": "assistant", "content": content},
-                    "finish_reason": "stop",
-                }
-            ],
-        }
-        raw = json.dumps(response, ensure_ascii=False).encode("utf-8")
+        content_type, raw = build_mock_http_response(payload)
         self.send_response(200)
-        self.send_header("content-type", "application/json; charset=utf-8")
+        self.send_header("content-type", content_type)
+        self.send_header("cache-control", "no-cache")
         self.send_header("content-length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)

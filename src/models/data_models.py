@@ -64,6 +64,10 @@ class MeasurementPoint:
     cumulative_change: Optional[float] = None
     change_rate: Optional[float] = None
     safety_status: str = ""
+    source_chunk: int = 0
+    source_page: Optional[int] = None
+    source_row_text: str = ""
+    source_field_map: str = ""
 
 
 @dataclass
@@ -74,6 +78,10 @@ class DeepDisplacementPoint:
     current_cumulative: Optional[float] = None
     current_change: Optional[float] = None
     change_rate: Optional[float] = None
+    source_chunk: int = 0
+    source_page: Optional[int] = None
+    source_row_text: str = ""
+    source_field_map: str = ""
 
 
 @dataclass
@@ -105,6 +113,8 @@ class MonitoringTable:
     equipment_model: str = ""
     borehole_id: str = ""
     borehole_depth: Optional[float] = None
+    source_chunk: int = 0
+    source_pages: str = ""
 
     points: list[MeasurementPoint] = field(default_factory=list)
     deep_points: list[DeepDisplacementPoint] = field(default_factory=list)

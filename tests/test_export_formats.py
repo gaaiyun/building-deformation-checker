@@ -230,6 +230,54 @@ class TestGenerateIntermediateXlsx(unittest.TestCase):
         self.assertIn("P1", rows[1])
         self.assertIn(1.0, rows[1])
 
+    def test_standardized_point_sheet_contains_source_provenance(self):
+        report = _make_minimal_report()
+        table = report.tables[0]
+        point = table.points[0]
+        table.source_chunk = 2
+        table.source_pages = "7-8"
+        point.source_chunk = 2
+        point.source_page = 7
+        point.source_row_text = "| P1 | 0.0 | 1.0 | 0.5 |"
+        point.source_field_map = '{"initial_value":2,"current_value":3,"current_change":4}'
+
+        out = generate_intermediate_xlsx(report)
+        wb = load_workbook(io.BytesIO(out), read_only=True, data_only=True)
+        ws = wb["02_标准化测点"]
+        rows = list(ws.iter_rows(values_only=True))
+
+        self.assertEqual(rows[0][-4:], ("来源分块", "来源页", "原始行", "字段列映射"))
+        self.assertEqual(
+            rows[1][-4:],
+            (2, 7, "| P1 | 0.0 | 1.0 | 0.5 |", '{"initial_value":2,"current_value":3,"current_change":4}'),
+        )
+
+    def test_intermediate_xlsx_contains_raw_candidate_tables_and_cells(self):
+        report = _make_minimal_report()
+        report.extraction_diagnostics["raw_table_candidates"] = [{
+            "table_id": "P007-T01",
+            "engine": "pdfplumber",
+            "page": 7,
+            "table_index": 0,
+            "row_count": 2,
+            "col_count": 3,
+            "title_preview": "监测成果表",
+            "quality_flags": ["跨页续表候选"],
+            "rows": [["测点", "累计变化", "速率"], ["S1", "1.2", "0.1"]],
+        }]
+
+        out = generate_intermediate_xlsx(report)
+        wb = load_workbook(io.BytesIO(out), read_only=True, data_only=True)
+
+        self.assertIn("00A_候选表清单", wb.sheetnames)
+        self.assertIn("00B_候选表单元格", wb.sheetnames)
+        inventory = list(wb["00A_候选表清单"].iter_rows(values_only=True))
+        cells = list(wb["00B_候选表单元格"].iter_rows(values_only=True))
+        self.assertEqual(inventory[1][0], "P007-T01")
+        self.assertIn("跨页续表候选", inventory[1][-1])
+        self.assertEqual(cells[1], ("P007-T01", "pdfplumber", 7, 1, 1, "测点"))
+        self.assertEqual(cells[-1], ("P007-T01", "pdfplumber", 7, 2, 3, "0.1"))
+
     def test_issue_sheet_contains_all_issue_sources(self):
         report = _make_minimal_report()
         out = generate_intermediate_xlsx(

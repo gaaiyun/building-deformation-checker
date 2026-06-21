@@ -83,6 +83,33 @@ class CalculationCheckerTests(unittest.TestCase):
 
         self.assertFalse(any(issue.field_name == "累计变化量" for issue in issues))
 
+    def test_anchor_force_skips_initial_subtraction_when_columns_are_not_comparable(self):
+        table = MonitoringTable(
+            monitoring_item="锚索拉力观测结果",
+            category=MonitoringCategory.ANCHOR_FORCE,
+            verification_config=TableVerificationConfig(
+                unit="kN",
+                initial_value_reliable=False,
+            ),
+            points=[
+                MeasurementPoint(
+                    point_id="MS2",
+                    initial_value=153.0,
+                    current_value=10.9,
+                    current_change=1.3,
+                    cumulative_change=10.9,
+                    change_rate=1.3,
+                )
+            ],
+        )
+
+        issues = run_calculation_checks(MonitoringReport(tables=[table]))
+
+        self.assertFalse(
+            any(issue.field_name == "累计变化量" for issue in issues),
+            [issue.message for issue in issues],
+        )
+
     def test_rate_validation_prefers_consistent_row_inferred_interval(self):
         table = MonitoringTable(
             monitoring_item="支护结构顶部水平位移",
@@ -222,7 +249,7 @@ class CalculationCheckerTests(unittest.TestCase):
 
 
 class IntervalInferenceArbitrationTests(unittest.TestCase):
-    """v2 修复：configured 与 inferred 显著差距时，按行级支持率仲裁。
+    """configured 与 inferred 显著差距时，按行级支持率仲裁。
 
     场景：XLSX 模板把多期数据并到一张 sheet，每期间隔 2 天但 LLM 从报告
     日期范围抽到 7 天作为 configured。v1 在差距 >2 天时盲信 configured，
