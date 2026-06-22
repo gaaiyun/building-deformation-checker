@@ -766,5 +766,39 @@ class LlmParserTests(unittest.TestCase):
         self.assertIn("周边地面沉降", items)
 
 
+    def test_chunk_incomplete_ignores_metadata_dates(self):
+        """监测时间段行中的日期不应计入表日期计数，避免虚假重试。"""
+        from src.tools.llm_parser import _chunk_result_incomplete_reason
+
+        chunk = (
+            "附表 2-1-1 基坑顶水平位移观测结果表\n"
+            "监测时间段: 2024-01-15 至 2024-01-22\n"
+            "第5次 2024-01-22\n"
+        )
+        parsed = {
+            "tables": [{
+                "monitoring_item": "基坑顶水平位移",
+                "monitor_date": "2024-01-22",
+                "point_count": 2,
+                "points": [{"point_id": "WY1"}, {"point_id": "WY2"}],
+            }],
+        }
+        reason = _chunk_result_incomplete_reason(chunk, parsed)
+        self.assertEqual(reason, "", f"不应因元数据日期误判为不完整: {reason}")
+
+    def test_chunk_incomplete_keeps_single_monitor_date_in_table_header(self):
+        """单期表头即使含“监测时间”，其日期仍必须参与表完整性校验。"""
+        from src.tools.llm_parser import _chunk_result_incomplete_reason
+
+        chunk = (
+            "附表 2-1-1 基坑顶水平位移观测结果表\n"
+            "监测时间：2024-01-22\n"
+            "| 测点 | 本次变化 | 累计变化 |\n"
+            "| WY1 | 0.2 | 1.5 |\n"
+        )
+        reason = _chunk_result_incomplete_reason(chunk, {"tables": []})
+        self.assertIn("原文含 1 个监测日期", reason)
+
+
 if __name__ == "__main__":
     unittest.main()

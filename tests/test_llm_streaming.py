@@ -48,6 +48,74 @@ def test_call_chat_completion_streams_and_joins_content(monkeypatch):
     assert captured["stream"] is True
 
 
+def test_stream_response_close_called_when_available(monkeypatch):
+    """resp.close() 必须在流式迭代后调用，防止连接泄漏。"""
+    import src.config as cfg
+    from src.utils import llm_client
+
+    close_called = []
+
+    class ClosableStream:
+        def __init__(self):
+            self._events = iter([_stream_event(content="ok")])
+        def __iter__(self):
+            return self._events.__iter__()
+        def __next__(self):
+            return next(self._events)
+        def close(self):
+            close_called.append(True)
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            return ClosableStream()
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=FakeCompletions()),
+    )
+    monkeypatch.setattr(llm_client, "create_openai_client", lambda **_: fake_client)
+    monkeypatch.setattr(cfg, "LLM_MODEL", "test-model")
+    monkeypatch.setattr(cfg, "LLM_BASE_URL", "https://test")
+    monkeypatch.setenv("LLM_USE_CACHE", "0")
+
+    result = llm_client.call_chat_completion(
+        [{"role": "user", "content": "x"}], stream=True, max_retries=0,
+    )
+    assert result == "ok"
+    assert close_called, "resp.close() was not called after streaming"
+
+
+def test_openai_client_closed_after_call(monkeypatch):
+    """每次调用创建的 OpenAI/httpx 客户端必须在函数退出前关闭。"""
+    import src.config as cfg
+    from src.utils import llm_client
+
+    close_called = []
+
+    class FakeClient:
+        def __init__(self):
+            self.chat = SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=lambda **_: SimpleNamespace(
+                        choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
+                    ),
+                ),
+            )
+
+        def close(self):
+            close_called.append(True)
+
+    monkeypatch.setattr(llm_client, "create_openai_client", lambda **_: FakeClient())
+    monkeypatch.setattr(cfg, "LLM_MODEL", "test-model")
+    monkeypatch.setattr(cfg, "LLM_BASE_URL", "https://test")
+    monkeypatch.setenv("LLM_USE_CACHE", "0")
+
+    result = llm_client.call_chat_completion(
+        [{"role": "user", "content": "x"}], stream=False, max_retries=0,
+    )
+    assert result == "ok"
+    assert close_called, "OpenAI client was not closed after completion"
+
+
 def test_structured_parser_enables_streaming(monkeypatch):
     from src.tools import llm_parser
 

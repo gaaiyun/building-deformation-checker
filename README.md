@@ -30,10 +30,9 @@
 
 三个入口共享同一个核心引擎（`src/core/pipeline.py`），结果完全一致。
 
-> **截图占位**
-> - `docs/screenshots/desktop_running.png` — 桌面版运行态（8 步进度条 + 实时日志）
-> - `docs/screenshots/desktop_done.png` — 桌面版完成态（8 个结果 Tab）
-> - `docs/screenshots/streamlit_done.png` — Streamlit 完成态
+> **本地 UI 证据**
+> - Streamlit Playwright smoke 截图保存在 `G:\dev-cache\bdc-ui-qa\`，不随仓库提交。
+> - 桌面 EXE/MSI smoke 以 `docs/实际测试报告.md` 中的命令和 SHA256 为准。
 
 ---
 

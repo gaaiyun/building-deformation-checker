@@ -208,5 +208,26 @@ class StatisticsCheckerTests(unittest.TestCase):
         )
 
 
+    def test_anchor_max_force_tolerates_absolute_value_convention(self):
+        """报告用绝对值表示最大内力(20.3)但实际值带符号(-20.3)时不应报错。"""
+        table = MonitoringTable(
+            monitoring_item="锚索拉力",
+            category=MonitoringCategory.ANCHOR_FORCE,
+            points=[
+                MeasurementPoint(point_id="MS5", current_value=15.5),
+                MeasurementPoint(point_id="MS9-3", current_value=-20.3),
+            ],
+            statistics=StatisticsSummary(
+                max_force_id="MS9-3",
+                max_force_value=20.3,
+            ),
+        )
+        issues = run_statistics_checks(MonitoringReport(tables=[table]))
+        self.assertFalse(
+            any(issue.severity == "error" and issue.field_name == "最大内力" for issue in issues),
+            [issue.message for issue in issues],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

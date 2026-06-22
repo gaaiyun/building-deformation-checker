@@ -281,7 +281,8 @@ def check_table_statistics(
             actual_min_id, actual_min_val = min(force_vals, key=lambda x: x[1])
 
             if stats.max_force_value is not None:
-                if not _close(actual_max_val, stats.max_force_value, FLOAT_TOLERANCE):
+                if not _close(actual_max_val, stats.max_force_value, FLOAT_TOLERANCE) and \
+                   not _close(abs(actual_max_val), abs(stats.max_force_value), FLOAT_TOLERANCE):
                     issues.append(CheckIssue(
                         severity="error", table_name=table_label,
                         point_id=actual_max_id, field_name="最大内力",

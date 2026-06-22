@@ -773,6 +773,24 @@ def _source_page_at_line(lines: list[str], line_index: int) -> int | None:
     return page
 
 
+_BACKWARD_SCAN_MAX = 60
+
+
+def _backward_window(lines: list[str], from_index: int) -> list[str]:
+    """从 from_index 向上扫描非页标记行，最多回溯 _BACKWARD_SCAN_MAX 行，允许跨 1 个页界。"""
+    window: list[str] = []
+    page_markers = 0
+    for index in range(from_index - 1, max(-1, from_index - _BACKWARD_SCAN_MAX - 1), -1):
+        line = lines[index].strip()
+        if _PAGE_MARKER_RE.search(line):
+            page_markers += 1
+            if page_markers > 1:
+                break
+            continue
+        window.append(line)
+    return window
+
+
 def _candidate_value_tokens(record: dict[str, Any]) -> list[str]:
     tokens: set[str] = set()
     for key in (
@@ -819,7 +837,7 @@ def _find_source_row_detail(
         table_score = int(stripped.startswith("|") and stripped.endswith("|"))
         nearby_dates: set[str] = set()
         page_markers = 0
-        for prior_index in range(index - 1, max(-1, index - 61), -1):
+        for prior_index in range(index - 1, max(-1, index - _BACKWARD_SCAN_MAX - 1), -1):
             prior_line = lines[prior_index].strip()
             if _PAGE_MARKER_RE.search(prior_line):
                 page_markers += 1
@@ -840,22 +858,6 @@ def _find_source_row_detail(
     _, _, _, negative_index, row_text = max(candidates)
     line_index = -negative_index
     return _source_page_at_line(lines, line_index), line_index, row_text
-
-
-def _find_source_row(
-    lines: list[str],
-    *,
-    identifier: str,
-    record: dict[str, Any],
-    monitor_date: str = "",
-) -> tuple[int | None, str]:
-    page, _, row_text = _find_source_row_detail(
-        lines,
-        identifier=identifier,
-        record=record,
-        monitor_date=monitor_date,
-    )
-    return page, row_text
 
 
 def _split_source_cells(row_text: str) -> list[str]:
@@ -901,16 +903,7 @@ def _nearest_source_header(
 ) -> list[str]:
     if row_index is None or row_cell_count <= 0:
         return []
-    window: list[str] = []
-    page_markers = 0
-    for index in range(row_index - 1, max(-1, row_index - 61), -1):
-        line = lines[index].strip()
-        if _PAGE_MARKER_RE.search(line):
-            page_markers += 1
-            if page_markers > 1:
-                break
-            continue
-        window.append(line)
+    window = _backward_window(lines, row_index)
 
     has_point_label = any(
         any(label in line for label in ("测点编号", "测点", "孔号", "测孔编号"))
@@ -965,16 +958,7 @@ def _wide_date_group_columns(
     if row_index is None or not target_date:
         return {}
 
-    window: list[str] = []
-    page_markers = 0
-    for index in range(row_index - 1, max(-1, row_index - 61), -1):
-        line = lines[index].strip()
-        if _PAGE_MARKER_RE.search(line):
-            page_markers += 1
-            if page_markers > 1:
-                break
-            continue
-        window.append(line)
+    window = _backward_window(lines, row_index)
 
     dates: list[str] = []
     for line in window:
@@ -1152,7 +1136,13 @@ def _chunk_result_incomplete_reason(chunk: str, parsed: dict[str, Any]) -> str:
     if not isinstance(tables, list):
         return "tables 不是数组"
 
-    dates = set(re.findall(r"20\d{2}[-/.]\d{1,2}[-/.]\d{1,2}", chunk))
+    _PERIOD_DATE_KW = ("监测时间", "时间段", "监测期")
+    dates: set[str] = set()
+    for _line in chunk.splitlines():
+        line_dates = re.findall(r"20\d{2}[-/.]\d{1,2}[-/.]\d{1,2}", _line)
+        if len(line_dates) >= 2 and any(kw in _line for kw in _PERIOD_DATE_KW):
+            continue
+        dates.update(line_dates)
     if dates and len(tables) < len(dates):
         return f"原文含 {len(dates)} 个监测日期，但只返回 {len(tables)} 张表"
 

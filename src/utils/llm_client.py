@@ -125,6 +125,15 @@ def call_chat_completion(
     # 统一关闭 SDK 隐式重试，避免与本模块显式重试叠加导致长时间阻塞。
     client = create_openai_client(max_retries=0)
 
+    def close_client() -> None:
+        close = getattr(client, "close", None)
+        if not callable(close):
+            return
+        try:
+            close()
+        except Exception:
+            logger.debug("关闭 LLM 客户端失败", exc_info=True)
+
     last_exc = None
     for attempt in range(1 + retries):
         try:
@@ -138,13 +147,21 @@ def call_chat_completion(
             )
             if stream:
                 content_parts: list[str] = []
-                for event in resp:
-                    if not getattr(event, "choices", None):
-                        continue
-                    delta = event.choices[0].delta
-                    content = getattr(delta, "content", None)
-                    if content:
-                        content_parts.append(content)
+                try:
+                    for event in resp:
+                        if not getattr(event, "choices", None):
+                            continue
+                        delta = event.choices[0].delta
+                        content = getattr(delta, "content", None)
+                        if content:
+                            content_parts.append(content)
+                finally:
+                    close_response = getattr(resp, "close", None)
+                    if callable(close_response):
+                        try:
+                            close_response()
+                        except Exception:
+                            logger.debug("关闭 LLM 流式响应失败", exc_info=True)
                 raw = "".join(content_parts)
             else:
                 raw = resp.choices[0].message.content or ""
@@ -156,6 +173,7 @@ def call_chat_completion(
                     cache_dir, cache_key, raw,
                     params={"model": cfg.LLM_MODEL, "temperature": temperature, "max_tokens": max_tokens},
                 )
+            close_client()
             return raw
         except Exception as e:
             last_exc = e
@@ -166,6 +184,7 @@ def call_chat_completion(
             else:
                 logger.error("LLM 调用失败，已达最大重试次数: %s", e)
 
+    close_client()
     return None
 
 

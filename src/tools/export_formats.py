@@ -286,7 +286,9 @@ def _safe_excel_value(value) -> str | float | int:
     value = _fmt(value)
     if isinstance(value, str):
         stripped = value.lstrip()
-        if stripped.startswith(("=", "+", "-", "@")):
+        if stripped.startswith(("=", "+", "@")):
+            return "'" + value
+        if stripped.startswith("-") and stripped[1:2].isalpha():
             return "'" + value
     return value
 

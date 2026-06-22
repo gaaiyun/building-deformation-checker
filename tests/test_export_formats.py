@@ -311,5 +311,20 @@ class TestGenerateIntermediateXlsx(unittest.TestCase):
         self.assertIn("'@危险说明", issue_ws["H2"].value)
 
 
+    def test_safe_excel_value_preserves_negative_number_strings(self):
+        """以负数开头的来源行文本不应被加撇号。"""
+        from src.tools.export_formats import _safe_excel_value
+
+        self.assertEqual(_safe_excel_value("-2.5 | 0.13 | 0.8"), "-2.5 | 0.13 | 0.8")
+        self.assertEqual(_safe_excel_value("-.3 data"), "-.3 data")
+        self.assertEqual(_safe_excel_value("-0.0 | 0.0"), "-0.0 | 0.0")
+        # 仍然保护以 - 后跟字母的公式风险字符串
+        self.assertEqual(_safe_excel_value("-SUM(A1)"), "'-SUM(A1)")
+        # 其他公式前缀仍保护
+        self.assertEqual(_safe_excel_value("=1+1"), "'=1+1")
+        self.assertEqual(_safe_excel_value("+1"), "'+1")
+        self.assertEqual(_safe_excel_value("@ref"), "'@ref")
+
+
 if __name__ == "__main__":
     unittest.main()
