@@ -21,7 +21,7 @@ def test_desktop_build_script_supports_exe_and_optional_msi_without_keys():
     for token in ['"python"', '"-m"', '"PyInstaller"', '"build_desktop.spec"']:
         assert token in script
     assert "BuildMsi" in script
-    assert '[string]$Version = "2.1.10"' in script
+    assert '[string]$Version = "2.1.11"' in script
     assert "WixToolPath" in script
     assert "Invoke-Native" in script
     assert "$LASTEXITCODE" in script
