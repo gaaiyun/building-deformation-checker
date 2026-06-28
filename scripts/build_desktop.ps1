@@ -9,6 +9,9 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $root
 
+# Avoid leaking unrelated local projects into PyInstaller's module graph.
+$env:PYTHONPATH = $null
+
 $pyinstallerConfigDir = if ($env:PYINSTALLER_CONFIG_DIR) {
     $env:PYINSTALLER_CONFIG_DIR
 } else {

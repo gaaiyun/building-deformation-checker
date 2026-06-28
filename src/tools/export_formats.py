@@ -6,7 +6,11 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import io
+import os
+from pathlib import Path
+import tempfile
 from datetime import datetime
 
 from src.tools.extraction_quality import append_issue_source_hint
@@ -277,6 +281,64 @@ def _fmt(value) -> str | float | int:
     return str(value)
 
 
+def _is_xml_compatible_char(ch: str) -> bool:
+    codepoint = ord(ch)
+    return (
+        codepoint in (0x09, 0x0A, 0x0D)
+        or 0x20 <= codepoint <= 0xD7FF
+        or 0xE000 <= codepoint <= 0xFFFD
+        or 0x10000 <= codepoint <= 0x10FFFF
+    )
+
+
+def _sanitize_excel_text(value: str) -> str:
+    """Replace characters that cannot be serialized into XLSX XML parts."""
+    if all(_is_xml_compatible_char(ch) for ch in value):
+        return value
+    return "".join(ch if _is_xml_compatible_char(ch) else "\uFFFD" for ch in value)
+
+
+def _default_excel_temp_dir() -> Path | None:
+    configured = os.getenv("BDC_EXCEL_TEMP_DIR")
+    if configured:
+        return Path(configured)
+
+    g_cache = Path("G:/dev-cache/building-deformation-checker/openpyxl-temp")
+    if g_cache.drive and Path("G:/").exists():
+        return g_cache
+
+    return None
+
+
+@contextmanager
+def _openpyxl_tempdir():
+    """Route openpyxl worksheet temp files away from a full system temp drive."""
+    temp_dir = _default_excel_temp_dir()
+    if temp_dir is None:
+        yield
+        return
+
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    old_tempdir = tempfile.tempdir
+    old_tmp = os.environ.get("TMP")
+    old_temp = os.environ.get("TEMP")
+    tempfile.tempdir = str(temp_dir)
+    os.environ["TMP"] = str(temp_dir)
+    os.environ["TEMP"] = str(temp_dir)
+    try:
+        yield
+    finally:
+        tempfile.tempdir = old_tempdir
+        if old_tmp is None:
+            os.environ.pop("TMP", None)
+        else:
+            os.environ["TMP"] = old_tmp
+        if old_temp is None:
+            os.environ.pop("TEMP", None)
+        else:
+            os.environ["TEMP"] = old_temp
+
+
 def _safe_excel_value(value) -> str | float | int:
     """避免 PDF/LLM 文本被 Excel 当公式执行。
 
@@ -285,6 +347,7 @@ def _safe_excel_value(value) -> str | float | int:
     """
     value = _fmt(value)
     if isinstance(value, str):
+        value = _sanitize_excel_text(value)
         stripped = value.lstrip()
         if stripped.startswith(("=", "+", "@")):
             return "'" + value
@@ -698,7 +761,8 @@ def generate_intermediate_xlsx(
             ws["B2"].font = note_font
 
     buf = io.BytesIO()
-    wb.save(buf)
+    with _openpyxl_tempdir():
+        wb.save(buf)
     return buf.getvalue()
 
 

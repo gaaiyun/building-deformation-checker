@@ -22,6 +22,29 @@ block_cipher = None
 # 项目根目录
 PROJ_ROOT = Path(SPECPATH).resolve()
 
+
+def _is_external_workspace_path(raw_path: str) -> bool:
+    """Remove editable installs from sibling repos before PyInstaller analysis."""
+    if not raw_path:
+        return False
+    try:
+        path = Path(raw_path).resolve()
+        path.relative_to(PROJ_ROOT)
+        return False
+    except ValueError:
+        pass
+    except OSError:
+        return False
+
+    try:
+        path.relative_to(PROJ_ROOT.parent)
+        return True
+    except ValueError:
+        return False
+
+
+sys.path[:] = [path for path in sys.path if not _is_external_workspace_path(path)]
+
 # ─── Analysis 阶段 ─────────────────────────────────────
 a = Analysis(
     ['desktop.py'],

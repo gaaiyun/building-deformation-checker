@@ -25,6 +25,7 @@ def test_desktop_build_script_supports_exe_and_optional_msi_without_keys():
     assert "WixToolPath" in script
     assert "Invoke-Native" in script
     assert "$LASTEXITCODE" in script
+    assert '$env:PYTHONPATH = $null' in script
     assert "wix.exe" in script
     assert "BuildingDeformationChecker.msi" in script
     assert "Copy-Item" in script
@@ -33,6 +34,8 @@ def test_desktop_build_script_supports_exe_and_optional_msi_without_keys():
     assert "BuildingDeformationChecker.exe" in wxs
     assert 'Scope="perUser"' in wxs
     assert 'StandardDirectory Id="LocalAppDataFolder"' in wxs
+    assert "_is_external_workspace_path" in spec
+    assert "sys.path[:]" in spec
     assert "city_safety_iot.ico" in spec
     assert "city_safety_iot.ico" in wxs
     assert "ARPPRODUCTICON" in wxs

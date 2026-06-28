@@ -325,6 +325,32 @@ class TestGenerateIntermediateXlsx(unittest.TestCase):
         self.assertEqual(_safe_excel_value("+1"), "'+1")
         self.assertEqual(_safe_excel_value("@ref"), "'@ref")
 
+    def test_intermediate_xlsx_sanitizes_xml_incompatible_text(self):
+        """PDF/OCR 原始文本中的非法 XML 字符不应导致 Excel 保存失败。"""
+        report = _make_minimal_report(project_name=f"坏{chr(0xD800)}项目")
+        point = report.tables[0].points[0]
+        point.source_row_text = f"P1 | 1.0 | 坏{chr(0xFFFE)}单元格"
+        report.extraction_diagnostics["raw_table_candidates"] = [{
+            "table_id": "P001-T01",
+            "engine": "pdfplumber",
+            "page": 1,
+            "table_index": 0,
+            "row_count": 1,
+            "col_count": 1,
+            "title_preview": f"标题{chr(0xDFFF)}",
+            "rows": [[f"单元{chr(0xFFFF)}格"]],
+        }]
+
+        out = generate_intermediate_xlsx(report)
+
+        wb = load_workbook(io.BytesIO(out), read_only=True, data_only=True)
+        overview_value = wb["00_报告概览"]["B2"].value
+        point_row = list(wb["02_标准化测点"].iter_rows(values_only=True))[1]
+        raw_cell_row = list(wb["00B_候选表单元格"].iter_rows(values_only=True))[1]
+        self.assertIn("�", overview_value)
+        self.assertIn("�", point_row[-2])
+        self.assertIn("�", raw_cell_row[-1])
+
 
 if __name__ == "__main__":
     unittest.main()
